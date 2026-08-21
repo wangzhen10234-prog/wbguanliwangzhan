@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 const allBars = [34, 46, 39, 55, 49, 63, 57, 42, 57, 48, 72, 64, 77, 69, 92, 74, 81, 88, 70, 79, 96];
 
@@ -19,18 +19,114 @@ const ranges = {
 
 type RangeKey = keyof typeof ranges;
 
+const MS_PER_DAY = 86_400_000;
+
+function toInputDate(date: Date) {
+  return date.toISOString().slice(0, 10);
+}
+
+function shiftDate(dateString: string, days: number) {
+  const date = new Date(`${dateString}T12:00:00`);
+  date.setDate(date.getDate() + days);
+  return toInputDate(date);
+}
+
+function countDays(start: string, end: string) {
+  return Math.max(1, Math.round((new Date(`${end}T12:00:00`).getTime() - new Date(`${start}T12:00:00`).getTime()) / MS_PER_DAY) + 1);
+}
+
+function formatDate(dateString: string) {
+  const date = new Date(`${dateString}T12:00:00`);
+  return `${date.getMonth() + 1}月 ${date.getDate()}日`;
+}
+
+function formatShortDate(dateString: string) {
+  const date = new Date(`${dateString}T12:00:00`);
+  return `${date.getMonth() + 1}/${date.getDate()}`;
+}
+
+function formatRubles(value: number) {
+  return `₽ ${Math.round(value).toLocaleString("en-US")}`;
+}
+
+function formatCompactRubles(value: number) {
+  return value >= 1_000_000 ? `₽${(value / 1_000_000).toFixed(2)}M` : `₽${Math.round(value / 1_000)}K`;
+}
+
 export default function Home() {
-  const [range, setRange] = useState<RangeKey>("21");
+  const today = toInputDate(new Date());
+  const [range, setRange] = useState<RangeKey | "custom">("21");
+  const [customStart, setCustomStart] = useState(() => shiftDate(today, -20));
+  const [customEnd, setCustomEnd] = useState(today);
+  const [appliedStart, setAppliedStart] = useState(() => shiftDate(today, -20));
+  const [appliedEnd, setAppliedEnd] = useState(today);
+  const [showDatePicker, setShowDatePicker] = useState(false);
+  const [dateError, setDateError] = useState("");
   const [showConnect, setShowConnect] = useState(false);
   const [copied, setCopied] = useState(false);
-  const active = ranges[range];
-  const bars = allBars.slice(-Number(range));
+  const dateControlRef = useRef<HTMLDivElement>(null);
+  const periodEnd = range === "custom" ? appliedEnd : today;
+  const periodStart = range === "custom" ? appliedStart : shiftDate(today, -(Number(range) - 1));
+  const periodDays = countDays(periodStart, periodEnd);
+  const customSales = Math.round((1_284_620 / 21) * periodDays);
+  const active = range === "custom" ? {
+    label: `自定义 · ${periodDays} 天`,
+    date: `${formatDate(periodStart)} — ${formatDate(periodEnd)}`,
+    sales: formatRubles(customSales),
+    shortSales: formatCompactRubles(customSales),
+    orders: Math.round((1_847 / 21) * periodDays).toLocaleString("en-US"),
+    profit: formatRubles((326_480 / 21) * periodDays),
+    returns: "7.6%",
+    average: formatRubles(customSales / periodDays),
+    peak: "₽ 108,420",
+  } : { ...ranges[range], date: `${formatDate(periodStart)} — ${formatDate(periodEnd)}` };
+  const pointCount = Math.min(periodDays, 21);
+  const seed = Math.abs(Math.floor(new Date(`${periodStart}T12:00:00`).getTime() / MS_PER_DAY));
+  const bars = Array.from({ length: pointCount }, (_, index) => allBars[(seed + index) % allBars.length]);
+  const barDates = Array.from({ length: pointCount }, (_, index) => shiftDate(periodStart, pointCount === 1 ? 0 : Math.round((index * (periodDays - 1)) / (pointCount - 1))));
+  const labelEvery = pointCount > 14 ? 3 : pointCount > 7 ? 2 : 1;
 
   useEffect(() => {
-    const closeOnEscape = (event: KeyboardEvent) => event.key === "Escape" && setShowConnect(false);
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setShowConnect(false);
+        setShowDatePicker(false);
+      }
+    };
+    const closeDatePicker = (event: PointerEvent) => {
+      if (dateControlRef.current && !dateControlRef.current.contains(event.target as Node)) setShowDatePicker(false);
+    };
     window.addEventListener("keydown", closeOnEscape);
-    return () => window.removeEventListener("keydown", closeOnEscape);
+    window.addEventListener("pointerdown", closeDatePicker);
+    return () => {
+      window.removeEventListener("keydown", closeOnEscape);
+      window.removeEventListener("pointerdown", closeDatePicker);
+    };
   }, []);
+
+  function choosePreset(value: RangeKey) {
+    setRange(value);
+    setCustomStart(shiftDate(today, -(Number(value) - 1)));
+    setCustomEnd(today);
+    setDateError("");
+    setShowDatePicker(false);
+  }
+
+  function applyCustomRange() {
+    if (!customStart || !customEnd) {
+      setDateError("请选择完整的开始和结束日期");
+      return;
+    }
+    if (customStart > customEnd) {
+      setDateError("开始日期不能晚于结束日期");
+      return;
+    }
+    setAppliedStart(customStart);
+    setAppliedEnd(customEnd);
+    setRange("custom");
+    setDateError("");
+    setShowDatePicker(false);
+  }
 
   function exportCsv() {
     const header = ["商品名称", "SKU", "类目", "销售额(卢布)", "订单数", "转化率"];
@@ -39,7 +135,7 @@ export default function Home() {
     const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
     const link = document.createElement("a");
     link.href = url;
-    link.download = `wb-insight-${range}days.csv`;
+    link.download = `wb-insight-${periodStart}-${periodEnd}.csv`;
     link.click();
     URL.revokeObjectURL(url);
   }
@@ -77,7 +173,17 @@ export default function Home() {
           <div><p className="eyebrow">Панель продавца · Demo workspace</p><h1>经营总览</h1></div>
           <div className="top-actions">
             <button className="export-button" onClick={exportCsv}>↓ 导出 CSV</button>
-            <label className="date-button"><span>◫</span><select value={range} onChange={(event) => setRange(event.target.value as RangeKey)} aria-label="选择分析周期"><option value="7">近 7 天</option><option value="14">近 14 天</option><option value="21">近 21 天</option></select><b>{active.date}</b></label>
+            <div className="date-control" ref={dateControlRef}>
+              <button className="date-button" onClick={() => setShowDatePicker((open) => !open)} aria-expanded={showDatePicker} aria-haspopup="dialog"><span>◫</span><em>{range === "custom" ? "自定义" : ranges[range].label}</em><b>{active.date}</b><i>⌄</i></button>
+              {showDatePicker && <section className="date-popover" role="dialog" aria-label="选择分析周期">
+                <div className="date-popover-head"><div><strong>选择时间周期</strong><small>指标、图表和导出数据会同步更新</small></div><button onClick={() => setShowDatePicker(false)} aria-label="关闭">×</button></div>
+                <div className="quick-ranges" aria-label="快捷周期"><button className={range === "7" ? "selected" : ""} onClick={() => choosePreset("7")}>近 7 天</button><button className={range === "14" ? "selected" : ""} onClick={() => choosePreset("14")}>近 14 天</button><button className={range === "21" ? "selected" : ""} onClick={() => choosePreset("21")}>近 21 天</button></div>
+                <div className="custom-range-title"><span>自定义日期</span><i /></div>
+                <div className="date-inputs"><label><span>开始日期</span><input type="date" value={customStart} max={today} onChange={(event) => { setCustomStart(event.target.value); setDateError(""); }} /></label><b>→</b><label><span>结束日期</span><input type="date" value={customEnd} min={customStart} max={today} onChange={(event) => { setCustomEnd(event.target.value); setDateError(""); }} /></label></div>
+                {dateError && <p className="date-error" role="alert">{dateError}</p>}
+                <div className="date-popover-foot"><span>{customStart && customEnd && customStart <= customEnd ? `共 ${countDays(customStart, customEnd)} 天` : "请选择有效日期"}</span><button onClick={applyCustomRange}>应用此周期</button></div>
+              </section>}
+            </div>
             <div className="avatar">Z</div>
           </div>
         </header>
@@ -98,7 +204,7 @@ export default function Home() {
         <section className="dashboard-grid" id="sales">
           <article className="panel sales-panel">
             <div className="panel-title"><div><h2>销售趋势</h2><p>{active.label}每日销售额表现</p></div><div className="legend"><span><i className="purple-dot" />销售额</span><span><i className="gray-dot" />订单</span></div></div>
-            <div className="chart-wrap"><div className="y-axis"><span>₽120K</span><span>₽90K</span><span>₽60K</span><span>₽30K</span><span>₽0</span></div><div className="bar-chart">{bars.map((height, index) => <div className="bar-col" key={`${range}-${index}`}><span className={index === bars.length - 1 ? "bar current" : "bar"} style={{height: `${height}%`}} /><small>{index % (range === "21" ? 3 : 2) === 0 ? `${22 - bars.length + index}日` : ""}</small></div>)}</div></div>
+            <div className="chart-wrap"><div className="y-axis"><span>₽120K</span><span>₽90K</span><span>₽60K</span><span>₽30K</span><span>₽0</span></div><div className="bar-chart">{bars.map((height, index) => <div className="bar-col" key={`${periodStart}-${index}`} title={`${formatDate(barDates[index])} · 演示销售指数 ${height}`}><span className={index === bars.length - 1 ? "bar current" : "bar"} style={{height: `${height}%`}} /><small>{index % labelEvery === 0 || index === bars.length - 1 ? formatShortDate(barDates[index]) : ""}</small></div>)}</div></div>
             <div className="chart-summary"><span>本期日均销售额 <b>{active.average}</b></span><span>峰值 <b>{active.peak}</b></span></div>
           </article>
           <article className="panel category-panel"><div className="panel-title"><div><h2>类目贡献</h2><p>销售额占比</p></div><span className="panel-tag">演示</span></div><div className="donut" aria-label="女装42%，家居28%，箱包18%，其他12%"><div><b>{active.shortSales}</b><small>总销售额</small></div></div><div className="category-list"><div><span><i className="c1" />女装</span><b>42%</b></div><div><span><i className="c2" />家居</span><b>28%</b></div><div><span><i className="c3" />箱包</span><b>18%</b></div><div><span><i className="c4" />其他</span><b>12%</b></div></div></article>
