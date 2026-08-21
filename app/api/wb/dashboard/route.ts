@@ -23,14 +23,17 @@ type WbStock = {
 };
 
 type CacheEntry<T> = { value: T; expiresAt: number };
+type WorkerCacheStorage = CacheStorage & { default?: Cache };
 
 let statisticsCache: CacheEntry<{ orders: WbOrder[]; sales: WbSale[] }> | null = null;
 let stockCache: CacheEntry<WbStock[]> | null = null;
 let balanceCache: CacheEntry<{ current?: number; for_withdraw?: number }> | null = null;
 
 const DAY_MS = 86_400_000;
+const CACHE_MS = 5 * 60_000;
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const JSON_HEADERS = { "Content-Type": "application/json; charset=utf-8" };
+const EDGE_CACHE_BASE = "https://wb-insight-cache.invalid/v1";
 
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -59,6 +62,33 @@ function isReturn(row: WbSale) {
   return String(row.saleID || "").toUpperCase().startsWith("R");
 }
 
+function edgeCache() {
+  return (globalThis.caches as WorkerCacheStorage | undefined)?.default;
+}
+
+async function readEdgeCache<T>(key: string): Promise<T | null> {
+  try {
+    const cache = edgeCache();
+    if (!cache) return null;
+    const response = await cache.match(new Request(`${EDGE_CACHE_BASE}/${key}`));
+    return response ? await response.json() as T : null;
+  } catch {
+    return null;
+  }
+}
+
+async function writeEdgeCache(key: string, value: unknown) {
+  try {
+    const cache = edgeCache();
+    if (!cache) return;
+    await cache.put(new Request(`${EDGE_CACHE_BASE}/${key}`), new Response(JSON.stringify(value), {
+      headers: { "Content-Type": "application/json", "Cache-Control": "public, max-age=300" },
+    }));
+  } catch {
+    // Local development runtimes may not expose the Cloudflare default cache.
+  }
+}
+
 async function wbRequest<T>(url: string, token: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, {
     ...init,
@@ -81,35 +111,53 @@ async function wbRequest<T>(url: string, token: string, init?: RequestInit): Pro
 
 async function loadStatistics(token: string) {
   if (statisticsCache && statisticsCache.expiresAt > Date.now()) return statisticsCache.value;
+  const cached = await readEdgeCache<{ orders: WbOrder[]; sales: WbSale[] }>("statistics");
+  if (cached) {
+    statisticsCache = { value: cached, expiresAt: Date.now() + CACHE_MS };
+    return cached;
+  }
   const start = new Date(Date.now() - 89 * DAY_MS).toISOString().slice(0, 10);
   const base = "https://statistics-api.wildberries.ru/api/v1/supplier";
   const [orders, sales] = await Promise.all([
     wbRequest<WbOrder[]>(`${base}/orders?dateFrom=${start}&flag=0`, token),
     wbRequest<WbSale[]>(`${base}/sales?dateFrom=${start}&flag=0`, token),
   ]);
-  statisticsCache = { value: { orders, sales }, expiresAt: Date.now() + 60_000 };
+  statisticsCache = { value: { orders, sales }, expiresAt: Date.now() + CACHE_MS };
+  await writeEdgeCache("statistics", statisticsCache.value);
   return statisticsCache.value;
 }
 
 async function loadStocks(token: string) {
   if (stockCache && stockCache.expiresAt > Date.now()) return stockCache.value;
+  const cached = await readEdgeCache<WbStock[]>("stocks");
+  if (cached) {
+    stockCache = { value: cached, expiresAt: Date.now() + CACHE_MS };
+    return cached;
+  }
   const response = await wbRequest<{ data?: { items?: WbStock[] } }>(
     "https://seller-analytics-api.wildberries.ru/api/analytics/v1/stocks-report/wb-warehouses",
     token,
     { method: "POST", body: JSON.stringify({ nmIds: [], limit: 250000, offset: 0 }) },
   );
   const stocks = response.data?.items ?? [];
-  stockCache = { value: stocks, expiresAt: Date.now() + 60_000 };
+  stockCache = { value: stocks, expiresAt: Date.now() + CACHE_MS };
+  await writeEdgeCache("stocks", stocks);
   return stocks;
 }
 
 async function loadBalance(token: string) {
   if (balanceCache && balanceCache.expiresAt > Date.now()) return balanceCache.value;
+  const cached = await readEdgeCache<{ current?: number; for_withdraw?: number }>("balance");
+  if (cached) {
+    balanceCache = { value: cached, expiresAt: Date.now() + CACHE_MS };
+    return cached;
+  }
   const balance = await wbRequest<{ current?: number; for_withdraw?: number }>(
     "https://finance-api.wildberries.ru/api/v1/account/balance",
     token,
   );
-  balanceCache = { value: balance, expiresAt: Date.now() + 60_000 };
+  balanceCache = { value: balance, expiresAt: Date.now() + CACHE_MS };
+  await writeEdgeCache("balance", balance);
   return balance;
 }
 
