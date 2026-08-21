@@ -22,12 +22,29 @@ type WbStock = {
   inWayFromClient?: number;
 };
 
+type WbCard = {
+  nmID?: number;
+  vendorCode?: string;
+  brand?: string;
+  title?: string;
+  subjectName?: string;
+};
+
+type WbFeedback = {
+  id?: string;
+  productValuation?: number;
+  createdDate?: string;
+  productDetails?: { nmId?: number };
+};
+
 type CacheEntry<T> = { value: T; expiresAt: number };
 type WorkerCacheStorage = CacheStorage & { default?: Cache };
 
 let statisticsCache: CacheEntry<{ orders: WbOrder[]; sales: WbSale[] }> | null = null;
 let stockCache: CacheEntry<WbStock[]> | null = null;
 let balanceCache: CacheEntry<{ current?: number; for_withdraw?: number }> | null = null;
+let cardsCache: CacheEntry<WbCard[]> | null = null;
+let feedbacksCache: CacheEntry<WbFeedback[]> | null = null;
 
 const DAY_MS = 86_400_000;
 const CACHE_MS = 5 * 60_000;
@@ -161,6 +178,65 @@ async function loadBalance(token: string) {
   return balance;
 }
 
+async function loadCards(token: string) {
+  if (cardsCache && cardsCache.expiresAt > Date.now()) return cardsCache.value;
+  const cached = await readEdgeCache<WbCard[]>("cards");
+  if (cached) {
+    cardsCache = { value: cached, expiresAt: Date.now() + CACHE_MS };
+    return cached;
+  }
+
+  const cards: WbCard[] = [];
+  let cursor: { updatedAt?: string; nmID?: number } = {};
+  for (let page = 0; page < 50; page += 1) {
+    const response = await wbRequest<{ cards?: WbCard[]; cursor?: { updatedAt?: string; nmID?: number; total?: number } }>(
+      "https://content-api.wildberries.ru/content/v2/get/cards/list",
+      token,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          settings: {
+            sort: { ascending: true },
+            cursor: { limit: 100, ...cursor },
+            filter: { withPhoto: -1 },
+          },
+        }),
+      },
+    );
+    const batch = response.cards ?? [];
+    cards.push(...batch);
+    if (batch.length < 100 || !response.cursor?.updatedAt || !response.cursor?.nmID) break;
+    cursor = { updatedAt: response.cursor.updatedAt, nmID: response.cursor.nmID };
+  }
+  cardsCache = { value: cards, expiresAt: Date.now() + CACHE_MS };
+  await writeEdgeCache("cards", cards);
+  return cards;
+}
+
+async function loadFeedbacks(token: string) {
+  if (feedbacksCache && feedbacksCache.expiresAt > Date.now()) return feedbacksCache.value;
+  const cached = await readEdgeCache<WbFeedback[]>("feedbacks");
+  if (cached) {
+    feedbacksCache = { value: cached, expiresAt: Date.now() + CACHE_MS };
+    return cached;
+  }
+
+  const base = "https://feedbacks-api.wildberries.ru/api/v1/feedbacks";
+  const [answered, unanswered] = await Promise.all([
+    wbRequest<{ data?: { feedbacks?: WbFeedback[] } }>(`${base}?isAnswered=true&take=5000&skip=0&order=dateDesc`, token),
+    wbRequest<{ data?: { feedbacks?: WbFeedback[] } }>(`${base}?isAnswered=false&take=5000&skip=0&order=dateDesc`, token),
+  ]);
+  const byId = new Map<string, WbFeedback>();
+  for (const feedback of [...(answered.data?.feedbacks ?? []), ...(unanswered.data?.feedbacks ?? [])]) {
+    const key = feedback.id || `${feedback.productDetails?.nmId}-${feedback.createdDate}-${feedback.productValuation}`;
+    byId.set(key, feedback);
+  }
+  const feedbacks = [...byId.values()];
+  feedbacksCache = { value: feedbacks, expiresAt: Date.now() + CACHE_MS };
+  await writeEdgeCache("feedbacks", feedbacks);
+  return feedbacks;
+}
+
 export async function GET(request: Request) {
   const token = process.env.WB_API_TOKEN?.trim();
   if (!token) return json({ error: "WB API 尚未配置" }, 503);
@@ -178,10 +254,12 @@ export async function GET(request: Request) {
   if (toValue > Date.now() + DAY_MS) return json({ error: "不能查询未来日期" }, 400);
 
   try {
-    const [statistics, stockResult, balanceResult] = await Promise.all([
+    const [statistics, stockResult, balanceResult, cardsResult, feedbacksResult] = await Promise.all([
       loadStatistics(token),
       loadStocks(token).catch(() => [] as WbStock[]),
       loadBalance(token).catch(() => ({})),
+      loadCards(token).catch(() => [] as WbCard[]),
+      loadFeedbacks(token).catch(() => [] as WbFeedback[]),
     ]);
 
     const inPeriod = (row: { date?: string }) => {
@@ -222,7 +300,50 @@ export async function GET(request: Request) {
       stockByProduct.set(stock.nmId, (stockByProduct.get(stock.nmId) ?? 0) + Number(stock.quantity || 0));
     }
 
-    const productMap = new Map<number, { nmId: number; name: string; sku: string; category: string; sales: number; orders: number; units: number; stock: number }>();
+    type ProductAccumulator = {
+      nmId: number;
+      name: string;
+      sku: string;
+      category: string;
+      brand: string;
+      sales: number;
+      orders: number;
+      grossSalesUnits: number;
+      returnsCount: number;
+      stock: number;
+    };
+    const productMap = new Map<number, ProductAccumulator>();
+    for (const card of cardsResult) {
+      const id = Number(card.nmID || 0);
+      if (!id) continue;
+      productMap.set(id, {
+        nmId: id,
+        name: card.title || card.subjectName || card.vendorCode || `WB ${id}`,
+        sku: card.vendorCode || String(id),
+        category: card.subjectName || "其他",
+        brand: card.brand || "—",
+        sales: 0,
+        orders: 0,
+        grossSalesUnits: 0,
+        returnsCount: 0,
+        stock: stockByProduct.get(id) ?? 0,
+      });
+    }
+    for (const [id, stock] of stockByProduct) {
+      if (productMap.has(id)) continue;
+      productMap.set(id, {
+        nmId: id,
+        name: `WB ${id}`,
+        sku: String(id),
+        category: "其他",
+        brand: "—",
+        sales: 0,
+        orders: 0,
+        grossSalesUnits: 0,
+        returnsCount: 0,
+        stock,
+      });
+    }
     const ensureProduct = (row: WbOrder) => {
       const id = Number(row.nmId || 0);
       if (!id) return null;
@@ -231,9 +352,11 @@ export async function GET(request: Request) {
         name: row.subject || row.supplierArticle || `WB ${id}`,
         sku: row.supplierArticle || String(id),
         category: row.category || row.brand || "其他",
+        brand: row.brand || "—",
         sales: 0,
         orders: 0,
-        units: 0,
+        grossSalesUnits: 0,
+        returnsCount: 0,
         stock: stockByProduct.get(id) ?? 0,
       });
       return productMap.get(id)!;
@@ -244,16 +367,61 @@ export async function GET(request: Request) {
     }
     for (const sale of completedSales) {
       const product = ensureProduct(sale);
-      if (product) { product.sales += amount(sale); product.units += 1; }
+      if (product) { product.sales += amount(sale); product.grossSalesUnits += 1; }
     }
     for (const sale of returns) {
       const product = ensureProduct(sale);
-      if (product) { product.sales -= amount(sale); product.units = Math.max(0, product.units - 1); }
+      if (product) { product.sales -= amount(sale); product.returnsCount += 1; }
     }
+
+    const reviewsByProduct = new Map<number, { total: number; sum: number; positive: number; period: number }>();
+    for (const feedback of feedbacksResult) {
+      const id = Number(feedback.productDetails?.nmId || 0);
+      const valuation = Number(feedback.productValuation || 0);
+      if (!id || valuation < 1 || valuation > 5) continue;
+      const item = reviewsByProduct.get(id) ?? { total: 0, sum: 0, positive: 0, period: 0 };
+      item.total += 1;
+      item.sum += valuation;
+      if (valuation >= 4) item.positive += 1;
+      const feedbackDate = dayKey(feedback.createdDate);
+      if (feedbackDate >= from && feedbackDate <= to) item.period += 1;
+      reviewsByProduct.set(id, item);
+    }
+
     const products = [...productMap.values()]
-      .map((product) => ({ ...product, buyoutRate: product.orders ? Math.min(100, (product.units / product.orders) * 100) : 0 }))
-      .sort((a, b) => b.sales - a.sales)
-      .slice(0, 20);
+      .map((product) => {
+        const netUnits = Math.max(0, product.grossSalesUnits - product.returnsCount);
+        const saleEvents = product.grossSalesUnits + product.returnsCount;
+        const returnRate = saleEvents ? (product.returnsCount / saleEvents) * 100 : 0;
+        const buyoutRate = product.orders ? Math.min(100, (netUnits / product.orders) * 100) : 0;
+        const dailyUnits = netUnits / days;
+        const stockCoverDays = dailyUnits > 0 ? product.stock / dailyUnits : null;
+        const reviews = reviewsByProduct.get(product.nmId) ?? { total: 0, sum: 0, positive: 0, period: 0 };
+        const averageRating = reviews.total ? reviews.sum / reviews.total : null;
+        const positiveRate = reviews.total ? (reviews.positive / reviews.total) * 100 : null;
+        let status = "稳定";
+        if (product.returnsCount > 0 && returnRate >= 15) status = "高退货";
+        else if (reviews.total >= 3 && averageRating !== null && averageRating < 4.2) status = "低评分";
+        else if (stockResult.length && product.stock === 0) status = "缺货";
+        else if (product.stock > 0 && netUnits === 0) status = "滞销";
+        else if (dailyUnits >= 1) status = "热销";
+        return {
+          ...product,
+          units: netUnits,
+          netUnits,
+          returnRate,
+          buyoutRate,
+          averagePrice: netUnits ? product.sales / netUnits : 0,
+          dailyUnits,
+          stockCoverDays,
+          reviewsCount: reviews.total,
+          periodReviewsCount: reviews.period,
+          averageRating,
+          positiveRate,
+          status,
+        };
+      })
+      .sort((a, b) => b.sales - a.sales);
 
     const categoryMap = new Map<string, number>();
     for (const product of productMap.values()) categoryMap.set(product.category, (categoryMap.get(product.category) ?? 0) + Math.max(0, product.sales));
@@ -280,6 +448,11 @@ export async function GET(request: Request) {
       source: "wildberries",
       syncedAt: new Date().toISOString(),
       period: { from, to, days },
+      dataAvailability: {
+        productCards: cardsResult.length > 0,
+        feedbacks: feedbacksResult.length > 0,
+        inventory: stockResult.length > 0,
+      },
       metrics: {
         salesAmount,
         ordersCount: activeOrders.length,
