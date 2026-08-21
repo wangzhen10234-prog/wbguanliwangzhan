@@ -1,6 +1,6 @@
 "use client";
+/* eslint-disable @next/next/no-html-link-for-pages -- Native navigation is required because the deployed vinext router intercepts Link clicks without completing navigation. */
 
-import Link from "next/link";
 import type { ReactNode } from "react";
 
 type Section = "overview" | "sales" | "products" | "stock" | "finance";
@@ -31,11 +31,11 @@ export function AppSidebar({ active, syncedAt, nextSyncAt, loading = false, erro
     <aside className="sidebar">
       <div className="brand"><span className="brand-mark">W</span><div><strong>WB Insight</strong><small>俄罗斯店铺分析</small></div></div>
       <nav aria-label="主导航">
-        <Link className={`nav-item ${active === "overview" ? "active" : ""}`} href="/"><span>▦</span>经营总览</Link>
-        <Link className={`nav-item ${active === "sales" ? "active" : ""}`} href="/sales"><span>↗</span>销售状况</Link>
-        <Link className={`nav-item ${active === "products" ? "active" : ""}`} href="/products"><span>◇</span>综合商品分析</Link>
-        <Link className={`nav-item ${active === "stock" ? "active" : ""}`} href="/stock"><span>□</span>库存监控</Link>
-        <Link className={`nav-item ${active === "finance" ? "active" : ""}`} href="/finance"><span>₽</span>回款与余额</Link>
+        <a className={`nav-item ${active === "overview" ? "active" : ""}`} href="/"><span>▦</span>经营总览</a>
+        <a className={`nav-item ${active === "sales" ? "active" : ""}`} href="/sales"><span>↗</span>销售状况</a>
+        <a className={`nav-item ${active === "products" ? "active" : ""}`} href="/products"><span>◇</span>综合商品分析</a>
+        <a className={`nav-item ${active === "stock" ? "active" : ""}`} href="/stock"><span>□</span>库存监控</a>
+        <a className={`nav-item ${active === "finance" ? "active" : ""}`} href="/finance"><span>₽</span>回款与余额</a>
       </nav>
       {children}
       <div className="sidebar-foot">
