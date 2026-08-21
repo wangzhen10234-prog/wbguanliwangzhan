@@ -1,6 +1,7 @@
 type WbOrder = {
   date?: string;
   nmId?: number;
+  warehouseName?: string;
   supplierArticle?: string;
   subject?: string;
   brand?: string;
@@ -17,6 +18,9 @@ type WbSale = WbOrder & {
 
 type WbStock = {
   nmId?: number;
+  warehouseId?: number;
+  warehouseName?: string;
+  regionName?: string;
   quantity?: number;
   inWayToClient?: number;
   inWayFromClient?: number;
@@ -289,7 +293,9 @@ export async function GET(request: Request) {
   const url = new URL(request.url);
   const from = url.searchParams.get("from") ?? "";
   const to = url.searchParams.get("to") ?? "";
+  const requestedWarehouse = url.searchParams.get("warehouse")?.trim() ?? "";
   if (!DATE_PATTERN.test(from) || !DATE_PATTERN.test(to)) return json({ error: "日期格式无效" }, 400);
+  if (requestedWarehouse.length > 160) return json({ error: "仓库名称无效" }, 400);
 
   const fromValue = dateValue(from);
   const toValue = dateValue(to);
@@ -311,10 +317,20 @@ export async function GET(request: Request) {
       const date = dayKey(row.date);
       return date >= from && date <= to;
     };
-    const periodOrders = statistics.orders.filter(inPeriod);
+    const warehouseNames = [...new Set([
+      ...statistics.orders.map((row) => row.warehouseName?.trim()),
+      ...statistics.sales.map((row) => row.warehouseName?.trim()),
+      ...stockResult.map((row) => row.warehouseName?.trim()),
+    ].filter((name): name is string => Boolean(name)))].sort((a, b) => a.localeCompare(b, "ru"));
+    if (requestedWarehouse && !warehouseNames.includes(requestedWarehouse)) return json({ error: "未找到所选仓库，请重新选择" }, 400);
+
+    const matchesWarehouse = (row: { warehouseName?: string }) => !requestedWarehouse || row.warehouseName?.trim() === requestedWarehouse;
+    const allPeriodOrders = statistics.orders.filter(inPeriod);
+    const allPeriodSales = statistics.sales.filter(inPeriod);
+    const periodOrders = allPeriodOrders.filter(matchesWarehouse);
     const activeOrders = periodOrders.filter((order) => !order.isCancel);
     const cancelledOrders = periodOrders.length - activeOrders.length;
-    const periodSales = statistics.sales.filter(inPeriod);
+    const periodSales = allPeriodSales.filter(matchesWarehouse);
     const completedSales = periodSales.filter((sale) => !isReturn(sale));
     const returns = periodSales.filter(isReturn);
     const salesAmount = completedSales.reduce((sum, sale) => sum + amount(sale), 0) - returns.reduce((sum, sale) => sum + amount(sale), 0);
@@ -340,7 +356,8 @@ export async function GET(request: Request) {
     }
 
     const stockByProduct = new Map<number, number>();
-    for (const stock of stockResult) {
+    const selectedStocks = stockResult.filter(matchesWarehouse);
+    for (const stock of selectedStocks) {
       if (!stock.nmId) continue;
       stockByProduct.set(stock.nmId, (stockByProduct.get(stock.nmId) ?? 0) + Number(stock.quantity || 0));
     }
@@ -497,10 +514,22 @@ export async function GET(request: Request) {
       }
     }
 
+    const warehouses = warehouseNames.map((name) => {
+      const warehouseOrders = allPeriodOrders.filter((row) => row.warehouseName?.trim() === name && !row.isCancel).length;
+      const warehouseSales = allPeriodSales.filter((row) => row.warehouseName?.trim() === name);
+      const warehouseReturns = warehouseSales.filter(isReturn).length;
+      const warehouseStock = stockResult
+        .filter((row) => row.warehouseName?.trim() === name)
+        .reduce((sum, row) => sum + Number(row.quantity || 0), 0);
+      return { name, orders: warehouseOrders, returns: warehouseReturns, stock: warehouseStock };
+    });
+
     return json({
       source: "wildberries",
       syncedAt: new Date().toISOString(),
       period: { from, to, days },
+      selectedWarehouse: requestedWarehouse || null,
+      warehouses,
       dataAvailability: {
         productCards: cardsResult.length > 0,
         feedbacks: feedbacksResult.length > 0,

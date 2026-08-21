@@ -34,6 +34,8 @@ type ProductData = {
   source: string;
   syncedAt: string;
   period: { from: string; to: string; days: number };
+  selectedWarehouse: string | null;
+  warehouses: Array<{ name: string; orders: number; returns: number; stock: number }>;
   dataAvailability: { productCards: boolean; feedbacks: boolean; inventory: boolean };
   products: ProductRow[];
 };
@@ -88,6 +90,8 @@ export default function ProductsPage() {
   const [dateError, setDateError] = useState("");
   const [reloadKey, setReloadKey] = useState(0);
   const [query, setQuery] = useState("");
+  const [warehouse, setWarehouse] = useState("");
+  const [selectedProductId, setSelectedProductId] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [sortKey, setSortKey] = useState<SortKey>("sales");
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("desc");
@@ -95,7 +99,9 @@ export default function ProductsPage() {
 
   useEffect(() => {
     const controller = new AbortController();
-    fetch(`/api/wb/dashboard?from=${periodStart}&to=${periodEnd}`, {
+    const params = new URLSearchParams({ from: periodStart, to: periodEnd });
+    if (warehouse) params.set("warehouse", warehouse);
+    fetch(`/api/wb/dashboard?${params.toString()}`, {
       signal: controller.signal,
       headers: { Accept: "application/json" },
       cache: "no-store",
@@ -113,10 +119,21 @@ export default function ProductsPage() {
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [periodStart, periodEnd, reloadKey]);
+  }, [periodStart, periodEnd, warehouse, reloadKey]);
+
+  const scopedProducts = useMemo(() => {
+    const products = data?.products ?? [];
+    if (!selectedProductId) return products;
+    return products.filter((item) => String(item.nmId) === selectedProductId);
+  }, [data, selectedProductId]);
+
+  const selectedProduct = useMemo(
+    () => (data?.products ?? []).find((item) => String(item.nmId) === selectedProductId) ?? null,
+    [data, selectedProductId],
+  );
 
   const summary = useMemo(() => {
-    const products = data?.products ?? [];
+    const products = scopedProducts;
     const reviews = products.reduce((sum, item) => sum + item.periodReviewsCount, 0);
     return {
       products: products.length,
@@ -127,11 +144,11 @@ export default function ProductsPage() {
       positiveRate: reviews ? products.reduce((sum, item) => sum + (item.periodPositiveRate ?? 0) * item.periodReviewsCount, 0) / reviews : null,
       reviews,
     };
-  }, [data]);
+  }, [scopedProducts]);
 
   const filteredProducts = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase();
-    const filtered = (data?.products ?? []).filter((item) => {
+    const filtered = scopedProducts.filter((item) => {
       const matchesQuery = !needle || [item.name, item.sku, item.category, item.brand, String(item.nmId)].some((value) => value.toLocaleLowerCase().includes(needle));
       const matchesStatus = statusFilter === "all" || (statusFilter === "attention" ? issueStatuses.has(item.status) : item.status === statusFilter);
       return matchesQuery && matchesStatus;
@@ -142,7 +159,7 @@ export default function ProductsPage() {
       const difference = Number(aValue) - Number(bValue);
       return sortDirection === "desc" ? -difference : difference;
     });
-  }, [data, query, statusFilter, sortKey, sortDirection]);
+  }, [scopedProducts, query, statusFilter, sortKey, sortDirection]);
 
   const pageCount = Math.max(1, Math.ceil(filteredProducts.length / PAGE_SIZE));
   const visibleProducts = filteredProducts.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
@@ -180,6 +197,18 @@ export default function ProductsPage() {
     setReloadKey((key) => key + 1);
   }
 
+  function changeWarehouse(value: string) {
+    beginLoad();
+    setWarehouse(value);
+  }
+
+  function changeProduct(value: string) {
+    setSelectedProductId(value);
+    setQuery("");
+    setStatusFilter("all");
+    setPage(1);
+  }
+
   function changeSort(key: SortKey) {
     setPage(1);
     if (sortKey === key) setSortDirection((direction) => direction === "desc" ? "asc" : "desc");
@@ -201,7 +230,7 @@ export default function ProductsPage() {
     const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
     const link = document.createElement("a");
     link.href = url;
-    link.download = `wb-product-analysis-${periodStart}-${periodEnd}.csv`;
+    link.download = `wb-product-analysis-${periodStart}-${periodEnd}-${selectedProductId || "all-products"}.csv`;
     link.click();
     URL.revokeObjectURL(url);
   }
@@ -219,6 +248,7 @@ export default function ProductsPage() {
         </nav>
         <div className="nav-section">当前分析</div>
         <div className="product-side-summary"><span>统计周期</span><b>{periodStart}</b><i>至</i><b>{periodEnd}</b><small>共 {countDays(periodStart, periodEnd)} 天</small></div>
+        <div className="product-side-summary scope"><span>分析范围</span><b>{warehouse || "全部仓库"}</b><small>{selectedProduct ? `单品：${selectedProduct.name}` : "全部商品"}</small></div>
         <div className="sidebar-foot">
           <div className={`sync-status ${error ? "error" : "connected"}`}><span className="status-dot" /><div><b>{error ? "同步异常" : "商品数据已连接"}</b><small>{error ? "请重新同步" : formatDateTime(data?.syncedAt)}</small></div></div>
           <button className="connect-btn" onClick={refresh}>{loading ? "同步中…" : "重新同步商品数据"}</button>
@@ -238,14 +268,22 @@ export default function ProductsPage() {
           {dateError && <p className="product-date-error" role="alert">{dateError}</p>}
         </section>
 
+        <section className="product-scope-panel" aria-label="选择仓库和商品">
+          <div className="product-scope-heading"><strong>分析范围</strong><small>先选仓库，再选择是否只看一个商品</small></div>
+          <label><span>WB 仓库</span><select disabled={loading} value={warehouse} onChange={(event) => changeWarehouse(event.target.value)}><option value="">全部仓库</option>{(data?.warehouses ?? []).map((item) => <option key={item.name} value={item.name}>{item.name} · {item.orders} 单 · 库存 {item.stock}</option>)}</select></label>
+          <label className="product-picker"><span>具体商品</span><select value={selectedProductId} onChange={(event) => changeProduct(event.target.value)}><option value="">全部商品</option>{(data?.products ?? []).map((item) => <option key={item.nmId} value={item.nmId}>{item.name} · {item.sku} · WB {item.nmId}</option>)}</select></label>
+          {selectedProduct && <button className="clear-product-button" onClick={() => changeProduct("")}>退出单品模式</button>}
+          <p>仓库筛选会重新计算订单、销量、退货和库存；评价按商品统计，不区分仓库。</p>
+        </section>
+
         <div className={`notice product-notice ${error ? "error" : "connected"}`}>
           <div className="notice-icon">{loading ? "↻" : error ? "!" : "✓"}</div>
-          <div><strong>{loading ? "正在汇总每个商品的完整经营数据" : error ? "商品数据同步未完成" : "商品销售状态分析已更新"}</strong><p>{loading ? "正在计算销量、退货率、评价、好评率、库存和周转状态。" : error || `共 ${summary.products} 个商品；评价口径为全部已获取评价，销售与退货口径为当前所选周期。`}</p></div>
+          <div><strong>{loading ? "正在汇总当前范围的经营数据" : error ? "商品数据同步未完成" : selectedProduct ? `正在查看单品：${selectedProduct.name}` : "商品销售状态分析已更新"}</strong><p>{loading ? "正在计算销量、退货率、评价、好评率、库存和周转状态。" : error || `${warehouse || "全部仓库"} · 共 ${summary.products} 个商品；销售与退货口径为当前所选周期。`}</p></div>
           {error && <button onClick={refresh}>重新同步</button>}
         </div>
 
         <section className="product-stat-grid" aria-label="商品分析汇总">
-          <article><span>商品总数</span><strong>{loading && !data ? "—" : summary.products}</strong><small>全部在售商品卡片</small></article>
+          <article><span>{selectedProduct ? "当前商品" : "商品总数"}</span><strong>{loading && !data ? "—" : summary.products}</strong><small>{selectedProduct ? selectedProduct.sku : "全部在售商品卡片"}</small></article>
           <article><span>本期净销量</span><strong>{summary.units.toLocaleString("en-US")}</strong><small>销售 {summary.units + summary.returns} · 退货 {summary.returns}</small></article>
           <article><span>本期销售额</span><strong>{formatRubles(summary.sales)}</strong><small>{countDays(periodStart, periodEnd)} 天商品销售合计</small></article>
           <article><span>本期好评率</span><strong>{formatPercent(summary.positiveRate)}</strong><small>所选周期内 {summary.reviews} 条评价</small></article>
@@ -254,7 +292,7 @@ export default function ProductsPage() {
 
         <section className="product-table-panel">
           <div className="product-table-toolbar">
-            <div><h2>商品经营明细</h2><p>当前周期：{periodStart} 至 {periodEnd} · 退货率＝退货 ÷（销售＋退货）；好评率＝4–5 星评价占比。</p></div>
+            <div><h2>{selectedProduct ? "单品经营明细" : "商品经营明细"}</h2><p>{warehouse || "全部仓库"} · {periodStart} 至 {periodEnd} · 退货率＝退货 ÷（销售＋退货）；好评率＝4–5 星评价占比。</p></div>
             <div className="product-filters"><label className="product-search"><span>⌕</span><input type="search" value={query} placeholder="搜索商品、SKU、WB货号、类目" onChange={(event) => { setQuery(event.target.value); setPage(1); }} /></label><select value={statusFilter} onChange={(event) => { setStatusFilter(event.target.value); setPage(1); }} aria-label="按商品状态筛选"><option value="all">全部状态</option><option value="attention">只看需关注</option><option value="热销">热销</option><option value="稳定">稳定</option><option value="缺货">缺货</option><option value="高退货">高退货</option><option value="低评分">低评分</option><option value="滞销">滞销</option></select></div>
           </div>
 
