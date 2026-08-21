@@ -25,6 +25,8 @@ type ProductRow = {
   periodReviewsCount: number;
   averageRating: number | null;
   positiveRate: number | null;
+  periodAverageRating: number | null;
+  periodPositiveRate: number | null;
   status: "热销" | "稳定" | "缺货" | "高退货" | "低评分" | "滞销";
 };
 
@@ -36,7 +38,7 @@ type ProductData = {
   products: ProductRow[];
 };
 
-type SortKey = "sales" | "orders" | "netUnits" | "returnRate" | "averageRating" | "positiveRate" | "stock" | "stockCoverDays";
+type SortKey = "sales" | "orders" | "netUnits" | "returnRate" | "periodAverageRating" | "periodPositiveRate" | "stock" | "stockCoverDays";
 
 const DAY_MS = 86_400_000;
 const PAGE_SIZE = 20;
@@ -115,14 +117,14 @@ export default function ProductsPage() {
 
   const summary = useMemo(() => {
     const products = data?.products ?? [];
-    const reviews = products.reduce((sum, item) => sum + item.reviewsCount, 0);
+    const reviews = products.reduce((sum, item) => sum + item.periodReviewsCount, 0);
     return {
       products: products.length,
       units: products.reduce((sum, item) => sum + item.netUnits, 0),
       returns: products.reduce((sum, item) => sum + item.returnsCount, 0),
       sales: products.reduce((sum, item) => sum + item.sales, 0),
       attention: products.filter((item) => issueStatuses.has(item.status)).length,
-      positiveRate: reviews ? products.reduce((sum, item) => sum + (item.positiveRate ?? 0) * item.reviewsCount, 0) / reviews : null,
+      positiveRate: reviews ? products.reduce((sum, item) => sum + (item.periodPositiveRate ?? 0) * item.periodReviewsCount, 0) / reviews : null,
       reviews,
     };
   }, [data]);
@@ -193,8 +195,8 @@ export default function ProductsPage() {
 
   function exportCsv() {
     if (!filteredProducts.length) return;
-    const header = ["商品名称", "SKU", "WB nmId", "类目", "品牌", "销售额", "订单数", "净销量", "退货件数", "退货率", "成交率", "平均售价", "平均评分", "评价数", "好评率", "库存", "可售天数", "状态"];
-    const rows = filteredProducts.map((item) => [item.name, item.sku, item.nmId, item.category, item.brand, Math.round(item.sales), item.orders, item.netUnits, item.returnsCount, item.returnRate.toFixed(1), item.buyoutRate.toFixed(1), Math.round(item.averagePrice), item.averageRating?.toFixed(2) ?? "", item.reviewsCount, item.positiveRate?.toFixed(1) ?? "", item.stock, item.stockCoverDays?.toFixed(1) ?? "", item.status]);
+    const header = ["商品名称", "SKU", "WB nmId", "类目", "品牌", "销售额", "订单数", "净销量", "退货件数", "退货率", "成交率", "平均售价", "本期平均评分", "本期评价数", "本期好评率", "累计平均评分", "累计评价数", "累计好评率", "库存", "可售天数", "状态"];
+    const rows = filteredProducts.map((item) => [item.name, item.sku, item.nmId, item.category, item.brand, Math.round(item.sales), item.orders, item.netUnits, item.returnsCount, item.returnRate.toFixed(1), item.buyoutRate.toFixed(1), Math.round(item.averagePrice), item.periodAverageRating?.toFixed(2) ?? "", item.periodReviewsCount, item.periodPositiveRate?.toFixed(1) ?? "", item.averageRating?.toFixed(2) ?? "", item.reviewsCount, item.positiveRate?.toFixed(1) ?? "", item.stock, item.stockCoverDays?.toFixed(1) ?? "", item.status]);
     const csv = "\uFEFF" + [header, ...rows].map((row) => row.map(escapeCsv).join(",")).join("\n");
     const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
     const link = document.createElement("a");
@@ -230,6 +232,7 @@ export default function ProductsPage() {
         </header>
 
         <section className="product-period-panel" aria-label="选择分析周期">
+          <div className="product-period-heading"><strong>时间筛选</strong><small>表格全部指标按所选周期重新计算</small></div>
           <div className="period-presets"><span>快捷周期</span><button onClick={() => choosePreset(7)}>近 7 天</button><button className={countDays(periodStart, periodEnd) === 30 ? "active" : ""} onClick={() => choosePreset(30)}>近 30 天</button><button onClick={() => choosePreset(90)}>近 90 天</button></div>
           <div className="period-custom"><label><span>开始日期</span><input type="date" value={draftStart} min={earliest} max={today} onChange={(event) => { setDraftStart(event.target.value); setDateError(""); }} /></label><b>→</b><label><span>结束日期</span><input type="date" value={draftEnd} min={draftStart || earliest} max={today} onChange={(event) => { setDraftEnd(event.target.value); setDateError(""); }} /></label><button onClick={applyDates}>查询</button></div>
           {dateError && <p className="product-date-error" role="alert">{dateError}</p>}
@@ -245,20 +248,20 @@ export default function ProductsPage() {
           <article><span>商品总数</span><strong>{loading && !data ? "—" : summary.products}</strong><small>全部在售商品卡片</small></article>
           <article><span>本期净销量</span><strong>{summary.units.toLocaleString("en-US")}</strong><small>销售 {summary.units + summary.returns} · 退货 {summary.returns}</small></article>
           <article><span>本期销售额</span><strong>{formatRubles(summary.sales)}</strong><small>{countDays(periodStart, periodEnd)} 天商品销售合计</small></article>
-          <article><span>整体好评率</span><strong>{formatPercent(summary.positiveRate)}</strong><small>{summary.reviews} 条有效评价</small></article>
+          <article><span>本期好评率</span><strong>{formatPercent(summary.positiveRate)}</strong><small>所选周期内 {summary.reviews} 条评价</small></article>
           <article className={summary.attention > 0 ? "attention" : ""}><span>需关注商品</span><strong>{summary.attention}</strong><small>缺货、高退货、低评分或滞销</small></article>
         </section>
 
         <section className="product-table-panel">
           <div className="product-table-toolbar">
-            <div><h2>商品经营明细</h2><p>退货率＝退货 ÷（销售＋退货）；好评率＝4–5 星评价占比。点击列名可排序。</p></div>
+            <div><h2>商品经营明细</h2><p>当前周期：{periodStart} 至 {periodEnd} · 退货率＝退货 ÷（销售＋退货）；好评率＝4–5 星评价占比。</p></div>
             <div className="product-filters"><label className="product-search"><span>⌕</span><input type="search" value={query} placeholder="搜索商品、SKU、WB货号、类目" onChange={(event) => { setQuery(event.target.value); setPage(1); }} /></label><select value={statusFilter} onChange={(event) => { setStatusFilter(event.target.value); setPage(1); }} aria-label="按商品状态筛选"><option value="all">全部状态</option><option value="attention">只看需关注</option><option value="热销">热销</option><option value="稳定">稳定</option><option value="缺货">缺货</option><option value="高退货">高退货</option><option value="低评分">低评分</option><option value="滞销">滞销</option></select></div>
           </div>
 
           <div className="product-detail-table-wrap">
             <table className="product-detail-table">
-              <thead><tr><th>商品</th><th><button onClick={() => changeSort("sales")}>销售额{sortMark("sales")}</button></th><th><button onClick={() => changeSort("orders")}>订单{sortMark("orders")}</button></th><th><button onClick={() => changeSort("netUnits")}>净销量{sortMark("netUnits")}</button></th><th><button onClick={() => changeSort("returnRate")}>退货率{sortMark("returnRate")}</button></th><th>成交率</th><th><button onClick={() => changeSort("averageRating")}>评分{sortMark("averageRating")}</button></th><th><button onClick={() => changeSort("positiveRate")}>好评率{sortMark("positiveRate")}</button></th><th><button onClick={() => changeSort("stock")}>库存{sortMark("stock")}</button></th><th><button onClick={() => changeSort("stockCoverDays")}>可售天数{sortMark("stockCoverDays")}</button></th><th>状态</th></tr></thead>
-              <tbody>{visibleProducts.map((item, index) => <tr key={item.nmId}><td><div className={`product-thumb tone-${index % 4}`}>{item.category.slice(0, 1) || "W"}</div><div className="product-identity"><b>{item.name}</b><small>{item.sku} · WB {item.nmId}</small><em>{item.category} · {item.brand}</em></div></td><td><b>{formatRubles(item.sales)}</b><small>均价 {formatRubles(item.averagePrice)}</small></td><td><b>{item.orders}</b></td><td><b>{item.netUnits}</b><small>售出 {item.grossSalesUnits}</small></td><td><span className={item.returnRate >= 15 ? "value-bad" : item.returnRate <= 5 ? "value-good" : ""}>{item.returnRate.toFixed(1)}%</span><small>{item.returnsCount} 件退货</small></td><td><span>{item.buyoutRate.toFixed(1)}%</span></td><td><span className="rating-value">{item.averageRating === null ? "—" : `★ ${item.averageRating.toFixed(2)}`}</span><small>{item.reviewsCount} 条评价</small></td><td><span className={(item.positiveRate ?? 100) < 80 ? "value-bad" : "value-good"}>{formatPercent(item.positiveRate)}</span><small>本期新增 {item.periodReviewsCount}</small></td><td><b>{data?.dataAvailability.inventory ? item.stock : "—"}</b></td><td><span>{item.stockCoverDays === null ? "无销量" : `${item.stockCoverDays.toFixed(1)} 天`}</span><small>日均 {item.dailyUnits.toFixed(2)}</small></td><td><span className={`product-status status-${item.status}`}>{item.status}</span></td></tr>)}{!loading && visibleProducts.length === 0 && <tr className="empty-row"><td colSpan={11}>没有符合当前筛选条件的商品</td></tr>}</tbody>
+              <thead><tr><th>商品</th><th><button onClick={() => changeSort("sales")}>销售额{sortMark("sales")}</button></th><th><button onClick={() => changeSort("orders")}>订单{sortMark("orders")}</button></th><th><button onClick={() => changeSort("netUnits")}>净销量{sortMark("netUnits")}</button></th><th><button onClick={() => changeSort("returnRate")}>退货率{sortMark("returnRate")}</button></th><th>成交率</th><th><button onClick={() => changeSort("periodAverageRating")}>本期评分{sortMark("periodAverageRating")}</button></th><th><button onClick={() => changeSort("periodPositiveRate")}>本期好评率{sortMark("periodPositiveRate")}</button></th><th><button onClick={() => changeSort("stock")}>库存{sortMark("stock")}</button></th><th><button onClick={() => changeSort("stockCoverDays")}>可售天数{sortMark("stockCoverDays")}</button></th><th>状态</th></tr></thead>
+              <tbody>{visibleProducts.map((item, index) => <tr key={item.nmId}><td><div className={`product-thumb tone-${index % 4}`}>{item.category.slice(0, 1) || "W"}</div><div className="product-identity"><b>{item.name}</b><small>{item.sku} · WB {item.nmId}</small><em>{item.category} · {item.brand}</em></div></td><td><b>{formatRubles(item.sales)}</b><small>均价 {formatRubles(item.averagePrice)}</small></td><td><b>{item.orders}</b></td><td><b>{item.netUnits}</b><small>售出 {item.grossSalesUnits}</small></td><td><span className={item.returnRate >= 15 ? "value-bad" : item.returnRate <= 5 ? "value-good" : ""}>{item.returnRate.toFixed(1)}%</span><small>{item.returnsCount} 件退货</small></td><td><span>{item.buyoutRate.toFixed(1)}%</span></td><td><span className="rating-value">{item.periodAverageRating === null ? "—" : `★ ${item.periodAverageRating.toFixed(2)}`}</span><small>本期 {item.periodReviewsCount} 条 · 累计 {item.reviewsCount}</small></td><td><span className={(item.periodPositiveRate ?? 100) < 80 ? "value-bad" : "value-good"}>{formatPercent(item.periodPositiveRate)}</span><small>累计 {formatPercent(item.positiveRate)}</small></td><td><b>{data?.dataAvailability.inventory ? item.stock : "—"}</b></td><td><span>{item.stockCoverDays === null ? "无销量" : `${item.stockCoverDays.toFixed(1)} 天`}</span><small>日均 {item.dailyUnits.toFixed(2)}</small></td><td><span className={`product-status status-${item.status}`}>{item.status}</span></td></tr>)}{!loading && visibleProducts.length === 0 && <tr className="empty-row"><td colSpan={11}>没有符合当前筛选条件的商品</td></tr>}</tbody>
             </table>
           </div>
 

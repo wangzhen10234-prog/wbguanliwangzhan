@@ -45,6 +45,7 @@ let stockCache: CacheEntry<WbStock[]> | null = null;
 let balanceCache: CacheEntry<{ current?: number; for_withdraw?: number }> | null = null;
 let cardsCache: CacheEntry<WbCard[]> | null = null;
 let feedbacksCache: CacheEntry<WbFeedback[]> | null = null;
+const pendingLoads = new Map<string, Promise<unknown>>();
 
 const DAY_MS = 86_400_000;
 const CACHE_MS = 5 * 60_000;
@@ -106,6 +107,18 @@ async function writeEdgeCache(key: string, value: unknown) {
   }
 }
 
+async function dedupe<T>(key: string, loader: () => Promise<T>): Promise<T> {
+  const existing = pendingLoads.get(key) as Promise<T> | undefined;
+  if (existing) return existing;
+  const pending = loader();
+  pendingLoads.set(key, pending);
+  try {
+    return await pending;
+  } finally {
+    if (pendingLoads.get(key) === pending) pendingLoads.delete(key);
+  }
+}
+
 async function wbRequest<T>(url: string, token: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, {
     ...init,
@@ -128,113 +141,123 @@ async function wbRequest<T>(url: string, token: string, init?: RequestInit): Pro
 
 async function loadStatistics(token: string) {
   if (statisticsCache && statisticsCache.expiresAt > Date.now()) return statisticsCache.value;
-  const cached = await readEdgeCache<{ orders: WbOrder[]; sales: WbSale[] }>("statistics");
-  if (cached) {
-    statisticsCache = { value: cached, expiresAt: Date.now() + CACHE_MS };
-    return cached;
-  }
-  const start = new Date(Date.now() - 89 * DAY_MS).toISOString().slice(0, 10);
-  const base = "https://statistics-api.wildberries.ru/api/v1/supplier";
-  const [orders, sales] = await Promise.all([
-    wbRequest<WbOrder[]>(`${base}/orders?dateFrom=${start}&flag=0`, token),
-    wbRequest<WbSale[]>(`${base}/sales?dateFrom=${start}&flag=0`, token),
-  ]);
-  statisticsCache = { value: { orders, sales }, expiresAt: Date.now() + CACHE_MS };
-  await writeEdgeCache("statistics", statisticsCache.value);
-  return statisticsCache.value;
+  return dedupe("statistics", async () => {
+    const cached = await readEdgeCache<{ orders: WbOrder[]; sales: WbSale[] }>("statistics");
+    if (cached) {
+      statisticsCache = { value: cached, expiresAt: Date.now() + CACHE_MS };
+      return cached;
+    }
+    const start = new Date(Date.now() - 89 * DAY_MS).toISOString().slice(0, 10);
+    const base = "https://statistics-api.wildberries.ru/api/v1/supplier";
+    const [orders, sales] = await Promise.all([
+      wbRequest<WbOrder[]>(`${base}/orders?dateFrom=${start}&flag=0`, token),
+      wbRequest<WbSale[]>(`${base}/sales?dateFrom=${start}&flag=0`, token),
+    ]);
+    statisticsCache = { value: { orders, sales }, expiresAt: Date.now() + CACHE_MS };
+    await writeEdgeCache("statistics", statisticsCache.value);
+    return statisticsCache.value;
+  });
 }
 
 async function loadStocks(token: string) {
   if (stockCache && stockCache.expiresAt > Date.now()) return stockCache.value;
-  const cached = await readEdgeCache<WbStock[]>("stocks");
-  if (cached) {
-    stockCache = { value: cached, expiresAt: Date.now() + CACHE_MS };
-    return cached;
-  }
-  const response = await wbRequest<{ data?: { items?: WbStock[] } }>(
-    "https://seller-analytics-api.wildberries.ru/api/analytics/v1/stocks-report/wb-warehouses",
-    token,
-    { method: "POST", body: JSON.stringify({ nmIds: [], limit: 250000, offset: 0 }) },
-  );
-  const stocks = response.data?.items ?? [];
-  stockCache = { value: stocks, expiresAt: Date.now() + CACHE_MS };
-  await writeEdgeCache("stocks", stocks);
-  return stocks;
+  return dedupe("stocks", async () => {
+    const cached = await readEdgeCache<WbStock[]>("stocks");
+    if (cached) {
+      stockCache = { value: cached, expiresAt: Date.now() + CACHE_MS };
+      return cached;
+    }
+    const response = await wbRequest<{ data?: { items?: WbStock[] } }>(
+      "https://seller-analytics-api.wildberries.ru/api/analytics/v1/stocks-report/wb-warehouses",
+      token,
+      { method: "POST", body: JSON.stringify({ nmIds: [], limit: 250000, offset: 0 }) },
+    );
+    const stocks = response.data?.items ?? [];
+    stockCache = { value: stocks, expiresAt: Date.now() + CACHE_MS };
+    await writeEdgeCache("stocks", stocks);
+    return stocks;
+  });
 }
 
 async function loadBalance(token: string) {
   if (balanceCache && balanceCache.expiresAt > Date.now()) return balanceCache.value;
-  const cached = await readEdgeCache<{ current?: number; for_withdraw?: number }>("balance");
-  if (cached) {
-    balanceCache = { value: cached, expiresAt: Date.now() + CACHE_MS };
-    return cached;
-  }
-  const balance = await wbRequest<{ current?: number; for_withdraw?: number }>(
-    "https://finance-api.wildberries.ru/api/v1/account/balance",
-    token,
-  );
-  balanceCache = { value: balance, expiresAt: Date.now() + CACHE_MS };
-  await writeEdgeCache("balance", balance);
-  return balance;
+  return dedupe("balance", async () => {
+    const cached = await readEdgeCache<{ current?: number; for_withdraw?: number }>("balance");
+    if (cached) {
+      balanceCache = { value: cached, expiresAt: Date.now() + CACHE_MS };
+      return cached;
+    }
+    const balance = await wbRequest<{ current?: number; for_withdraw?: number }>(
+      "https://finance-api.wildberries.ru/api/v1/account/balance",
+      token,
+    );
+    balanceCache = { value: balance, expiresAt: Date.now() + CACHE_MS };
+    await writeEdgeCache("balance", balance);
+    return balance;
+  });
 }
 
 async function loadCards(token: string) {
   if (cardsCache && cardsCache.expiresAt > Date.now()) return cardsCache.value;
-  const cached = await readEdgeCache<WbCard[]>("cards");
-  if (cached) {
-    cardsCache = { value: cached, expiresAt: Date.now() + CACHE_MS };
-    return cached;
-  }
+  return dedupe("cards", async () => {
+    const cached = await readEdgeCache<WbCard[]>("cards");
+    if (cached) {
+      cardsCache = { value: cached, expiresAt: Date.now() + CACHE_MS };
+      return cached;
+    }
 
-  const cards: WbCard[] = [];
-  let cursor: { updatedAt?: string; nmID?: number } = {};
-  for (let page = 0; page < 50; page += 1) {
-    const response = await wbRequest<{ cards?: WbCard[]; cursor?: { updatedAt?: string; nmID?: number; total?: number } }>(
-      "https://content-api.wildberries.ru/content/v2/get/cards/list",
-      token,
-      {
-        method: "POST",
-        body: JSON.stringify({
-          settings: {
-            sort: { ascending: true },
-            cursor: { limit: 100, ...cursor },
-            filter: { withPhoto: -1 },
-          },
-        }),
-      },
-    );
-    const batch = response.cards ?? [];
-    cards.push(...batch);
-    if (batch.length < 100 || !response.cursor?.updatedAt || !response.cursor?.nmID) break;
-    cursor = { updatedAt: response.cursor.updatedAt, nmID: response.cursor.nmID };
-  }
-  cardsCache = { value: cards, expiresAt: Date.now() + CACHE_MS };
-  await writeEdgeCache("cards", cards);
-  return cards;
+    const cards: WbCard[] = [];
+    let cursor: { updatedAt?: string; nmID?: number } = {};
+    for (let page = 0; page < 50; page += 1) {
+      const response = await wbRequest<{ cards?: WbCard[]; cursor?: { updatedAt?: string; nmID?: number; total?: number } }>(
+        "https://content-api.wildberries.ru/content/v2/get/cards/list",
+        token,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            settings: {
+              sort: { ascending: true },
+              cursor: { limit: 100, ...cursor },
+              filter: { withPhoto: -1 },
+            },
+          }),
+        },
+      );
+      const batch = response.cards ?? [];
+      cards.push(...batch);
+      if (batch.length < 100 || !response.cursor?.updatedAt || !response.cursor?.nmID) break;
+      cursor = { updatedAt: response.cursor.updatedAt, nmID: response.cursor.nmID };
+    }
+    cardsCache = { value: cards, expiresAt: Date.now() + CACHE_MS };
+    await writeEdgeCache("cards", cards);
+    return cards;
+  });
 }
 
 async function loadFeedbacks(token: string) {
   if (feedbacksCache && feedbacksCache.expiresAt > Date.now()) return feedbacksCache.value;
-  const cached = await readEdgeCache<WbFeedback[]>("feedbacks");
-  if (cached) {
-    feedbacksCache = { value: cached, expiresAt: Date.now() + CACHE_MS };
-    return cached;
-  }
+  return dedupe("feedbacks", async () => {
+    const cached = await readEdgeCache<WbFeedback[]>("feedbacks");
+    if (cached) {
+      feedbacksCache = { value: cached, expiresAt: Date.now() + CACHE_MS };
+      return cached;
+    }
 
-  const base = "https://feedbacks-api.wildberries.ru/api/v1/feedbacks";
-  const [answered, unanswered] = await Promise.all([
-    wbRequest<{ data?: { feedbacks?: WbFeedback[] } }>(`${base}?isAnswered=true&take=5000&skip=0&order=dateDesc`, token),
-    wbRequest<{ data?: { feedbacks?: WbFeedback[] } }>(`${base}?isAnswered=false&take=5000&skip=0&order=dateDesc`, token),
-  ]);
-  const byId = new Map<string, WbFeedback>();
-  for (const feedback of [...(answered.data?.feedbacks ?? []), ...(unanswered.data?.feedbacks ?? [])]) {
-    const key = feedback.id || `${feedback.productDetails?.nmId}-${feedback.createdDate}-${feedback.productValuation}`;
-    byId.set(key, feedback);
-  }
-  const feedbacks = [...byId.values()];
-  feedbacksCache = { value: feedbacks, expiresAt: Date.now() + CACHE_MS };
-  await writeEdgeCache("feedbacks", feedbacks);
-  return feedbacks;
+    const base = "https://feedbacks-api.wildberries.ru/api/v1/feedbacks";
+    const [answered, unanswered] = await Promise.all([
+      wbRequest<{ data?: { feedbacks?: WbFeedback[] } }>(`${base}?isAnswered=true&take=5000&skip=0&order=dateDesc`, token),
+      wbRequest<{ data?: { feedbacks?: WbFeedback[] } }>(`${base}?isAnswered=false&take=5000&skip=0&order=dateDesc`, token),
+    ]);
+    const byId = new Map<string, WbFeedback>();
+    for (const feedback of [...(answered.data?.feedbacks ?? []), ...(unanswered.data?.feedbacks ?? [])]) {
+      const key = feedback.id || `${feedback.productDetails?.nmId}-${feedback.createdDate}-${feedback.productValuation}`;
+      byId.set(key, feedback);
+    }
+    const feedbacks = [...byId.values()];
+    feedbacksCache = { value: feedbacks, expiresAt: Date.now() + CACHE_MS };
+    await writeEdgeCache("feedbacks", feedbacks);
+    return feedbacks;
+  });
 }
 
 export async function GET(request: Request) {
@@ -374,17 +397,21 @@ export async function GET(request: Request) {
       if (product) { product.sales -= amount(sale); product.returnsCount += 1; }
     }
 
-    const reviewsByProduct = new Map<number, { total: number; sum: number; positive: number; period: number }>();
+    const reviewsByProduct = new Map<number, { total: number; sum: number; positive: number; period: number; periodSum: number; periodPositive: number }>();
     for (const feedback of feedbacksResult) {
       const id = Number(feedback.productDetails?.nmId || 0);
       const valuation = Number(feedback.productValuation || 0);
       if (!id || valuation < 1 || valuation > 5) continue;
-      const item = reviewsByProduct.get(id) ?? { total: 0, sum: 0, positive: 0, period: 0 };
+      const item = reviewsByProduct.get(id) ?? { total: 0, sum: 0, positive: 0, period: 0, periodSum: 0, periodPositive: 0 };
       item.total += 1;
       item.sum += valuation;
       if (valuation >= 4) item.positive += 1;
       const feedbackDate = dayKey(feedback.createdDate);
-      if (feedbackDate >= from && feedbackDate <= to) item.period += 1;
+      if (feedbackDate >= from && feedbackDate <= to) {
+        item.period += 1;
+        item.periodSum += valuation;
+        if (valuation >= 4) item.periodPositive += 1;
+      }
       reviewsByProduct.set(id, item);
     }
 
@@ -396,12 +423,14 @@ export async function GET(request: Request) {
         const buyoutRate = product.orders ? Math.min(100, (netUnits / product.orders) * 100) : 0;
         const dailyUnits = netUnits / days;
         const stockCoverDays = dailyUnits > 0 ? product.stock / dailyUnits : null;
-        const reviews = reviewsByProduct.get(product.nmId) ?? { total: 0, sum: 0, positive: 0, period: 0 };
+        const reviews = reviewsByProduct.get(product.nmId) ?? { total: 0, sum: 0, positive: 0, period: 0, periodSum: 0, periodPositive: 0 };
         const averageRating = reviews.total ? reviews.sum / reviews.total : null;
         const positiveRate = reviews.total ? (reviews.positive / reviews.total) * 100 : null;
+        const periodAverageRating = reviews.period ? reviews.periodSum / reviews.period : null;
+        const periodPositiveRate = reviews.period ? (reviews.periodPositive / reviews.period) * 100 : null;
         let status = "稳定";
         if (product.returnsCount > 0 && returnRate >= 15) status = "高退货";
-        else if (reviews.total >= 3 && averageRating !== null && averageRating < 4.2) status = "低评分";
+        else if (reviews.period >= 3 && periodAverageRating !== null && periodAverageRating < 4.2) status = "低评分";
         else if (stockResult.length && product.stock === 0) status = "缺货";
         else if (product.stock > 0 && netUnits === 0) status = "滞销";
         else if (dailyUnits >= 1) status = "热销";
@@ -418,6 +447,8 @@ export async function GET(request: Request) {
           periodReviewsCount: reviews.period,
           averageRating,
           positiveRate,
+          periodAverageRating,
+          periodPositiveRate,
           status,
         };
       })
