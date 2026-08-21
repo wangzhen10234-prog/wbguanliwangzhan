@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 
 type ProductRow = {
@@ -99,6 +99,10 @@ function supplierStatusLabel(value: string) {
   return ({ new: "新订单", confirm: "备货中", complete: "配送中", cancel: "卖家取消" } as Record<string, string>)[value] || "—";
 }
 
+function normalizeProductCode(value: string) {
+  return value.toLocaleLowerCase().replace(/[\s_-]+/g, "");
+}
+
 export default function ProductsPage() {
   const today = toInputDate(new Date());
   const earliest = shiftDate(today, -179);
@@ -114,6 +118,9 @@ export default function ProductsPage() {
   const [query, setQuery] = useState("");
   const [warehouse, setWarehouse] = useState("");
   const [selectedProductId, setSelectedProductId] = useState("");
+  const [productKeyword, setProductKeyword] = useState("");
+  const [productPickerOpen, setProductPickerOpen] = useState(false);
+  const [activeProductIndex, setActiveProductIndex] = useState(0);
   const [statusFilter, setStatusFilter] = useState("all");
   const [sortKey, setSortKey] = useState<SortKey>("sales");
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("desc");
@@ -121,6 +128,7 @@ export default function ProductsPage() {
   const [orderPage, setOrderPage] = useState(1);
   const [orderStatusFilter, setOrderStatusFilter] = useState("all");
   const [orderQuery, setOrderQuery] = useState("");
+  const productPickerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -147,6 +155,14 @@ export default function ProductsPage() {
     return () => controller.abort();
   }, [periodStart, periodEnd, warehouse, reloadKey]);
 
+  useEffect(() => {
+    function closeProductPicker(event: PointerEvent) {
+      if (!productPickerRef.current?.contains(event.target as Node)) setProductPickerOpen(false);
+    }
+    document.addEventListener("pointerdown", closeProductPicker);
+    return () => document.removeEventListener("pointerdown", closeProductPicker);
+  }, []);
+
   const scopedProducts = useMemo(() => {
     const products = data?.products ?? [];
     if (!selectedProductId) return products;
@@ -157,6 +173,12 @@ export default function ProductsPage() {
     () => (data?.products ?? []).find((item) => String(item.nmId) === selectedProductId) ?? null,
     [data, selectedProductId],
   );
+
+  const productPickerOptions = useMemo(() => {
+    const needle = normalizeProductCode(productKeyword);
+    const products = [...(data?.products ?? [])].sort((a, b) => a.sku.localeCompare(b.sku, undefined, { numeric: true, sensitivity: "base" }));
+    return needle ? products.filter((item) => normalizeProductCode(item.sku).includes(needle)) : products;
+  }, [data, productKeyword]);
 
   const summary = useMemo(() => {
     const products = scopedProducts;
@@ -264,14 +286,49 @@ export default function ProductsPage() {
   function changeWarehouse(value: string) {
     beginLoad();
     setWarehouse(value);
+    setSelectedProductId("");
+    setProductKeyword("");
+    setProductPickerOpen(false);
   }
 
   function changeProduct(value: string) {
     setSelectedProductId(value);
+    setProductKeyword((data?.products ?? []).find((item) => String(item.nmId) === value)?.sku ?? "");
+    setProductPickerOpen(false);
     setQuery("");
     setStatusFilter("all");
     setPage(1);
     setOrderPage(1);
+  }
+
+  function searchProduct(value: string) {
+    setProductKeyword(value);
+    setProductPickerOpen(true);
+    setActiveProductIndex(0);
+    if (selectedProductId) {
+      setSelectedProductId("");
+      setQuery("");
+      setStatusFilter("all");
+      setPage(1);
+      setOrderPage(1);
+    }
+  }
+
+  function handleProductPickerKeyDown(event: React.KeyboardEvent<HTMLInputElement>) {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setProductPickerOpen(true);
+      setActiveProductIndex((index) => Math.min(index + 1, Math.max(0, productPickerOptions.length - 1)));
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setProductPickerOpen(true);
+      setActiveProductIndex((index) => Math.max(0, index - 1));
+    } else if (event.key === "Enter" && productPickerOpen && productPickerOptions[activeProductIndex]) {
+      event.preventDefault();
+      changeProduct(String(productPickerOptions[activeProductIndex].nmId));
+    } else if (event.key === "Escape") {
+      setProductPickerOpen(false);
+    }
   }
 
   function changeSort(key: SortKey) {
@@ -313,7 +370,7 @@ export default function ProductsPage() {
         </nav>
         <div className="nav-section">当前分析</div>
         <div className="product-side-summary"><span>统计周期</span><b>{periodStart}</b><i>至</i><b>{periodEnd}</b><small>共 {countDays(periodStart, periodEnd)} 天</small></div>
-        <div className="product-side-summary scope"><span>分析范围</span><b>{warehouse || "全部仓库"}</b><small>{selectedProduct ? `单品：${selectedProduct.name}` : "全部商品"}</small></div>
+        <div className="product-side-summary scope"><span>分析范围</span><b>{warehouse || "全部仓库"}</b><small>{selectedProduct ? `单品：${selectedProduct.sku}` : "全部商品"}</small></div>
         <div className="sidebar-foot">
           <div className={`sync-status ${error ? "error" : "connected"}`}><span className="status-dot" /><div><b>{error ? "同步异常" : "商品数据已连接"}</b><small>{error ? "请重新同步" : formatDateTime(data?.syncedAt)}</small></div></div>
           <button className="connect-btn" onClick={refresh}>{loading ? "同步中…" : "重新同步商品数据"}</button>
@@ -336,7 +393,42 @@ export default function ProductsPage() {
         <section className="product-scope-panel" aria-label="选择仓库和商品">
           <div className="product-scope-heading"><strong>分析范围</strong><small>先选仓库，再选择是否只看一个商品</small></div>
           <label><span>WB 仓库</span><select disabled={loading} value={warehouse} onChange={(event) => changeWarehouse(event.target.value)}><option value="">全部仓库</option>{(data?.warehouses ?? []).map((item) => <option key={item.name} value={item.name}>{item.name} · {item.orders} 单 · 库存 {item.stock}</option>)}</select></label>
-          <label className="product-picker"><span>具体商品</span><select value={selectedProductId} onChange={(event) => changeProduct(event.target.value)}><option value="">全部商品</option>{(data?.products ?? []).map((item) => <option key={item.nmId} value={item.nmId}>{item.name} · {item.sku} · WB {item.nmId}</option>)}</select></label>
+          <div className="product-picker product-combobox" ref={productPickerRef}>
+            <span className="scope-field-label">具体商品（卖家商品编号）</span>
+            <div className={`product-combobox-control ${productPickerOpen ? "open" : ""}`}>
+              <span aria-hidden="true">⌕</span>
+              <input
+                aria-autocomplete="list"
+                aria-controls="seller-product-code-options"
+                aria-expanded={productPickerOpen}
+                autoComplete="off"
+                disabled={loading}
+                placeholder="输入卖家商品编号，支持模糊搜索"
+                role="combobox"
+                value={productKeyword}
+                onChange={(event) => searchProduct(event.target.value)}
+                onFocus={() => { setProductPickerOpen(true); setActiveProductIndex(0); }}
+                onKeyDown={handleProductPickerKeyDown}
+              />
+              {(productKeyword || selectedProductId) && <button type="button" aria-label="清空具体商品" onClick={() => changeProduct("")}>×</button>}
+            </div>
+            {productPickerOpen && !loading && (
+              <div className="product-code-options" id="seller-product-code-options" role="listbox">
+                {productPickerOptions.length ? productPickerOptions.map((item, index) => (
+                  <button
+                    className={index === activeProductIndex ? "active" : ""}
+                    key={item.nmId}
+                    role="option"
+                    tabIndex={-1}
+                    type="button"
+                    aria-selected={String(item.nmId) === selectedProductId}
+                    onMouseEnter={() => setActiveProductIndex(index)}
+                    onClick={() => changeProduct(String(item.nmId))}
+                  >{item.sku}</button>
+                )) : <p>没有匹配的卖家商品编号</p>}
+              </div>
+            )}
+          </div>
           {selectedProduct && <button className="clear-product-button" onClick={() => changeProduct("")}>退出单品模式</button>}
           <p>库存为当前可售库存，不随时间周期回溯，运输途中不计入；评价按商品统计，不区分仓库。</p>
         </section>
