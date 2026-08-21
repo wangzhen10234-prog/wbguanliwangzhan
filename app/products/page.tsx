@@ -233,8 +233,8 @@ export default function ProductsPage() {
 
         <section className="product-period-panel" aria-label="选择分析周期">
           <div className="product-period-heading"><strong>时间筛选</strong><small>表格全部指标按所选周期重新计算</small></div>
-          <div className="period-presets"><span>快捷周期</span><button onClick={() => choosePreset(7)}>近 7 天</button><button className={countDays(periodStart, periodEnd) === 30 ? "active" : ""} onClick={() => choosePreset(30)}>近 30 天</button><button onClick={() => choosePreset(90)}>近 90 天</button></div>
-          <div className="period-custom"><label><span>开始日期</span><input type="date" value={draftStart} min={earliest} max={today} onChange={(event) => { setDraftStart(event.target.value); setDateError(""); }} /></label><b>→</b><label><span>结束日期</span><input type="date" value={draftEnd} min={draftStart || earliest} max={today} onChange={(event) => { setDraftEnd(event.target.value); setDateError(""); }} /></label><button onClick={applyDates}>查询</button></div>
+          <div className="period-presets"><span>快捷周期</span><button disabled={loading} onClick={() => choosePreset(7)}>近 7 天</button><button disabled={loading} className={countDays(periodStart, periodEnd) === 30 ? "active" : ""} onClick={() => choosePreset(30)}>近 30 天</button><button disabled={loading} onClick={() => choosePreset(90)}>近 90 天</button></div>
+          <div className="period-custom"><label><span>开始日期</span><input disabled={loading} type="date" value={draftStart} min={earliest} max={today} onChange={(event) => { setDraftStart(event.target.value); setDateError(""); }} /></label><b>→</b><label><span>结束日期</span><input disabled={loading} type="date" value={draftEnd} min={draftStart || earliest} max={today} onChange={(event) => { setDraftEnd(event.target.value); setDateError(""); }} /></label><button disabled={loading} onClick={applyDates}>{loading ? "计算中…" : "查询"}</button></div>
           {dateError && <p className="product-date-error" role="alert">{dateError}</p>}
         </section>
 
