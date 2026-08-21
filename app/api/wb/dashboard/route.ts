@@ -119,6 +119,15 @@ async function dedupe<T>(key: string, loader: () => Promise<T>): Promise<T> {
   }
 }
 
+async function waitForPeerCache<T>(key: string): Promise<T | null> {
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 750));
+    const cached = await readEdgeCache<T>(key);
+    if (cached) return cached;
+  }
+  return null;
+}
+
 async function wbRequest<T>(url: string, token: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, {
     ...init,
@@ -149,10 +158,23 @@ async function loadStatistics(token: string) {
     }
     const start = new Date(Date.now() - 89 * DAY_MS).toISOString().slice(0, 10);
     const base = "https://statistics-api.wildberries.ru/api/v1/supplier";
-    const [orders, sales] = await Promise.all([
-      wbRequest<WbOrder[]>(`${base}/orders?dateFrom=${start}&flag=0`, token),
-      wbRequest<WbSale[]>(`${base}/sales?dateFrom=${start}&flag=0`, token),
-    ]);
+    let orders: WbOrder[];
+    let sales: WbSale[];
+    try {
+      [orders, sales] = await Promise.all([
+        wbRequest<WbOrder[]>(`${base}/orders?dateFrom=${start}&flag=0`, token),
+        wbRequest<WbSale[]>(`${base}/sales?dateFrom=${start}&flag=0`, token),
+      ]);
+    } catch (error) {
+      if (Number((error as { status?: number }).status || 0) === 429) {
+        const peerValue = await waitForPeerCache<{ orders: WbOrder[]; sales: WbSale[] }>("statistics");
+        if (peerValue) {
+          statisticsCache = { value: peerValue, expiresAt: Date.now() + CACHE_MS };
+          return peerValue;
+        }
+      }
+      throw error;
+    }
     statisticsCache = { value: { orders, sales }, expiresAt: Date.now() + CACHE_MS };
     await writeEdgeCache("statistics", statisticsCache.value);
     return statisticsCache.value;
