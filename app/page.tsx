@@ -1,10 +1,12 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { AppSidebar } from "./_components/app-sidebar";
 
 type DashboardData = {
   source: "wildberries";
   syncedAt: string;
+  syncSchedule: { timezone: string; hours: number[]; currentSlot: string; nextAt: string; mode: "manual" | "scheduled" };
   period: { from: string; to: string; days: number };
   metrics: {
     salesAmount: number;
@@ -23,6 +25,7 @@ type DashboardData = {
     name: string;
     sku: string;
     category: string;
+    image: string | null;
     sales: number;
     orders: number;
     units: number;
@@ -100,6 +103,7 @@ export default function Home() {
   const [dataError, setDataError] = useState("");
   const [reloadKey, setReloadKey] = useState(0);
   const dateControlRef = useRef<HTMLDivElement>(null);
+  const forceRefreshRef = useRef(false);
 
   const periodEnd = range === "custom" ? appliedEnd : today;
   const periodStart = range === "custom" ? appliedStart : shiftDate(today, -(Number(range) - 1));
@@ -109,7 +113,10 @@ export default function Home() {
 
   useEffect(() => {
     const controller = new AbortController();
-    fetch(`/api/wb/dashboard?from=${periodStart}&to=${periodEnd}`, {
+    const params = new URLSearchParams({ from: periodStart, to: periodEnd });
+    if (forceRefreshRef.current) params.set("refresh", "manual");
+    forceRefreshRef.current = false;
+    fetch(`/api/wb/dashboard?${params.toString()}`, {
       signal: controller.signal,
       headers: { Accept: "application/json" },
       cache: "no-store",
@@ -128,6 +135,22 @@ export default function Home() {
       });
     return () => controller.abort();
   }, [periodStart, periodEnd, reloadKey]);
+
+  useEffect(() => {
+    const nextAt = data?.syncSchedule?.nextAt;
+    if (!nextAt) return;
+    const delay = Math.max(1_000, new Date(nextAt).getTime() - Date.now() + 1_500);
+    const timer = window.setTimeout(() => {
+      if (window.localStorage.getItem("wb-last-auto-sync") === nextAt) {
+        window.setTimeout(() => { setLoading(true); setReloadKey((key) => key + 1); }, 12_000);
+        return;
+      }
+      window.localStorage.setItem("wb-last-auto-sync", nextAt);
+      setLoading(true);
+      setReloadKey((key) => key + 1);
+    }, delay);
+    return () => window.clearTimeout(timer);
+  }, [data?.syncSchedule?.nextAt]);
 
   useEffect(() => {
     const closeOnEscape = (event: KeyboardEvent) => {
@@ -193,6 +216,7 @@ export default function Home() {
   }
 
   function refresh() {
+    forceRefreshRef.current = true;
     setLoading(true);
     setDataError("");
     setReloadKey((key) => key + 1);
@@ -219,25 +243,7 @@ export default function Home() {
 
   return (
     <main className="app-shell">
-      <aside className="sidebar">
-        <div className="brand"><span className="brand-mark">W</span><div><strong>WB Insight</strong><small>俄罗斯店铺分析</small></div></div>
-        <nav aria-label="主导航">
-          <a className="nav-item active" href="#overview"><span>▦</span>经营总览</a>
-          <a className="nav-item" href="#sales"><span>↗</span>销售分析</a>
-          <a className="nav-item" href="/products"><span>◇</span>商品分析</a>
-          <a className="nav-item" href="#stock"><span>□</span>库存监控{inventoryAlerts > 0 && <i>{inventoryAlerts}</i>}</a>
-          <a className="nav-item" href="#finance"><span>₽</span>回款与余额</a>
-        </nav>
-        <div className="nav-section">数据管理</div>
-        <nav>
-          <button className="nav-item nav-button" onClick={refresh}><span>↻</span>立即同步</button>
-          <button className="nav-item nav-button" onClick={exportCsv} disabled={!products.length}><span>↓</span>数据导出</button>
-        </nav>
-        <div className="sidebar-foot">
-          <div className={`sync-status ${dataError ? "error" : "connected"}`}><span className="status-dot" /><div><b>{dataError ? "WB API 同步异常" : "已连接 WB API"}</b><small>{dataError ? "点击重新同步" : `最近同步 ${syncTime(data?.syncedAt)}`}</small></div></div>
-          <button className="connect-btn" onClick={() => setShowConnect(true)}>连接与安全状态</button>
-        </div>
-      </aside>
+      <AppSidebar active="overview" syncedAt={data?.syncedAt} nextSyncAt={data?.syncSchedule?.nextAt} loading={loading} error={dataError} onRefresh={refresh} />
 
       <section className="workspace" id="overview">
         <header className="topbar">
@@ -282,7 +288,7 @@ export default function Home() {
         </section>
 
         <section className="bottom-grid">
-          <article className="panel products-panel" id="products"><div className="panel-title"><div><h2>热销商品</h2><p>按真实销售额排序</p></div><a className="text-action" href="/products">完整商品分析 →</a></div><div className="table-wrap"><table><thead><tr><th>商品</th><th>销售额</th><th>订单</th><th>库存</th><th>成交率</th></tr></thead><tbody>{products.map((product, index) => <tr key={product.nmId}><td><div className={`product-thumb tone-${index % 4}`}>{product.category.slice(0, 1)}</div><div><b>{product.name}</b><small>{product.sku} · WB {product.nmId}</small></div></td><td><b>{formatRubles(product.sales)}</b></td><td>{product.orders}</td><td>{inventory?.available ? product.stock : "—"}</td><td><span className="rate">{product.buyoutRate.toFixed(1)}%</span></td></tr>)}{!loading && products.length === 0 && <tr className="empty-row"><td colSpan={5}>本周期暂无商品销售记录</td></tr>}</tbody></table></div></article>
+          <article className="panel products-panel" id="products"><div className="panel-title"><div><h2>热销商品</h2><p>按真实销售额排序</p></div><a className="text-action" href="/products">完整综合商品分析 →</a></div><div className="table-wrap"><table><thead><tr><th>商品</th><th>销售额</th><th>订单</th><th>库存</th><th>成交率</th></tr></thead><tbody>{products.map((product, index) => <tr key={product.nmId}><td><div className={`product-thumb tone-${index % 4}`}>{product.category.slice(0, 1)}</div><div><b>{product.name}</b><small>{product.sku} · WB {product.nmId}</small></div></td><td><b>{formatRubles(product.sales)}</b></td><td>{product.orders}</td><td>{inventory?.available ? product.stock : "—"}</td><td><span className="rate">{product.buyoutRate.toFixed(1)}%</span></td></tr>)}{!loading && products.length === 0 && <tr className="empty-row"><td colSpan={5}>本周期暂无商品销售记录</td></tr>}</tbody></table></div></article>
           <article className="panel stock-panel" id="stock"><div className="panel-title"><div><h2>库存监控</h2><p>{inventory?.available ? `${inventory.totalQuantity.toLocaleString("en-US")} 件 · ${inventory.productCount} 个商品` : "正在读取 WB 仓库库存"}</p></div><span className="alert-count">{inventory?.available ? `${inventoryAlerts} 项` : "—"}</span></div><div className="stock-item"><div className="stock-icon urgent">!</div><div><b>{inventory?.available ? `${inventory.critical} 个商品即将缺货` : "库存数据暂不可用"}</b><p>{inventory?.available ? "预计可售不足 5 天" : "稍后重新同步即可重试"}</p></div><span>重点</span></div><div className="stock-item"><div className="stock-icon warning">↓</div><div><b>{inventory?.available ? `${inventory.low} 个商品库存偏低` : "—"}</b><p>库存覆盖 5–10 天</p></div><span>关注</span></div><div className="stock-item"><div className="stock-icon calm">↗</div><div><b>{inventory?.available ? `${inventory.slow} 个商品周转较慢` : "—"}</b><p>本周期无订单但仍有库存</p></div><span>分析</span></div><button className="stock-button" onClick={refresh} disabled={loading}>{loading ? "同步中…" : "立即刷新库存"}</button></article>
         </section>
       </section>

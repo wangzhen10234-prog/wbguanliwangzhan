@@ -66,6 +66,7 @@ type WbCard = {
   title?: string;
   subjectName?: string;
   sizes?: Array<{ chrtID?: number }>;
+  photos?: Array<{ big?: string; c516x688?: string; c246x328?: string; square?: string }>;
 };
 
 type WbFeedback = {
@@ -88,10 +89,32 @@ let feedbacksCache: CacheEntry<WbFeedback[]> | null = null;
 const pendingLoads = new Map<string, Promise<unknown>>();
 
 const DAY_MS = 86_400_000;
-const CACHE_MS = 5 * 60_000;
+const BEIJING_OFFSET_MS = 8 * 60 * 60_000;
+const AUTO_SYNC_HOURS = [8, 14, 19, 23] as const;
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const JSON_HEADERS = { "Content-Type": "application/json; charset=utf-8" };
-const EDGE_CACHE_BASE = "https://wb-insight-cache.invalid/v1";
+const EDGE_CACHE_BASE = "https://wb-insight-cache.invalid/v2";
+
+function syncSchedule(now = Date.now()) {
+  const beijingNow = new Date(now + BEIJING_OFFSET_MS);
+  const year = beijingNow.getUTCFullYear();
+  const month = beijingNow.getUTCMonth();
+  const day = beijingNow.getUTCDate();
+  const hour = beijingNow.getUTCHours();
+  const dateKey = beijingNow.toISOString().slice(0, 10);
+  const previousDateKey = new Date(Date.UTC(year, month, day - 1)).toISOString().slice(0, 10);
+  const currentHour = [...AUTO_SYNC_HOURS].reverse().find((value) => hour >= value);
+  const slot = currentHour === undefined ? `${previousDateKey}-23` : `${dateKey}-${String(currentHour).padStart(2, "0")}`;
+  const nextHour = AUTO_SYNC_HOURS.find((value) => value > hour);
+  const nextAt = nextHour === undefined
+    ? Date.UTC(year, month, day + 1, AUTO_SYNC_HOURS[0]) - BEIJING_OFFSET_MS
+    : Date.UTC(year, month, day, nextHour) - BEIJING_OFFSET_MS;
+  return { slot, nextAt };
+}
+
+function cacheExpiry() {
+  return syncSchedule().nextAt;
+}
 
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -128,7 +151,7 @@ async function readEdgeCache<T>(key: string): Promise<T | null> {
   try {
     const cache = edgeCache();
     if (!cache) return null;
-    const response = await cache.match(new Request(`${EDGE_CACHE_BASE}/${key}`));
+    const response = await cache.match(new Request(`${EDGE_CACHE_BASE}/${syncSchedule().slot}/${key}`));
     return response ? await response.json() as T : null;
   } catch {
     return null;
@@ -139,8 +162,10 @@ async function writeEdgeCache(key: string, value: unknown) {
   try {
     const cache = edgeCache();
     if (!cache) return;
-    await cache.put(new Request(`${EDGE_CACHE_BASE}/${key}`), new Response(JSON.stringify(value), {
-      headers: { "Content-Type": "application/json", "Cache-Control": "public, max-age=300" },
+    const schedule = syncSchedule();
+    const maxAge = Math.max(60, Math.floor((schedule.nextAt - Date.now()) / 1000));
+    await cache.put(new Request(`${EDGE_CACHE_BASE}/${schedule.slot}/${key}`), new Response(JSON.stringify(value), {
+      headers: { "Content-Type": "application/json", "Cache-Control": `public, max-age=${maxAge}` },
     }));
   } catch {
     // Local development runtimes may not expose the Cloudflare default cache.
@@ -188,12 +213,12 @@ async function wbRequest<T>(url: string, token: string, init?: RequestInit): Pro
   return response.json() as Promise<T>;
 }
 
-async function loadStatistics(token: string) {
-  if (statisticsCache && statisticsCache.expiresAt > Date.now()) return statisticsCache.value;
-  return dedupe("statistics", async () => {
-    const cached = await readEdgeCache<{ orders: WbOrder[]; sales: WbSale[] }>("statistics");
+async function loadStatistics(token: string, forceRefresh = false) {
+  if (!forceRefresh && statisticsCache && statisticsCache.expiresAt > Date.now()) return statisticsCache.value;
+  return dedupe(forceRefresh ? "statistics-manual" : "statistics", async () => {
+    const cached = forceRefresh ? null : await readEdgeCache<{ orders: WbOrder[]; sales: WbSale[] }>("statistics");
     if (cached) {
-      statisticsCache = { value: cached, expiresAt: Date.now() + CACHE_MS };
+      statisticsCache = { value: cached, expiresAt: cacheExpiry() };
       return cached;
     }
     const start = new Date(Date.now() - 89 * DAY_MS).toISOString().slice(0, 10);
@@ -209,24 +234,24 @@ async function loadStatistics(token: string) {
       if (Number((error as { status?: number }).status || 0) === 429) {
         const peerValue = await waitForPeerCache<{ orders: WbOrder[]; sales: WbSale[] }>("statistics");
         if (peerValue) {
-          statisticsCache = { value: peerValue, expiresAt: Date.now() + CACHE_MS };
+          statisticsCache = { value: peerValue, expiresAt: cacheExpiry() };
           return peerValue;
         }
       }
       throw error;
     }
-    statisticsCache = { value: { orders, sales }, expiresAt: Date.now() + CACHE_MS };
+    statisticsCache = { value: { orders, sales }, expiresAt: cacheExpiry() };
     await writeEdgeCache("statistics", statisticsCache.value);
     return statisticsCache.value;
   });
 }
 
-async function loadStocks(token: string) {
-  if (stockCache && stockCache.expiresAt > Date.now()) return stockCache.value;
-  return dedupe("stocks", async () => {
-    const cached = await readEdgeCache<WbStock[]>("stocks");
+async function loadStocks(token: string, forceRefresh = false) {
+  if (!forceRefresh && stockCache && stockCache.expiresAt > Date.now()) return stockCache.value;
+  return dedupe(forceRefresh ? "stocks-manual" : "stocks", async () => {
+    const cached = forceRefresh ? null : await readEdgeCache<WbStock[]>("stocks");
     if (cached) {
-      stockCache = { value: cached, expiresAt: Date.now() + CACHE_MS };
+      stockCache = { value: cached, expiresAt: cacheExpiry() };
       return cached;
     }
     const response = await wbRequest<{ data?: { items?: WbStock[] } }>(
@@ -235,18 +260,18 @@ async function loadStocks(token: string) {
       { method: "POST", body: JSON.stringify({ nmIds: [], limit: 250000, offset: 0 }) },
     );
     const stocks = response.data?.items ?? [];
-    stockCache = { value: stocks, expiresAt: Date.now() + CACHE_MS };
+    stockCache = { value: stocks, expiresAt: cacheExpiry() };
     await writeEdgeCache("stocks", stocks);
     return stocks;
   });
 }
 
-async function loadSellerStocks(token: string, cards: WbCard[]) {
-  if (sellerStockCache && sellerStockCache.expiresAt > Date.now()) return sellerStockCache.value;
-  return dedupe("seller-stocks", async () => {
-    const cached = await readEdgeCache<SellerStockSnapshot>("seller-stocks");
+async function loadSellerStocks(token: string, cards: WbCard[], forceRefresh = false) {
+  if (!forceRefresh && sellerStockCache && sellerStockCache.expiresAt > Date.now()) return sellerStockCache.value;
+  return dedupe(forceRefresh ? "seller-stocks-manual" : "seller-stocks", async () => {
+    const cached = forceRefresh ? null : await readEdgeCache<SellerStockSnapshot>("seller-stocks");
     if (cached) {
-      sellerStockCache = { value: cached, expiresAt: Date.now() + CACHE_MS };
+      sellerStockCache = { value: cached, expiresAt: cacheExpiry() };
       return cached;
     }
 
@@ -275,18 +300,18 @@ async function loadSellerStocks(token: string, cards: WbCard[]) {
       result.warehouses.push({ ...warehouse, officeName: officeNames.get(Number(warehouse.officeId || 0)) || "", stocks });
     }
 
-    sellerStockCache = { value: result, expiresAt: Date.now() + CACHE_MS };
+    sellerStockCache = { value: result, expiresAt: cacheExpiry() };
     await writeEdgeCache("seller-stocks", result);
     return result;
   });
 }
 
-async function loadFbsOrders(token: string) {
-  if (fbsOrderCache && fbsOrderCache.expiresAt > Date.now()) return fbsOrderCache.value;
-  return dedupe("fbs-orders-180", async () => {
-    const cached = await readEdgeCache<FbsOrderSnapshot>("fbs-orders-180-v1");
+async function loadFbsOrders(token: string, forceRefresh = false) {
+  if (!forceRefresh && fbsOrderCache && fbsOrderCache.expiresAt > Date.now()) return fbsOrderCache.value;
+  return dedupe(forceRefresh ? "fbs-orders-180-manual" : "fbs-orders-180", async () => {
+    const cached = forceRefresh ? null : await readEdgeCache<FbsOrderSnapshot>("fbs-orders-180-v1");
     if (cached) {
-      fbsOrderCache = { value: cached, expiresAt: Date.now() + CACHE_MS };
+      fbsOrderCache = { value: cached, expiresAt: cacheExpiry() };
       return cached;
     }
 
@@ -336,7 +361,7 @@ async function loadFbsOrders(token: string) {
     for (const order of orders) Object.assign(order, statusById.get(String(order.id)) ?? {});
 
     const result = { available: true, orders };
-    fbsOrderCache = { value: result, expiresAt: Date.now() + CACHE_MS };
+    fbsOrderCache = { value: result, expiresAt: cacheExpiry() };
     await writeEdgeCache("fbs-orders-180-v1", result);
     return result;
   });
@@ -388,30 +413,30 @@ function resolveSellerWarehouseName(warehouse: SellerWarehouse & { officeName?: 
   return partial || warehouse.name?.trim() || `仓库 ${warehouse.id}`;
 }
 
-async function loadBalance(token: string) {
-  if (balanceCache && balanceCache.expiresAt > Date.now()) return balanceCache.value;
-  return dedupe("balance", async () => {
-    const cached = await readEdgeCache<{ current?: number; for_withdraw?: number }>("balance");
+async function loadBalance(token: string, forceRefresh = false) {
+  if (!forceRefresh && balanceCache && balanceCache.expiresAt > Date.now()) return balanceCache.value;
+  return dedupe(forceRefresh ? "balance-manual" : "balance", async () => {
+    const cached = forceRefresh ? null : await readEdgeCache<{ current?: number; for_withdraw?: number }>("balance");
     if (cached) {
-      balanceCache = { value: cached, expiresAt: Date.now() + CACHE_MS };
+      balanceCache = { value: cached, expiresAt: cacheExpiry() };
       return cached;
     }
     const balance = await wbRequest<{ current?: number; for_withdraw?: number }>(
       "https://finance-api.wildberries.ru/api/v1/account/balance",
       token,
     );
-    balanceCache = { value: balance, expiresAt: Date.now() + CACHE_MS };
+    balanceCache = { value: balance, expiresAt: cacheExpiry() };
     await writeEdgeCache("balance", balance);
     return balance;
   });
 }
 
-async function loadCards(token: string) {
-  if (cardsCache && cardsCache.expiresAt > Date.now()) return cardsCache.value;
-  return dedupe("cards", async () => {
-    const cached = await readEdgeCache<WbCard[]>("cards");
+async function loadCards(token: string, forceRefresh = false) {
+  if (!forceRefresh && cardsCache && cardsCache.expiresAt > Date.now()) return cardsCache.value;
+  return dedupe(forceRefresh ? "cards-manual" : "cards", async () => {
+    const cached = forceRefresh ? null : await readEdgeCache<WbCard[]>("cards");
     if (cached) {
-      cardsCache = { value: cached, expiresAt: Date.now() + CACHE_MS };
+      cardsCache = { value: cached, expiresAt: cacheExpiry() };
       return cached;
     }
 
@@ -437,18 +462,18 @@ async function loadCards(token: string) {
       if (batch.length < 100 || !response.cursor?.updatedAt || !response.cursor?.nmID) break;
       cursor = { updatedAt: response.cursor.updatedAt, nmID: response.cursor.nmID };
     }
-    cardsCache = { value: cards, expiresAt: Date.now() + CACHE_MS };
+    cardsCache = { value: cards, expiresAt: cacheExpiry() };
     await writeEdgeCache("cards", cards);
     return cards;
   });
 }
 
-async function loadFeedbacks(token: string) {
-  if (feedbacksCache && feedbacksCache.expiresAt > Date.now()) return feedbacksCache.value;
-  return dedupe("feedbacks", async () => {
-    const cached = await readEdgeCache<WbFeedback[]>("feedbacks");
+async function loadFeedbacks(token: string, forceRefresh = false) {
+  if (!forceRefresh && feedbacksCache && feedbacksCache.expiresAt > Date.now()) return feedbacksCache.value;
+  return dedupe(forceRefresh ? "feedbacks-manual" : "feedbacks", async () => {
+    const cached = forceRefresh ? null : await readEdgeCache<WbFeedback[]>("feedbacks");
     if (cached) {
-      feedbacksCache = { value: cached, expiresAt: Date.now() + CACHE_MS };
+      feedbacksCache = { value: cached, expiresAt: cacheExpiry() };
       return cached;
     }
 
@@ -463,7 +488,7 @@ async function loadFeedbacks(token: string) {
       byId.set(key, feedback);
     }
     const feedbacks = [...byId.values()];
-    feedbacksCache = { value: feedbacks, expiresAt: Date.now() + CACHE_MS };
+    feedbacksCache = { value: feedbacks, expiresAt: cacheExpiry() };
     await writeEdgeCache("feedbacks", feedbacks);
     return feedbacks;
   });
@@ -478,6 +503,7 @@ export async function GET(request: Request) {
   const to = url.searchParams.get("to") ?? "";
   const requestedWarehouse = url.searchParams.get("warehouse")?.trim() ?? "";
   const includeOrderDetails = url.searchParams.get("includeOrders") === "true";
+  const forceRefresh = url.searchParams.get("refresh") === "manual";
   if (!DATE_PATTERN.test(from) || !DATE_PATTERN.test(to)) return json({ error: "日期格式无效" }, 400);
   if (requestedWarehouse.length > 160) return json({ error: "仓库名称无效" }, 400);
 
@@ -490,17 +516,17 @@ export async function GET(request: Request) {
   if (toValue > Date.now() + DAY_MS) return json({ error: "不能查询未来日期" }, 400);
 
   try {
-    const cardsPromise = loadCards(token).catch(() => [] as WbCard[]);
+    const cardsPromise = loadCards(token, forceRefresh).catch(() => [] as WbCard[]);
     const fbsOrdersPromise = includeOrderDetails
-      ? loadFbsOrders(token).catch(() => ({ available: false, orders: [] } as FbsOrderSnapshot))
+      ? loadFbsOrders(token, forceRefresh).catch(() => ({ available: false, orders: [] } as FbsOrderSnapshot))
       : Promise.resolve({ available: false, orders: [] } as FbsOrderSnapshot);
     const [statistics, stockResult, balanceResult, cardsResult, feedbacksResult, sellerStockResult, fbsOrderResult] = await Promise.all([
-      loadStatistics(token),
-      loadStocks(token).catch(() => [] as WbStock[]),
-      loadBalance(token).catch(() => ({})),
+      loadStatistics(token, forceRefresh),
+      loadStocks(token, forceRefresh).catch(() => [] as WbStock[]),
+      loadBalance(token, forceRefresh).catch(() => ({})),
       cardsPromise,
-      loadFeedbacks(token).catch(() => [] as WbFeedback[]),
-      cardsPromise.then((cards) => loadSellerStocks(token, cards)).catch(() => ({ warehouses: [] } as SellerStockSnapshot)),
+      loadFeedbacks(token, forceRefresh).catch(() => [] as WbFeedback[]),
+      cardsPromise.then((cards) => loadSellerStocks(token, cards, forceRefresh)).catch(() => ({ warehouses: [] } as SellerStockSnapshot)),
       fbsOrdersPromise,
     ]);
 
@@ -552,7 +578,7 @@ export async function GET(request: Request) {
         const outcome = orderOutcome(order);
         return {
           id: order.orderUid || String(order.id || ""),
-          orderNumber: order.orderUid || String(order.id || ""),
+          orderNumber: String(order.id || ""),
           nmId: Number(order.nmId || 0),
           article: order.article || "—",
           createdAt: order.createdAt || "",
@@ -623,6 +649,7 @@ export async function GET(request: Request) {
       sku: string;
       category: string;
       brand: string;
+      image: string | null;
       sales: number;
       orders: number;
       grossSalesUnits: number;
@@ -640,6 +667,7 @@ export async function GET(request: Request) {
         sku: card.vendorCode || String(id),
         category: card.subjectName || "其他",
         brand: card.brand || "—",
+        image: card.photos?.[0]?.c246x328 || card.photos?.[0]?.c516x688 || card.photos?.[0]?.big || card.photos?.[0]?.square || null,
         sales: 0,
         orders: 0,
         grossSalesUnits: 0,
@@ -656,6 +684,7 @@ export async function GET(request: Request) {
         sku: String(id),
         category: "其他",
         brand: "—",
+        image: null,
         sales: 0,
         orders: 0,
         grossSalesUnits: 0,
@@ -673,6 +702,7 @@ export async function GET(request: Request) {
         sku: row.supplierArticle || String(id),
         category: row.category || row.brand || "其他",
         brand: row.brand || "—",
+        image: null,
         sales: 0,
         orders: 0,
         grossSalesUnits: 0,
@@ -808,9 +838,17 @@ export async function GET(request: Request) {
       return { name, orders: warehouseOrders, returns: warehouseReturns, stock: warehouseStock };
     });
 
+    const schedule = syncSchedule();
     return json({
       source: "wildberries",
       syncedAt: new Date().toISOString(),
+      syncSchedule: {
+        timezone: "Asia/Shanghai",
+        hours: [...AUTO_SYNC_HOURS],
+        currentSlot: schedule.slot,
+        nextAt: new Date(schedule.nextAt).toISOString(),
+        mode: forceRefresh ? "manual" : "scheduled",
+      },
       period: { from, to, days },
       currency: useDetailedMetrics && days > 90 ? "CNY" : "RUB",
       selectedWarehouse: requestedWarehouse || null,

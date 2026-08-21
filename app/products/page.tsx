@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import Link from "next/link";
+import { AppSidebar } from "../_components/app-sidebar";
 
 type ProductRow = {
   nmId: number;
@@ -9,6 +9,7 @@ type ProductRow = {
   sku: string;
   category: string;
   brand: string;
+  image: string | null;
   sales: number;
   orders: number;
   grossSalesUnits: number;
@@ -34,6 +35,7 @@ type ProductRow = {
 type ProductData = {
   source: string;
   syncedAt: string;
+  syncSchedule: { timezone: string; hours: number[]; currentSlot: string; nextAt: string; mode: "manual" | "scheduled" };
   period: { from: string; to: string; days: number };
   currency: "RUB" | "CNY";
   selectedWarehouse: string | null;
@@ -82,21 +84,12 @@ function formatMoney(value: number, currency: "RUB" | "CNY" = "RUB") {
   return `${symbol} ${Math.round(value || 0).toLocaleString("en-US")}`;
 }
 
-function formatDateTime(value?: string) {
-  if (!value) return "正在首次同步";
-  return new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(value));
-}
-
 function formatPercent(value: number | null) {
   return value === null ? "—" : `${value.toFixed(1)}%`;
 }
 
 function escapeCsv(value: unknown) {
   return `"${String(value ?? "").replaceAll('"', '""')}"`;
-}
-
-function supplierStatusLabel(value: string) {
-  return ({ new: "新订单", confirm: "备货中", complete: "配送中", cancel: "卖家取消" } as Record<string, string>)[value] || "—";
 }
 
 function normalizeProductCode(value: string) {
@@ -125,16 +118,16 @@ export default function ProductsPage() {
   const [sortKey, setSortKey] = useState<SortKey>("sales");
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("desc");
   const [page, setPage] = useState(1);
-  const [orderPage, setOrderPage] = useState(1);
-  const [orderStatusFilter, setOrderStatusFilter] = useState("all");
-  const [orderQuery, setOrderQuery] = useState("");
   const productPickerRef = useRef<HTMLDivElement>(null);
+  const forceRefreshRef = useRef(false);
 
   useEffect(() => {
     const controller = new AbortController();
     const params = new URLSearchParams({ from: periodStart, to: periodEnd });
     if (warehouse) params.set("warehouse", warehouse);
     params.set("includeOrders", "true");
+    if (forceRefreshRef.current) params.set("refresh", "manual");
+    forceRefreshRef.current = false;
     fetch(`/api/wb/dashboard?${params.toString()}`, {
       signal: controller.signal,
       headers: { Accept: "application/json" },
@@ -154,6 +147,22 @@ export default function ProductsPage() {
       });
     return () => controller.abort();
   }, [periodStart, periodEnd, warehouse, reloadKey]);
+
+  useEffect(() => {
+    const nextAt = data?.syncSchedule?.nextAt;
+    if (!nextAt) return;
+    const delay = Math.max(1_000, new Date(nextAt).getTime() - Date.now() + 1_500);
+    const timer = window.setTimeout(() => {
+      if (window.localStorage.getItem("wb-last-auto-sync") === nextAt) {
+        window.setTimeout(() => { setLoading(true); setReloadKey((key) => key + 1); }, 12_000);
+        return;
+      }
+      window.localStorage.setItem("wb-last-auto-sync", nextAt);
+      setLoading(true);
+      setReloadKey((key) => key + 1);
+    }, delay);
+    return () => window.clearTimeout(timer);
+  }, [data?.syncSchedule?.nextAt]);
 
   useEffect(() => {
     function closeProductPicker(event: PointerEvent) {
@@ -218,42 +227,10 @@ export default function ProductsPage() {
   const pageCount = Math.max(1, Math.ceil(filteredProducts.length / PAGE_SIZE));
   const visibleProducts = filteredProducts.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
 
-  const scopedOrderDetails = useMemo(() => {
-    const orders = data?.orderDetails ?? [];
-    if (!selectedProductId) return orders;
-    return orders.filter((order) => String(order.nmId) === selectedProductId);
-  }, [data, selectedProductId]);
-
-  const orderRollup = useMemo(() => {
-    const result = scopedOrderDetails.reduce((summary, order) => {
-      summary.orders += 1;
-      summary.orderAmount += order.amount;
-      if (order.outcome === "success") summary.success += 1;
-      else if (order.outcome === "abnormal") summary.abnormal += 1;
-      else summary.pending += 1;
-      return summary;
-    }, { orders: 0, success: 0, abnormal: 0, pending: 0, orderAmount: 0 });
-    const completed = result.success + result.abnormal;
-    return { ...result, abnormalRate: completed ? (result.abnormal / completed) * 100 : 0 };
-  }, [scopedOrderDetails]);
-
-  const filteredOrderDetails = useMemo(() => {
-    const needle = orderQuery.trim().toLocaleLowerCase();
-    return scopedOrderDetails.filter((order) => {
-      const matchesStatus = orderStatusFilter === "all" || order.outcome === orderStatusFilter;
-      const matchesQuery = !needle || [order.orderNumber, order.article, order.warehouseName, order.statusLabel].some((value) => value.toLocaleLowerCase().includes(needle));
-      return matchesStatus && matchesQuery;
-    });
-  }, [scopedOrderDetails, orderQuery, orderStatusFilter]);
-
-  const orderPageCount = Math.max(1, Math.ceil(filteredOrderDetails.length / PAGE_SIZE));
-  const visibleOrderDetails = filteredOrderDetails.slice((orderPage - 1) * PAGE_SIZE, orderPage * PAGE_SIZE);
-
   function beginLoad() {
     setLoading(true);
     setError("");
     setPage(1);
-    setOrderPage(1);
   }
 
   function choosePreset(days: number) {
@@ -279,6 +256,7 @@ export default function ProductsPage() {
   }
 
   function refresh() {
+    forceRefreshRef.current = true;
     beginLoad();
     setReloadKey((key) => key + 1);
   }
@@ -298,7 +276,6 @@ export default function ProductsPage() {
     setQuery("");
     setStatusFilter("all");
     setPage(1);
-    setOrderPage(1);
   }
 
   function searchProduct(value: string) {
@@ -310,7 +287,6 @@ export default function ProductsPage() {
       setQuery("");
       setStatusFilter("all");
       setPage(1);
-      setOrderPage(1);
     }
   }
 
@@ -359,27 +335,15 @@ export default function ProductsPage() {
 
   return (
     <main className="app-shell">
-      <aside className="sidebar">
-        <div className="brand"><span className="brand-mark">W</span><div><strong>WB Insight</strong><small>俄罗斯店铺分析</small></div></div>
-        <nav aria-label="主导航">
-          <Link className="nav-item" href="/"><span>▦</span>经营总览</Link>
-          <Link className="nav-item" href="/#sales"><span>↗</span>销售分析</Link>
-          <Link className="nav-item active" href="/products"><span>◇</span>商品分析</Link>
-          <Link className="nav-item" href="/#stock"><span>□</span>库存监控</Link>
-          <Link className="nav-item" href="/#finance"><span>₽</span>回款与余额</Link>
-        </nav>
+      <AppSidebar active="products" syncedAt={data?.syncedAt} nextSyncAt={data?.syncSchedule?.nextAt} loading={loading} error={error} onRefresh={refresh}>
         <div className="nav-section">当前分析</div>
         <div className="product-side-summary"><span>统计周期</span><b>{periodStart}</b><i>至</i><b>{periodEnd}</b><small>共 {countDays(periodStart, periodEnd)} 天</small></div>
         <div className="product-side-summary scope"><span>分析范围</span><b>{warehouse || "全部仓库"}</b><small>{selectedProduct ? `单品：${selectedProduct.sku}` : "全部商品"}</small></div>
-        <div className="sidebar-foot">
-          <div className={`sync-status ${error ? "error" : "connected"}`}><span className="status-dot" /><div><b>{error ? "同步异常" : "商品数据已连接"}</b><small>{error ? "请重新同步" : formatDateTime(data?.syncedAt)}</small></div></div>
-          <button className="connect-btn" onClick={refresh}>{loading ? "同步中…" : "重新同步商品数据"}</button>
-        </div>
-      </aside>
+      </AppSidebar>
 
       <section className="workspace product-workspace">
         <header className="topbar product-topbar">
-          <div><p className="eyebrow">PRODUCT PERFORMANCE · 真实商品数据</p><h1>商品分析明细</h1></div>
+          <div><p className="eyebrow">PRODUCT PERFORMANCE · 真实商品数据</p><h1>综合商品分析</h1></div>
           <div className="top-actions"><button className="export-button" onClick={exportCsv} disabled={!filteredProducts.length}>↓ 导出当前表格</button><div className="avatar">Z</div></div>
         </header>
 
@@ -456,30 +420,13 @@ export default function ProductsPage() {
           <div className="product-detail-table-wrap">
             <table className="product-detail-table">
               <thead><tr><th>商品</th><th><button onClick={() => changeSort("sales")}>销售额{sortMark("sales")}</button></th><th><button onClick={() => changeSort("orders")}>订单{sortMark("orders")}</button></th><th><button onClick={() => changeSort("netUnits")}>正常签收{sortMark("netUnits")}</button></th><th><button onClick={() => changeSort("returnRate")}>异常退货率{sortMark("returnRate")}</button></th><th>待签收</th><th>正常签收率</th><th><button onClick={() => changeSort("periodAverageRating")}>本期评分{sortMark("periodAverageRating")}</button></th><th><button onClick={() => changeSort("periodPositiveRate")}>本期好评率{sortMark("periodPositiveRate")}</button></th><th><button onClick={() => changeSort("stock")}>当前库存{sortMark("stock")}</button></th><th><button onClick={() => changeSort("stockCoverDays")}>可售天数{sortMark("stockCoverDays")}</button></th><th>状态</th></tr></thead>
-              <tbody>{visibleProducts.map((item, index) => <tr key={item.nmId}><td><div className={`product-thumb tone-${index % 4}`}>{item.category.slice(0, 1) || "W"}</div><div className="product-identity"><b>{item.name}</b><small>{item.sku} · WB {item.nmId}</small><em>{item.category} · {item.brand}</em></div></td><td><b>{formatMoney(item.sales, data?.currency)}</b><small>均价 {formatMoney(item.averagePrice, data?.currency)}</small></td><td><b>{item.orders}</b></td><td><b>{item.netUnits}</b></td><td><span className={item.returnRate >= 15 ? "value-bad" : item.returnRate <= 5 ? "value-good" : ""}>{item.returnRate.toFixed(1)}%</span><small>{item.returnsCount} 笔非正常</small></td><td><span>{item.pendingCount}</span></td><td><span>{item.buyoutRate.toFixed(1)}%</span></td><td><span className="rating-value">{item.periodAverageRating === null ? "—" : `★ ${item.periodAverageRating.toFixed(2)}`}</span><small>本期 {item.periodReviewsCount} 条 · 累计 {item.reviewsCount}</small></td><td><span className={(item.periodPositiveRate ?? 100) < 80 ? "value-bad" : "value-good"}>{formatPercent(item.periodPositiveRate)}</span><small>累计 {formatPercent(item.positiveRate)}</small></td><td><b>{data?.dataAvailability.inventory ? item.stock : "—"}</b></td><td><span>{item.stockCoverDays === null ? "无销量" : `${item.stockCoverDays.toFixed(1)} 天`}</span><small>日均 {item.dailyUnits.toFixed(2)}</small></td><td><span className={`product-status status-${item.status}`}>{item.status}</span></td></tr>)}{!loading && visibleProducts.length === 0 && <tr className="empty-row"><td colSpan={12}>没有符合当前筛选条件的商品</td></tr>}</tbody>
+              <tbody>{visibleProducts.map((item, index) => <tr key={item.nmId}><td>{item.image ? <span className="product-photo" style={{ backgroundImage: `url(${item.image})` }} aria-hidden="true" /> : <div className={`product-thumb tone-${index % 4}`}>{item.category.slice(0, 1) || "W"}</div>}<div className="product-identity emphasized-sku"><b>{item.name}</b><small>{item.sku}</small><em>WB {item.nmId} · {item.category} · {item.brand}</em></div></td><td><b>{formatMoney(item.sales, data?.currency)}</b><small>均价 {formatMoney(item.averagePrice, data?.currency)}</small></td><td><b>{item.orders}</b></td><td><b>{item.netUnits}</b></td><td><span className={item.returnRate >= 15 ? "value-bad" : item.returnRate <= 5 ? "value-good" : ""}>{item.returnRate.toFixed(1)}%</span><small>{item.returnsCount} 笔非正常</small></td><td><span>{item.pendingCount}</span></td><td><span>{item.buyoutRate.toFixed(1)}%</span></td><td><span className="rating-value">{item.periodAverageRating === null ? "—" : `★ ${item.periodAverageRating.toFixed(2)}`}</span><small>本期 {item.periodReviewsCount} 条 · 累计 {item.reviewsCount}</small></td><td><span className={(item.periodPositiveRate ?? 100) < 80 ? "value-bad" : "value-good"}>{formatPercent(item.periodPositiveRate)}</span><small>累计 {formatPercent(item.positiveRate)}</small></td><td><b>{data?.dataAvailability.inventory ? item.stock : "—"}</b></td><td><span>{item.stockCoverDays === null ? "无销量" : `${item.stockCoverDays.toFixed(1)} 天`}</span><small>日均 {item.dailyUnits.toFixed(2)}</small></td><td><span className={`product-status status-${item.status}`}>{item.status}</span></td></tr>)}{!loading && visibleProducts.length === 0 && <tr className="empty-row"><td colSpan={12}>没有符合当前筛选条件的商品</td></tr>}</tbody>
             </table>
           </div>
 
           <footer className="product-table-footer"><span>共 {filteredProducts.length} 个商品 · 第 {Math.min(page, pageCount)} / {pageCount} 页</span><div><button onClick={() => setPage((value) => Math.max(1, value - 1))} disabled={page <= 1}>← 上一页</button><button onClick={() => setPage((value) => Math.min(pageCount, value + 1))} disabled={page >= pageCount}>下一页 →</button></div></footer>
         </section>
 
-        <section className="order-detail-panel">
-          <div className="order-detail-toolbar">
-            <div><h2>{selectedProduct ? "单品全部订单与状态" : "全部订单与状态"}</h2><p>第一行为综合统计；取消、拒收、退回、瑕疵和卖家取消全部计入非正常签收。</p></div>
-            <div className="order-detail-filters"><label><span>⌕</span><input type="search" value={orderQuery} placeholder="搜索订单号、SKU、仓库或状态" onChange={(event) => { setOrderQuery(event.target.value); setOrderPage(1); }} /></label><select value={orderStatusFilter} onChange={(event) => { setOrderStatusFilter(event.target.value); setOrderPage(1); }}><option value="all">全部订单状态</option><option value="success">正常签收</option><option value="abnormal">非正常签收</option><option value="pending">待签收/处理中</option></select></div>
-          </div>
-          <div className="order-detail-table-wrap">
-            <table className="order-detail-table">
-              <thead><tr><th>订单时间</th><th>订单号</th><th>商品</th><th>仓库</th><th>订单金额</th><th>供应商状态</th><th>WB 状态</th><th>签收结果</th></tr></thead>
-              <tbody>
-                <tr className="order-rollup-row"><td><b>综合统计</b><small>{periodStart} 至 {periodEnd}</small></td><td><b>{orderRollup.orders} 笔订单</b></td><td><b>{selectedProduct?.name || `${summary.products} 个商品`}</b></td><td><b>{warehouse || "全部仓库"}</b></td><td><b>{formatMoney(orderRollup.orderAmount, "CNY")}</b><small>订单结算币</small></td><td><b className="value-good">正常 {orderRollup.success}</b></td><td><b>待签 {orderRollup.pending}</b></td><td><b className={orderRollup.abnormal ? "value-bad" : "value-good"}>非正常 {orderRollup.abnormal} · {orderRollup.abnormalRate.toFixed(1)}%</b></td></tr>
-                {visibleOrderDetails.map((order) => { const product = data?.products.find((item) => item.nmId === order.nmId); return <tr key={order.id}><td><b>{formatDateTime(order.createdAt)}</b><small>{order.createdAt.slice(0, 10)}</small></td><td><b className="order-number" title={order.orderNumber}>{order.orderNumber}</b><small>WB {order.nmId}</small></td><td><b>{product?.name || order.article}</b><small>{order.article}</small></td><td><span>{order.warehouseName}</span></td><td><b>{formatMoney(order.amount, order.currency)}</b></td><td><span>{supplierStatusLabel(order.supplierStatus)}</span><small>{order.supplierStatus || "—"}</small></td><td><span>{order.statusLabel}</span><small>{order.wbStatus || "—"}</small></td><td><span className={`order-outcome ${order.outcome}`}>{order.outcome === "success" ? "正常签收" : order.outcome === "abnormal" ? "非正常签收" : "待签收"}</span></td></tr>; })}
-                {!loading && visibleOrderDetails.length === 0 && <tr className="empty-row"><td colSpan={8}>{data?.dataAvailability.orderDetails ? "没有符合当前筛选条件的订单" : "WB 订单状态暂时无法读取，请稍后重新同步"}</td></tr>}
-              </tbody>
-            </table>
-          </div>
-          <footer className="product-table-footer"><span>共 {filteredOrderDetails.length} 笔订单 · 第 {Math.min(orderPage, orderPageCount)} / {orderPageCount} 页</span><div><button onClick={() => setOrderPage((value) => Math.max(1, value - 1))} disabled={orderPage <= 1}>← 上一页</button><button onClick={() => setOrderPage((value) => Math.min(orderPageCount, value + 1))} disabled={orderPage >= orderPageCount}>下一页 →</button></div></footer>
-        </section>
       </section>
     </main>
   );
