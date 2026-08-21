@@ -26,12 +26,28 @@ type WbStock = {
   inWayFromClient?: number;
 };
 
+type SellerWarehouse = {
+  id?: number;
+  name?: string;
+  officeId?: number;
+};
+
+type SellerStock = {
+  chrtId?: number;
+  amount?: number;
+};
+
+type SellerStockSnapshot = {
+  warehouses: Array<SellerWarehouse & { officeName?: string; stocks: SellerStock[] }>;
+};
+
 type WbCard = {
   nmID?: number;
   vendorCode?: string;
   brand?: string;
   title?: string;
   subjectName?: string;
+  sizes?: Array<{ chrtID?: number }>;
 };
 
 type WbFeedback = {
@@ -46,6 +62,7 @@ type WorkerCacheStorage = CacheStorage & { default?: Cache };
 
 let statisticsCache: CacheEntry<{ orders: WbOrder[]; sales: WbSale[] }> | null = null;
 let stockCache: CacheEntry<WbStock[]> | null = null;
+let sellerStockCache: CacheEntry<SellerStockSnapshot> | null = null;
 let balanceCache: CacheEntry<{ current?: number; for_withdraw?: number }> | null = null;
 let cardsCache: CacheEntry<WbCard[]> | null = null;
 let feedbacksCache: CacheEntry<WbFeedback[]> | null = null;
@@ -205,6 +222,66 @@ async function loadStocks(token: string) {
   });
 }
 
+async function loadSellerStocks(token: string, cards: WbCard[]) {
+  if (sellerStockCache && sellerStockCache.expiresAt > Date.now()) return sellerStockCache.value;
+  return dedupe("seller-stocks", async () => {
+    const cached = await readEdgeCache<SellerStockSnapshot>("seller-stocks");
+    if (cached) {
+      sellerStockCache = { value: cached, expiresAt: Date.now() + CACHE_MS };
+      return cached;
+    }
+
+    const base = "https://marketplace-api.wildberries.ru/api/v3";
+    const [warehouses, offices] = await Promise.all([
+      wbRequest<SellerWarehouse[]>(`${base}/warehouses`, token),
+      wbRequest<Array<{ id?: number; name?: string }>>(`${base}/offices`, token),
+    ]);
+    const officeNames = new Map(offices.map((office) => [Number(office.id || 0), office.name || ""]));
+    const chrtIds = [...new Set(cards.flatMap((card) => card.sizes?.map((size) => Number(size.chrtID || 0)) ?? []).filter(Boolean))];
+    const result: SellerStockSnapshot = { warehouses: [] };
+
+    for (const warehouse of warehouses) {
+      const warehouseId = Number(warehouse.id || 0);
+      if (!warehouseId) continue;
+      const stocks: SellerStock[] = [];
+      for (let offset = 0; offset < chrtIds.length; offset += 1000) {
+        const response = await wbRequest<{ stocks?: SellerStock[] }>(
+          `${base}/stocks/${warehouseId}`,
+          token,
+          { method: "POST", body: JSON.stringify({ chrtIds: chrtIds.slice(offset, offset + 1000) }) },
+        );
+        stocks.push(...(response.stocks ?? []));
+        if (offset + 1000 < chrtIds.length) await new Promise((resolve) => setTimeout(resolve, 220));
+      }
+      result.warehouses.push({ ...warehouse, officeName: officeNames.get(Number(warehouse.officeId || 0)) || "", stocks });
+    }
+
+    sellerStockCache = { value: result, expiresAt: Date.now() + CACHE_MS };
+    await writeEdgeCache("seller-stocks", result);
+    return result;
+  });
+}
+
+function warehouseKey(value?: string) {
+  const ignoredWords = new Set(["москва", "московская", "область", "склад", "продавца", "wb", "мп", "рф"]);
+  return String(value || "")
+    .toLocaleLowerCase("ru")
+    .split(/[^\p{L}\p{N}]+/gu)
+    .filter((word) => word && !ignoredWords.has(word))
+    .join("");
+}
+
+function resolveSellerWarehouseName(warehouse: SellerWarehouse & { officeName?: string }, observedNames: string[]) {
+  const candidateKeys = [warehouse.officeName, warehouse.name].map(warehouseKey).filter((key) => key.length >= 3);
+  const exact = observedNames.find((name) => candidateKeys.includes(warehouseKey(name)));
+  if (exact) return exact;
+  const partial = observedNames.find((name) => {
+    const observedKey = warehouseKey(name);
+    return observedKey.length >= 4 && candidateKeys.some((key) => key.includes(observedKey) || observedKey.includes(key));
+  });
+  return partial || warehouse.name?.trim() || `仓库 ${warehouse.id}`;
+}
+
 async function loadBalance(token: string) {
   if (balanceCache && balanceCache.expiresAt > Date.now()) return balanceCache.value;
   return dedupe("balance", async () => {
@@ -305,23 +382,52 @@ export async function GET(request: Request) {
   if (toValue > Date.now() + DAY_MS) return json({ error: "不能查询未来日期" }, 400);
 
   try {
-    const [statistics, stockResult, balanceResult, cardsResult, feedbacksResult] = await Promise.all([
+    const cardsPromise = loadCards(token).catch(() => [] as WbCard[]);
+    const [statistics, stockResult, balanceResult, cardsResult, feedbacksResult, sellerStockResult] = await Promise.all([
       loadStatistics(token),
       loadStocks(token).catch(() => [] as WbStock[]),
       loadBalance(token).catch(() => ({})),
-      loadCards(token).catch(() => [] as WbCard[]),
+      cardsPromise,
       loadFeedbacks(token).catch(() => [] as WbFeedback[]),
+      cardsPromise.then((cards) => loadSellerStocks(token, cards)).catch(() => ({ warehouses: [] } as SellerStockSnapshot)),
     ]);
 
     const inPeriod = (row: { date?: string }) => {
       const date = dayKey(row.date);
       return date >= from && date <= to;
     };
-    const warehouseNames = [...new Set([
+    const observedWarehouseNames = [...new Set([
       ...statistics.orders.map((row) => row.warehouseName?.trim()),
       ...statistics.sales.map((row) => row.warehouseName?.trim()),
       ...stockResult.map((row) => row.warehouseName?.trim()),
-    ].filter((name): name is string => Boolean(name)))].sort((a, b) => a.localeCompare(b, "ru"));
+    ].filter((name): name is string => Boolean(name)))];
+
+    const chrtToProduct = new Map<number, number>();
+    for (const card of cardsResult) {
+      const nmId = Number(card.nmID || 0);
+      if (!nmId) continue;
+      for (const size of card.sizes ?? []) {
+        const chrtId = Number(size.chrtID || 0);
+        if (chrtId) chrtToProduct.set(chrtId, nmId);
+      }
+    }
+    const sellerWarehouseNames = new Map<number, string>();
+    const sellerStocks: WbStock[] = [];
+    for (const sellerWarehouse of sellerStockResult.warehouses) {
+      const warehouseId = Number(sellerWarehouse.id || 0);
+      const warehouseName = resolveSellerWarehouseName(sellerWarehouse, observedWarehouseNames);
+      sellerWarehouseNames.set(warehouseId, warehouseName);
+      for (const stock of sellerWarehouse.stocks) {
+        const nmId = chrtToProduct.get(Number(stock.chrtId || 0));
+        if (!nmId) continue;
+        sellerStocks.push({ nmId, warehouseId, warehouseName, quantity: Number(stock.amount || 0) });
+      }
+    }
+    const combinedStocks = [...stockResult, ...sellerStocks];
+    const warehouseNames = [...new Set([
+      ...observedWarehouseNames,
+      ...sellerWarehouseNames.values(),
+    ])].sort((a, b) => a.localeCompare(b, "ru"));
     if (requestedWarehouse && !warehouseNames.includes(requestedWarehouse)) return json({ error: "未找到所选仓库，请重新选择" }, 400);
 
     const matchesWarehouse = (row: { warehouseName?: string }) => !requestedWarehouse || row.warehouseName?.trim() === requestedWarehouse;
@@ -356,7 +462,7 @@ export async function GET(request: Request) {
     }
 
     const stockByProduct = new Map<number, number>();
-    const selectedStocks = stockResult.filter(matchesWarehouse);
+    const selectedStocks = combinedStocks.filter(matchesWarehouse);
     for (const stock of selectedStocks) {
       if (!stock.nmId) continue;
       stockByProduct.set(stock.nmId, (stockByProduct.get(stock.nmId) ?? 0) + Number(stock.quantity || 0));
@@ -470,7 +576,7 @@ export async function GET(request: Request) {
         let status = "稳定";
         if (product.returnsCount > 0 && returnRate >= 15) status = "高退货";
         else if (reviews.period >= 3 && periodAverageRating !== null && periodAverageRating < 4.2) status = "低评分";
-        else if (stockResult.length && product.stock === 0) status = "缺货";
+        else if (combinedStocks.length && product.stock === 0) status = "缺货";
         else if (product.stock > 0 && netUnits === 0) status = "滞销";
         else if (dailyUnits >= 1) status = "热销";
         return {
@@ -504,7 +610,7 @@ export async function GET(request: Request) {
     let critical = 0;
     let low = 0;
     let slow = 0;
-    if (stockResult.length) {
+    if (combinedStocks.length) {
       for (const product of productMap.values()) {
         const dailyOrders = product.orders / days;
         const coverDays = dailyOrders > 0 ? product.stock / dailyOrders : Number.POSITIVE_INFINITY;
@@ -518,7 +624,7 @@ export async function GET(request: Request) {
       const warehouseOrders = allPeriodOrders.filter((row) => row.warehouseName?.trim() === name && !row.isCancel).length;
       const warehouseSales = allPeriodSales.filter((row) => row.warehouseName?.trim() === name);
       const warehouseReturns = warehouseSales.filter(isReturn).length;
-      const warehouseStock = stockResult
+      const warehouseStock = combinedStocks
         .filter((row) => row.warehouseName?.trim() === name)
         .reduce((sum, row) => sum + Number(row.quantity || 0), 0);
       return { name, orders: warehouseOrders, returns: warehouseReturns, stock: warehouseStock };
@@ -533,7 +639,7 @@ export async function GET(request: Request) {
       dataAvailability: {
         productCards: cardsResult.length > 0,
         feedbacks: feedbacksResult.length > 0,
-        inventory: stockResult.length > 0,
+        inventory: stockResult.length > 0 || sellerStockResult.warehouses.length > 0,
       },
       metrics: {
         salesAmount,
@@ -549,7 +655,7 @@ export async function GET(request: Request) {
       categories,
       products,
       inventory: {
-        available: stockResult.length > 0,
+        available: stockResult.length > 0 || sellerStockResult.warehouses.length > 0,
         totalQuantity: [...stockByProduct.values()].reduce((sum, value) => sum + value, 0),
         productCount: stockByProduct.size,
         critical,
