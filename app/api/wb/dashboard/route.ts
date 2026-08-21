@@ -41,6 +41,24 @@ type SellerStockSnapshot = {
   warehouses: Array<SellerWarehouse & { officeName?: string; stocks: SellerStock[] }>;
 };
 
+type FbsOrder = {
+  id?: number;
+  orderUid?: string;
+  createdAt?: string;
+  nmId?: number;
+  article?: string;
+  warehouseId?: number;
+  convertedPrice?: number;
+  price?: number;
+  supplierStatus?: string;
+  wbStatus?: string;
+};
+
+type FbsOrderSnapshot = {
+  available: boolean;
+  orders: FbsOrder[];
+};
+
 type WbCard = {
   nmID?: number;
   vendorCode?: string;
@@ -63,6 +81,7 @@ type WorkerCacheStorage = CacheStorage & { default?: Cache };
 let statisticsCache: CacheEntry<{ orders: WbOrder[]; sales: WbSale[] }> | null = null;
 let stockCache: CacheEntry<WbStock[]> | null = null;
 let sellerStockCache: CacheEntry<SellerStockSnapshot> | null = null;
+let fbsOrderCache: CacheEntry<FbsOrderSnapshot> | null = null;
 let balanceCache: CacheEntry<{ current?: number; for_withdraw?: number }> | null = null;
 let cardsCache: CacheEntry<WbCard[]> | null = null;
 let feedbacksCache: CacheEntry<WbFeedback[]> | null = null;
@@ -262,6 +281,93 @@ async function loadSellerStocks(token: string, cards: WbCard[]) {
   });
 }
 
+async function loadFbsOrders(token: string) {
+  if (fbsOrderCache && fbsOrderCache.expiresAt > Date.now()) return fbsOrderCache.value;
+  return dedupe("fbs-orders-180", async () => {
+    const cached = await readEdgeCache<FbsOrderSnapshot>("fbs-orders-180-v1");
+    if (cached) {
+      fbsOrderCache = { value: cached, expiresAt: Date.now() + CACHE_MS };
+      return cached;
+    }
+
+    const base = "https://marketplace-api.wildberries.ru/api/v3";
+    const now = Date.now();
+    const end = new Date(now);
+    const start = new Date(now - 179 * DAY_MS);
+    start.setUTCHours(0, 0, 0, 0);
+    end.setUTCHours(23, 59, 59, 999);
+    const byOrder = new Map<string, FbsOrder>();
+    let requestCount = 0;
+
+    for (let chunkStart = start.getTime(); chunkStart <= end.getTime(); chunkStart += 30 * DAY_MS) {
+      const chunkEnd = Math.min(chunkStart + 30 * DAY_MS - 1, end.getTime());
+      let next = 0;
+      for (let page = 0; page < 100; page += 1) {
+        if (requestCount > 0) await new Promise((resolve) => setTimeout(resolve, 220));
+        requestCount += 1;
+        const params = new URLSearchParams({
+          limit: "1000",
+          next: String(next),
+          dateFrom: String(Math.floor(chunkStart / 1000)),
+          dateTo: String(Math.floor(chunkEnd / 1000)),
+        });
+        const response = await wbRequest<{ next?: number; orders?: FbsOrder[] }>(`${base}/orders?${params}`, token);
+        const batch = response.orders ?? [];
+        for (const order of batch) byOrder.set(order.orderUid || String(order.id), order);
+        if (batch.length < 1000 || !response.next || response.next === next) break;
+        next = response.next;
+      }
+    }
+
+    const orders = [...byOrder.values()];
+    const statusById = new Map<string, { supplierStatus?: string; wbStatus?: string }>();
+    for (let offset = 0; offset < orders.length; offset += 1000) {
+      if (requestCount > 0) await new Promise((resolve) => setTimeout(resolve, 220));
+      requestCount += 1;
+      const ids = orders.slice(offset, offset + 1000).map((order) => Number(order.id || 0)).filter(Boolean);
+      if (!ids.length) continue;
+      const response = await wbRequest<{ orders?: Array<{ id?: number; supplierStatus?: string; wbStatus?: string }> }>(
+        `${base}/orders/status`,
+        token,
+        { method: "POST", body: JSON.stringify({ orders: ids }) },
+      );
+      for (const status of response.orders ?? []) statusById.set(String(status.id), status);
+    }
+    for (const order of orders) Object.assign(order, statusById.get(String(order.id)) ?? {});
+
+    const result = { available: true, orders };
+    fbsOrderCache = { value: result, expiresAt: Date.now() + CACHE_MS };
+    await writeEdgeCache("fbs-orders-180-v1", result);
+    return result;
+  });
+}
+
+const abnormalWbStatuses = new Set(["canceled", "canceled_by_client", "declined_by_client", "defect", "canceled_by_missed_call"]);
+
+function orderOutcome(order: Pick<FbsOrder, "supplierStatus" | "wbStatus">) {
+  if (order.wbStatus === "sold") return "success" as const;
+  if (order.supplierStatus === "cancel" || abnormalWbStatuses.has(String(order.wbStatus || ""))) return "abnormal" as const;
+  return "pending" as const;
+}
+
+function orderStatusLabel(order: Pick<FbsOrder, "supplierStatus" | "wbStatus">) {
+  const labels: Record<string, string> = {
+    sold: "正常签收",
+    canceled: "卖家取消",
+    canceled_by_client: "签收时拒收",
+    declined_by_client: "客户取消",
+    defect: "瑕疵取消",
+    canceled_by_missed_call: "联系不上客户",
+    ready_for_pickup: "待客户取件",
+    sorted: "已入仓分拣",
+    waiting: "运输处理中",
+    postponed_delivery: "延期配送",
+    accepted_by_carrier: "承运商已接收",
+    sent_to_carrier: "已发往承运商",
+  };
+  return labels[String(order.wbStatus || "")] || (order.supplierStatus === "cancel" ? "卖家取消" : "处理中");
+}
+
 function warehouseKey(value?: string) {
   const ignoredWords = new Set(["москва", "московская", "область", "склад", "продавца", "wb", "мп", "рф"]);
   return String(value || "")
@@ -371,6 +477,7 @@ export async function GET(request: Request) {
   const from = url.searchParams.get("from") ?? "";
   const to = url.searchParams.get("to") ?? "";
   const requestedWarehouse = url.searchParams.get("warehouse")?.trim() ?? "";
+  const includeOrderDetails = url.searchParams.get("includeOrders") === "true";
   if (!DATE_PATTERN.test(from) || !DATE_PATTERN.test(to)) return json({ error: "日期格式无效" }, 400);
   if (requestedWarehouse.length > 160) return json({ error: "仓库名称无效" }, 400);
 
@@ -378,18 +485,23 @@ export async function GET(request: Request) {
   const toValue = dateValue(to);
   const days = Math.round((toValue - fromValue) / DAY_MS) + 1;
   if (!Number.isFinite(days) || days < 1) return json({ error: "开始日期不能晚于结束日期" }, 400);
-  if (days > 90 || fromValue < Date.now() - 91 * DAY_MS) return json({ error: "订单与销售统计目前支持查询近 90 天" }, 400);
+  const maxDays = includeOrderDetails ? 180 : 90;
+  if (days > maxDays || fromValue < Date.now() - (maxDays + 1) * DAY_MS) return json({ error: `当前页面支持查询近 ${maxDays} 天` }, 400);
   if (toValue > Date.now() + DAY_MS) return json({ error: "不能查询未来日期" }, 400);
 
   try {
     const cardsPromise = loadCards(token).catch(() => [] as WbCard[]);
-    const [statistics, stockResult, balanceResult, cardsResult, feedbacksResult, sellerStockResult] = await Promise.all([
+    const fbsOrdersPromise = includeOrderDetails
+      ? loadFbsOrders(token).catch(() => ({ available: false, orders: [] } as FbsOrderSnapshot))
+      : Promise.resolve({ available: false, orders: [] } as FbsOrderSnapshot);
+    const [statistics, stockResult, balanceResult, cardsResult, feedbacksResult, sellerStockResult, fbsOrderResult] = await Promise.all([
       loadStatistics(token),
       loadStocks(token).catch(() => [] as WbStock[]),
       loadBalance(token).catch(() => ({})),
       cardsPromise,
       loadFeedbacks(token).catch(() => [] as WbFeedback[]),
       cardsPromise.then((cards) => loadSellerStocks(token, cards)).catch(() => ({ warehouses: [] } as SellerStockSnapshot)),
+      fbsOrdersPromise,
     ]);
 
     const inPeriod = (row: { date?: string }) => {
@@ -431,6 +543,43 @@ export async function GET(request: Request) {
     if (requestedWarehouse && !warehouseNames.includes(requestedWarehouse)) return json({ error: "未找到所选仓库，请重新选择" }, 400);
 
     const matchesWarehouse = (row: { warehouseName?: string }) => !requestedWarehouse || row.warehouseName?.trim() === requestedWarehouse;
+    const allDetailedOrders = fbsOrderResult.orders
+      .filter((order) => {
+        const date = dayKey(order.createdAt);
+        return date >= from && date <= to;
+      })
+      .map((order) => {
+        const outcome = orderOutcome(order);
+        return {
+          id: order.orderUid || String(order.id || ""),
+          orderNumber: order.orderUid || String(order.id || ""),
+          nmId: Number(order.nmId || 0),
+          article: order.article || "—",
+          createdAt: order.createdAt || "",
+          warehouseName: sellerWarehouseNames.get(Number(order.warehouseId || 0)) || `仓库 ${order.warehouseId}`,
+          amount: Number(order.convertedPrice || 0) / 100,
+          currency: "CNY",
+          supplierStatus: order.supplierStatus || "",
+          wbStatus: order.wbStatus || "",
+          outcome,
+          statusLabel: orderStatusLabel(order),
+        };
+      })
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    const detailedOrders = allDetailedOrders.filter((order) => !requestedWarehouse || order.warehouseName === requestedWarehouse);
+    const useDetailedMetrics = includeOrderDetails && fbsOrderResult.available;
+    const detailedSummary = detailedOrders.reduce((summary, order) => {
+      summary.orders += 1;
+      summary.orderAmount += order.amount;
+      if (order.outcome === "success") {
+        summary.success += 1;
+        summary.salesAmount += order.amount;
+      } else if (order.outcome === "abnormal") summary.abnormal += 1;
+      else summary.pending += 1;
+      return summary;
+    }, { orders: 0, success: 0, abnormal: 0, pending: 0, orderAmount: 0, salesAmount: 0 });
+    const completedDetailedOrders = detailedSummary.success + detailedSummary.abnormal;
+    const detailedAbnormalRate = completedDetailedOrders ? (detailedSummary.abnormal / completedDetailedOrders) * 100 : 0;
     const allPeriodOrders = statistics.orders.filter(inPeriod);
     const allPeriodSales = statistics.sales.filter(inPeriod);
     const periodOrders = allPeriodOrders.filter(matchesWarehouse);
@@ -478,6 +627,7 @@ export async function GET(request: Request) {
       orders: number;
       grossSalesUnits: number;
       returnsCount: number;
+      pendingCount: number;
       stock: number;
     };
     const productMap = new Map<number, ProductAccumulator>();
@@ -494,6 +644,7 @@ export async function GET(request: Request) {
         orders: 0,
         grossSalesUnits: 0,
         returnsCount: 0,
+        pendingCount: 0,
         stock: stockByProduct.get(id) ?? 0,
       });
     }
@@ -509,6 +660,7 @@ export async function GET(request: Request) {
         orders: 0,
         grossSalesUnits: 0,
         returnsCount: 0,
+        pendingCount: 0,
         stock,
       });
     }
@@ -525,21 +677,45 @@ export async function GET(request: Request) {
         orders: 0,
         grossSalesUnits: 0,
         returnsCount: 0,
+        pendingCount: 0,
         stock: stockByProduct.get(id) ?? 0,
       });
       return productMap.get(id)!;
     };
-    for (const order of activeOrders) {
-      const product = ensureProduct(order);
-      if (product) product.orders += 1;
-    }
-    for (const sale of completedSales) {
-      const product = ensureProduct(sale);
-      if (product) { product.sales += amount(sale); product.grossSalesUnits += 1; }
-    }
-    for (const sale of returns) {
-      const product = ensureProduct(sale);
-      if (product) { product.sales -= amount(sale); product.returnsCount += 1; }
+    if (useDetailedMetrics) {
+      for (const order of detailedOrders) {
+        const product = ensureProduct({ nmId: order.nmId, supplierArticle: order.article });
+        if (!product) continue;
+        product.orders += 1;
+        if (order.outcome === "success") {
+          product.grossSalesUnits += 1;
+          if (days > 90) product.sales += order.amount;
+        } else if (order.outcome === "abnormal") product.returnsCount += 1;
+        else product.pendingCount += 1;
+      }
+      if (days <= 90) {
+        for (const sale of completedSales) {
+          const product = ensureProduct(sale);
+          if (product) product.sales += amount(sale);
+        }
+        for (const sale of returns) {
+          const product = ensureProduct(sale);
+          if (product) product.sales -= amount(sale);
+        }
+      }
+    } else {
+      for (const order of activeOrders) {
+        const product = ensureProduct(order);
+        if (product) product.orders += 1;
+      }
+      for (const sale of completedSales) {
+        const product = ensureProduct(sale);
+        if (product) { product.sales += amount(sale); product.grossSalesUnits += 1; }
+      }
+      for (const sale of returns) {
+        const product = ensureProduct(sale);
+        if (product) { product.sales -= amount(sale); product.returnsCount += 1; }
+      }
     }
 
     const reviewsByProduct = new Map<number, { total: number; sum: number; positive: number; period: number; periodSum: number; periodPositive: number }>();
@@ -562,10 +738,10 @@ export async function GET(request: Request) {
 
     const products = [...productMap.values()]
       .map((product) => {
-        const netUnits = Math.max(0, product.grossSalesUnits - product.returnsCount);
+        const netUnits = useDetailedMetrics ? product.grossSalesUnits : Math.max(0, product.grossSalesUnits - product.returnsCount);
         const saleEvents = product.grossSalesUnits + product.returnsCount;
         const returnRate = saleEvents ? (product.returnsCount / saleEvents) * 100 : 0;
-        const buyoutRate = product.orders ? Math.min(100, (netUnits / product.orders) * 100) : 0;
+        const buyoutRate = saleEvents ? (product.grossSalesUnits / saleEvents) * 100 : 0;
         const dailyUnits = netUnits / days;
         const stockCoverDays = dailyUnits > 0 ? product.stock / dailyUnits : null;
         const reviews = reviewsByProduct.get(product.nmId) ?? { total: 0, sum: 0, positive: 0, period: 0, periodSum: 0, periodPositive: 0 };
@@ -621,7 +797,9 @@ export async function GET(request: Request) {
     }
 
     const warehouses = warehouseNames.map((name) => {
-      const warehouseOrders = allPeriodOrders.filter((row) => row.warehouseName?.trim() === name && !row.isCancel).length;
+      const warehouseOrders = useDetailedMetrics
+        ? allDetailedOrders.filter((row) => row.warehouseName === name).length
+        : allPeriodOrders.filter((row) => row.warehouseName?.trim() === name && !row.isCancel).length;
       const warehouseSales = allPeriodSales.filter((row) => row.warehouseName?.trim() === name);
       const warehouseReturns = warehouseSales.filter(isReturn).length;
       const warehouseStock = combinedStocks
@@ -634,26 +812,33 @@ export async function GET(request: Request) {
       source: "wildberries",
       syncedAt: new Date().toISOString(),
       period: { from, to, days },
+      currency: useDetailedMetrics && days > 90 ? "CNY" : "RUB",
       selectedWarehouse: requestedWarehouse || null,
       warehouses,
       dataAvailability: {
         productCards: cardsResult.length > 0,
         feedbacks: feedbacksResult.length > 0,
         inventory: stockResult.length > 0 || sellerStockResult.warehouses.length > 0,
+        orderDetails: fbsOrderResult.available,
       },
       metrics: {
-        salesAmount,
-        ordersCount: activeOrders.length,
-        cancelledOrders,
+        salesAmount: useDetailedMetrics && days > 90 ? detailedSummary.salesAmount : salesAmount,
+        ordersCount: useDetailedMetrics ? detailedSummary.orders : activeOrders.length,
+        cancelledOrders: useDetailedMetrics ? detailedSummary.abnormal : cancelledOrders,
         payoutAmount,
-        returnsCount: returns.length,
-        returnRate,
+        returnsCount: useDetailedMetrics ? detailedSummary.abnormal : returns.length + cancelledOrders,
+        returnRate: useDetailedMetrics ? detailedAbnormalRate : ((completedSales.length + returns.length + cancelledOrders) ? ((returns.length + cancelledOrders) / (completedSales.length + returns.length + cancelledOrders)) * 100 : returnRate),
         balanceCurrent: Number(balanceResult.current || 0),
         balanceAvailable: Number(balanceResult.for_withdraw || 0),
       },
       trend: [...trendMap.values()],
       categories,
       products,
+      orderSummary: {
+        ...detailedSummary,
+        abnormalRate: detailedAbnormalRate,
+      },
+      orderDetails: includeOrderDetails ? detailedOrders : [],
       inventory: {
         available: stockResult.length > 0 || sellerStockResult.warehouses.length > 0,
         totalQuantity: [...stockByProduct.values()].reduce((sum, value) => sum + value, 0),
