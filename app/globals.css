@@ -22,10 +22,13 @@ nav { display:grid; gap:4px; }
 .nav-item.active>span { color:var(--purple); }
 .nav-item i { margin-left:auto; display:grid; place-items:center; width:20px; height:20px; background:#fff0ef; color:#dc595b; border-radius:50%; font-size:10px; font-style:normal; }
 .nav-button { width:100%; border:0; background:transparent; text-align:left; }
+.nav-button:disabled,.export-button:disabled,.text-action:disabled,.stock-button:disabled { cursor:not-allowed; opacity:.48; }
 .nav-section { margin:29px 12px 10px; color:#b2aeb7; font-size:10px; font-weight:700; letter-spacing:.12em; text-transform:uppercase; }
 .sidebar-foot { margin-top:auto; padding-top:18px; border-top:1px solid var(--line); }
 .sync-status { display:flex; gap:9px; align-items:center; padding:0 7px 13px; }
 .status-dot { width:8px; height:8px; border-radius:50%; background:#f3a43b; box-shadow:0 0 0 4px #fff2df; }
+.sync-status.connected .status-dot { background:#25a977; box-shadow:0 0 0 4px #e7f7f1; }
+.sync-status.error .status-dot { background:#e45d65; box-shadow:0 0 0 4px #fff0f1; }
 .sync-status b,.sync-status small { display:block; }
 .sync-status b { font-size:11px; }
 .sync-status small { margin-top:2px; color:#aaa5b2; font-size:9px; }
@@ -57,6 +60,10 @@ h1 { margin:0; font-size:24px; line-height:1.1; letter-spacing:-.7px; }
 .notice strong { display:block; font-size:12px; }
 .notice p { margin:4px 0 0; color:#86818e; font-size:10px; }
 .notice button { margin-left:auto; height:34px; padding:0 14px; border:0; border-radius:8px; color:#fff; background:var(--purple); font-size:10px; font-weight:650; }
+.notice.connected { border-color:#d9eade; background:linear-gradient(90deg,#eef9f3,#fafdfb); }
+.notice.connected .notice-icon,.notice.connected button { background:#238c68; }
+.notice.error { border-color:#f2d1d4; background:linear-gradient(90deg,#fff1f2,#fffafa); }
+.notice.error .notice-icon,.notice.error button { background:#dc5962; }
 .metric-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:14px; margin-bottom:14px; }
 .metric-card { position:relative; min-height:146px; overflow:hidden; padding:18px; background:#fff; border:1px solid var(--line); border-radius:14px; box-shadow:0 3px 12px rgba(38,32,48,.025); }
 .metric-card.featured { color:#fff; border-color:transparent; background:linear-gradient(145deg,#785ae8,#6041d4); box-shadow:0 12px 26px #6748df2a; }
@@ -84,6 +91,7 @@ h1 { margin:0; font-size:24px; line-height:1.1; letter-spacing:-.7px; }
 .panel-title>a { color:var(--purple); font-size:10px; font-weight:650; text-decoration:none; }
 .text-action { padding:0; border:0; color:var(--purple); background:transparent; font-size:10px; font-weight:650; }
 .panel-tag { padding:4px 7px; border-radius:6px; color:#8c7cb8; background:#f4f1fb; font-size:8px; font-weight:650; }
+.panel-tag.live { color:#218262; background:#e9f7f1; }
 .legend { display:flex; gap:14px; color:#8e8995; font-size:9px; }
 .legend span { display:flex; align-items:center; gap:5px; }
 .legend i { width:6px; height:6px; border-radius:50%; }
@@ -108,6 +116,7 @@ h1 { margin:0; font-size:24px; line-height:1.1; letter-spacing:-.7px; }
 .category-list>div { display:flex; justify-content:space-between; color:#77727e; font-size:9px; }
 .category-list span { display:flex; align-items:center; gap:6px; }
 .category-list i { width:7px; height:7px; border-radius:2px; }.category-list b { color:#39343f; }
+.empty-copy { grid-column:1/-1; margin:8px 0; color:#aaa5b1; font-size:9px; text-align:center; }
 .c1{background:#7558e8}.c2{background:#ac9bf3}.c3{background:#d5cef9}.c4{background:#ece8fb}
 .bottom-grid { align-items:stretch; }
 .products-panel { padding:18px 0 0; overflow:hidden; }
@@ -123,6 +132,8 @@ td b { color:#39343f; font-size:9px; font-weight:650; }
 td small { margin-top:3px; color:#b0abb5; font-size:7px; }
 .product-thumb { display:grid; place-items:center; flex:0 0 32px; width:32px; height:32px; border-radius:8px; font-weight:750; }
 .product-thumb.lilac{color:#6948da;background:#ede8ff}.product-thumb.blue{color:#4773b9;background:#e6f0ff}.product-thumb.orange{color:#b86b34;background:#fff0e4}.product-thumb.mint{color:#3d937b;background:#e3f7f0}
+.product-thumb.tone-0{color:#6948da;background:#ede8ff}.product-thumb.tone-1{color:#4773b9;background:#e6f0ff}.product-thumb.tone-2{color:#b86b34;background:#fff0e4}.product-thumb.tone-3{color:#3d937b;background:#e3f7f0}
+.empty-row td,.empty-row td:first-child { display:table-cell; height:80px; color:#aaa5b1; text-align:center; }
 .rate { padding:3px 6px; border-radius:6px; color:var(--green); background:#eaf8f2; font-weight:650; }
 .alert-count { padding:4px 7px; color:#d95961; background:#fff0f1; border-radius:6px; font-size:8px; font-weight:650; }
 .stock-item { display:flex; align-items:center; gap:10px; min-height:58px; border-bottom:1px solid #f0edf2; }

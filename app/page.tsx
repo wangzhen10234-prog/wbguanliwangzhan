@@ -1,25 +1,48 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
-const allBars = [34, 46, 39, 55, 49, 63, 57, 42, 57, 48, 72, 64, 77, 69, 92, 74, 81, 88, 70, 79, 96];
+type DashboardData = {
+  source: "wildberries";
+  syncedAt: string;
+  period: { from: string; to: string; days: number };
+  metrics: {
+    salesAmount: number;
+    ordersCount: number;
+    cancelledOrders: number;
+    payoutAmount: number;
+    returnsCount: number;
+    returnRate: number;
+    balanceCurrent: number;
+    balanceAvailable: number;
+  };
+  trend: { date: string; sales: number; orders: number }[];
+  categories: { name: string; value: number; share: number }[];
+  products: {
+    nmId: number;
+    name: string;
+    sku: string;
+    category: string;
+    sales: number;
+    orders: number;
+    units: number;
+    stock: number;
+    buyoutRate: number;
+  }[];
+  inventory: {
+    available: boolean;
+    totalQuantity: number;
+    productCount: number;
+    critical: number;
+    low: number;
+    slow: number;
+  };
+};
 
-const products = [
-  { name: "Женская базовая футболка", sku: "WB-24018", category: "女装", sales: "₽ 286,420", orders: 438, rate: "18.7%", tone: "lilac" },
-  { name: "Органайзер для кухни", sku: "WB-18392", category: "家居", sales: "₽ 214,880", orders: 316, rate: "15.2%", tone: "blue" },
-  { name: "Рюкзак городской унисекс", sku: "WB-30106", category: "箱包", sales: "₽ 176,250", orders: 205, rate: "12.9%", tone: "orange" },
-  { name: "Набор полотенец 4 шт.", sku: "WB-22047", category: "家纺", sales: "₽ 129,740", orders: 188, rate: "11.4%", tone: "mint" },
-];
-
-const ranges = {
-  "7": { label: "近 7 天", date: "8月 15日 — 8月 21日", sales: "₽ 486,310", shortSales: "₽486K", orders: "692", profit: "₽ 121,840", returns: "7.2%", average: "₽ 69,473", peak: "₽ 108,420" },
-  "14": { label: "近 14 天", date: "8月 8日 — 8月 21日", sales: "₽ 892,760", shortSales: "₽893K", orders: "1,284", profit: "₽ 227,190", returns: "7.5%", average: "₽ 63,769", peak: "₽ 108,420" },
-  "21": { label: "近 21 天", date: "8月 1日 — 8月 21日", sales: "₽ 1,284,620", shortSales: "₽1.28M", orders: "1,847", profit: "₽ 326,480", returns: "7.8%", average: "₽ 61,172", peak: "₽ 108,420" },
-} as const;
-
-type RangeKey = keyof typeof ranges;
+type RangeKey = "7" | "14" | "21";
 
 const MS_PER_DAY = 86_400_000;
+const colors = ["#7558e8", "#ac9bf3", "#d5cef9", "#ece8fb"];
 
 function toInputDate(date: Date) {
   return date.toISOString().slice(0, 10);
@@ -32,7 +55,7 @@ function shiftDate(dateString: string, days: number) {
 }
 
 function countDays(start: string, end: string) {
-  return Math.max(1, Math.round((new Date(`${end}T12:00:00`).getTime() - new Date(`${start}T12:00:00`).getTime()) / MS_PER_DAY) + 1);
+  return Math.round((new Date(`${end}T12:00:00`).getTime() - new Date(`${start}T12:00:00`).getTime()) / MS_PER_DAY) + 1;
 }
 
 function formatDate(dateString: string) {
@@ -46,15 +69,24 @@ function formatShortDate(dateString: string) {
 }
 
 function formatRubles(value: number) {
-  return `₽ ${Math.round(value).toLocaleString("en-US")}`;
+  return `₽ ${Math.round(value || 0).toLocaleString("en-US")}`;
 }
 
 function formatCompactRubles(value: number) {
-  return value >= 1_000_000 ? `₽${(value / 1_000_000).toFixed(2)}M` : `₽${Math.round(value / 1_000)}K`;
+  const amount = Math.abs(value || 0);
+  if (amount >= 1_000_000) return `₽${(value / 1_000_000).toFixed(2)}M`;
+  if (amount >= 1_000) return `₽${Math.round(value / 1_000)}K`;
+  return `₽${Math.round(value)}`;
+}
+
+function syncTime(value?: string) {
+  if (!value) return "正在首次同步";
+  return new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit" }).format(new Date(value));
 }
 
 export default function Home() {
   const today = toInputDate(new Date());
+  const earliest = shiftDate(today, -89);
   const [range, setRange] = useState<RangeKey | "custom">("21");
   const [customStart, setCustomStart] = useState(() => shiftDate(today, -20));
   const [customEnd, setCustomEnd] = useState(today);
@@ -63,28 +95,39 @@ export default function Home() {
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [dateError, setDateError] = useState("");
   const [showConnect, setShowConnect] = useState(false);
-  const [copied, setCopied] = useState(false);
+  const [data, setData] = useState<DashboardData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [dataError, setDataError] = useState("");
+  const [reloadKey, setReloadKey] = useState(0);
   const dateControlRef = useRef<HTMLDivElement>(null);
+
   const periodEnd = range === "custom" ? appliedEnd : today;
   const periodStart = range === "custom" ? appliedStart : shiftDate(today, -(Number(range) - 1));
   const periodDays = countDays(periodStart, periodEnd);
-  const customSales = Math.round((1_284_620 / 21) * periodDays);
-  const active = range === "custom" ? {
-    label: `自定义 · ${periodDays} 天`,
-    date: `${formatDate(periodStart)} — ${formatDate(periodEnd)}`,
-    sales: formatRubles(customSales),
-    shortSales: formatCompactRubles(customSales),
-    orders: Math.round((1_847 / 21) * periodDays).toLocaleString("en-US"),
-    profit: formatRubles((326_480 / 21) * periodDays),
-    returns: "7.6%",
-    average: formatRubles(customSales / periodDays),
-    peak: "₽ 108,420",
-  } : { ...ranges[range], date: `${formatDate(periodStart)} — ${formatDate(periodEnd)}` };
-  const pointCount = Math.min(periodDays, 21);
-  const seed = Math.abs(Math.floor(new Date(`${periodStart}T12:00:00`).getTime() / MS_PER_DAY));
-  const bars = Array.from({ length: pointCount }, (_, index) => allBars[(seed + index) % allBars.length]);
-  const barDates = Array.from({ length: pointCount }, (_, index) => shiftDate(periodStart, pointCount === 1 ? 0 : Math.round((index * (periodDays - 1)) / (pointCount - 1))));
-  const labelEvery = pointCount > 14 ? 3 : pointCount > 7 ? 2 : 1;
+  const rangeLabel = range === "custom" ? `自定义 · ${periodDays} 天` : `近 ${range} 天`;
+  const dateLabel = `${formatDate(periodStart)} — ${formatDate(periodEnd)}`;
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch(`/api/wb/dashboard?from=${periodStart}&to=${periodEnd}`, {
+      signal: controller.signal,
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+    })
+      .then(async (response) => {
+        const body = (await response.json()) as DashboardData | { error?: string };
+        if (!response.ok) throw new Error("error" in body && body.error ? body.error : "同步失败，请稍后重试");
+        return body as DashboardData;
+      })
+      .then((body) => setData(body))
+      .catch((error: Error) => {
+        if (error.name !== "AbortError") setDataError(error.message);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+    return () => controller.abort();
+  }, [periodStart, periodEnd, reloadKey]);
 
   useEffect(() => {
     const closeOnEscape = (event: KeyboardEvent) => {
@@ -104,7 +147,30 @@ export default function Home() {
     };
   }, []);
 
+  const trend = useMemo(() => {
+    const source = data?.trend ?? [];
+    if (source.length <= 21) return source;
+    return Array.from({ length: 21 }, (_, index) => source[Math.round((index * (source.length - 1)) / 20)]);
+  }, [data]);
+  const maxSales = Math.max(1, ...trend.map((item) => Math.max(0, item.sales)));
+  const maxOrders = Math.max(1, ...trend.map((item) => item.orders));
+  const chartMax = Math.ceil(maxSales / 1000) * 1000 || 1;
+  const labelEvery = trend.length > 14 ? 3 : trend.length > 7 ? 2 : 1;
+  const averageSales = data ? data.metrics.salesAmount / Math.max(1, data.period.days) : 0;
+  const peakSales = trend.length ? Math.max(...trend.map((item) => item.sales)) : 0;
+  const categoryStops = useMemo(() => {
+    const result = (data?.categories ?? []).reduce<{ cursor: number; pieces: string[] }>((acc, category, index) => ({
+      cursor: acc.cursor + category.share,
+      pieces: [...acc.pieces, `${colors[index]} ${acc.cursor}% ${acc.cursor + category.share}%`],
+    }), { cursor: 0, pieces: [] });
+    const pieces = result.cursor < 100 ? [...result.pieces, `#f1eef8 ${result.cursor}% 100%`] : result.pieces;
+    return `conic-gradient(${pieces.join(",")})`;
+  }, [data]);
+
   function choosePreset(value: RangeKey) {
+    setLoading(true);
+    setDataError("");
+    setReloadKey((key) => key + 1);
     setRange(value);
     setCustomStart(shiftDate(today, -(Number(value) - 1)));
     setCustomEnd(today);
@@ -113,14 +179,12 @@ export default function Home() {
   }
 
   function applyCustomRange() {
-    if (!customStart || !customEnd) {
-      setDateError("请选择完整的开始和结束日期");
-      return;
-    }
-    if (customStart > customEnd) {
-      setDateError("开始日期不能晚于结束日期");
-      return;
-    }
+    if (!customStart || !customEnd) return setDateError("请选择完整的开始和结束日期");
+    if (customStart > customEnd) return setDateError("开始日期不能晚于结束日期");
+    if (customStart < earliest || countDays(customStart, customEnd) > 90) return setDateError("订单与销售支持查询近 90 天内、最长 90 天的周期");
+    setLoading(true);
+    setDataError("");
+    setReloadKey((key) => key + 1);
     setAppliedStart(customStart);
     setAppliedEnd(customEnd);
     setRange("custom");
@@ -128,9 +192,17 @@ export default function Home() {
     setShowDatePicker(false);
   }
 
+  function refresh() {
+    setLoading(true);
+    setDataError("");
+    setReloadKey((key) => key + 1);
+    setShowConnect(false);
+  }
+
   function exportCsv() {
-    const header = ["商品名称", "SKU", "类目", "销售额(卢布)", "订单数", "转化率"];
-    const rows = products.map((item) => [item.name, item.sku, item.category, item.sales.replace(/[^0-9]/g, ""), item.orders, item.rate]);
+    if (!data?.products.length) return;
+    const header = ["商品名称", "WB nmId", "SKU", "类目", "销售额(卢布)", "订单数", "售出件数", "库存", "成交率"];
+    const rows = data.products.map((item) => [item.name, item.nmId, item.sku, item.category, Math.round(item.sales), item.orders, item.units, item.stock, `${item.buyoutRate.toFixed(1)}%`]);
     const csv = "\uFEFF" + [header, ...rows].map((row) => row.map((value) => `"${String(value).replaceAll('"', '""')}"`).join(",")).join("\n");
     const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
     const link = document.createElement("a");
@@ -140,11 +212,10 @@ export default function Home() {
     URL.revokeObjectURL(url);
   }
 
-  async function copyChecklist() {
-    await navigator.clipboard.writeText("Wildberries API 接入所需：1. API 文档或接口地址；2. 鉴权方式；3. 订单、商品、库存、财务接口样例返回；4. 数据同步频率。请勿在聊天中直接发送长期有效密钥。");
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1800);
-  }
+  const metrics = data?.metrics;
+  const products = data?.products.slice(0, 5) ?? [];
+  const inventory = data?.inventory;
+  const inventoryAlerts = inventory?.available ? inventory.critical + inventory.low + inventory.slow : 0;
 
   return (
     <main className="app-shell">
@@ -154,32 +225,32 @@ export default function Home() {
           <a className="nav-item active" href="#overview"><span>▦</span>经营总览</a>
           <a className="nav-item" href="#sales"><span>↗</span>销售分析</a>
           <a className="nav-item" href="#products"><span>◇</span>商品表现</a>
-          <a className="nav-item" href="#stock"><span>□</span>库存监控<i>6</i></a>
-          <a className="nav-item" href="#finance"><span>₽</span>利润与回款</a>
+          <a className="nav-item" href="#stock"><span>□</span>库存监控{inventoryAlerts > 0 && <i>{inventoryAlerts}</i>}</a>
+          <a className="nav-item" href="#finance"><span>₽</span>回款与余额</a>
         </nav>
         <div className="nav-section">数据管理</div>
         <nav>
-          <button className="nav-item nav-button" onClick={() => setShowConnect(true)}><span>↻</span>数据同步</button>
-          <button className="nav-item nav-button" onClick={exportCsv}><span>↓</span>数据导出</button>
+          <button className="nav-item nav-button" onClick={refresh}><span>↻</span>立即同步</button>
+          <button className="nav-item nav-button" onClick={exportCsv} disabled={!products.length}><span>↓</span>数据导出</button>
         </nav>
         <div className="sidebar-foot">
-          <div className="sync-status"><span className="status-dot" /><div><b>API 等待接入</b><small>当前展示演示数据</small></div></div>
-          <button className="connect-btn" onClick={() => setShowConnect(true)}>连接 WB 店铺</button>
+          <div className={`sync-status ${dataError ? "error" : "connected"}`}><span className="status-dot" /><div><b>{dataError ? "WB API 同步异常" : "已连接 WB API"}</b><small>{dataError ? "点击重新同步" : `最近同步 ${syncTime(data?.syncedAt)}`}</small></div></div>
+          <button className="connect-btn" onClick={() => setShowConnect(true)}>连接与安全状态</button>
         </div>
       </aside>
 
       <section className="workspace" id="overview">
         <header className="topbar">
-          <div><p className="eyebrow">Панель продавца · Demo workspace</p><h1>经营总览</h1></div>
+          <div><p className="eyebrow">Панель продавца · Live workspace</p><h1>经营总览</h1></div>
           <div className="top-actions">
-            <button className="export-button" onClick={exportCsv}>↓ 导出 CSV</button>
+            <button className="export-button" onClick={exportCsv} disabled={!products.length}>↓ 导出 CSV</button>
             <div className="date-control" ref={dateControlRef}>
-              <button className="date-button" onClick={() => setShowDatePicker((open) => !open)} aria-expanded={showDatePicker} aria-haspopup="dialog"><span>◫</span><em>{range === "custom" ? "自定义" : ranges[range].label}</em><b>{active.date}</b><i>⌄</i></button>
+              <button className="date-button" onClick={() => setShowDatePicker((open) => !open)} aria-expanded={showDatePicker} aria-haspopup="dialog"><span>◫</span><em>{range === "custom" ? "自定义" : `近 ${range} 天`}</em><b>{dateLabel}</b><i>⌄</i></button>
               {showDatePicker && <section className="date-popover" role="dialog" aria-label="选择分析周期">
-                <div className="date-popover-head"><div><strong>选择时间周期</strong><small>指标、图表和导出数据会同步更新</small></div><button onClick={() => setShowDatePicker(false)} aria-label="关闭">×</button></div>
+                <div className="date-popover-head"><div><strong>选择时间周期</strong><small>真实指标、图表和导出数据会同步更新</small></div><button onClick={() => setShowDatePicker(false)} aria-label="关闭">×</button></div>
                 <div className="quick-ranges" aria-label="快捷周期"><button className={range === "7" ? "selected" : ""} onClick={() => choosePreset("7")}>近 7 天</button><button className={range === "14" ? "selected" : ""} onClick={() => choosePreset("14")}>近 14 天</button><button className={range === "21" ? "selected" : ""} onClick={() => choosePreset("21")}>近 21 天</button></div>
-                <div className="custom-range-title"><span>自定义日期</span><i /></div>
-                <div className="date-inputs"><label><span>开始日期</span><input type="date" value={customStart} max={today} onChange={(event) => { setCustomStart(event.target.value); setDateError(""); }} /></label><b>→</b><label><span>结束日期</span><input type="date" value={customEnd} min={customStart} max={today} onChange={(event) => { setCustomEnd(event.target.value); setDateError(""); }} /></label></div>
+                <div className="custom-range-title"><span>自定义日期（近 90 天）</span><i /></div>
+                <div className="date-inputs"><label><span>开始日期</span><input type="date" value={customStart} min={earliest} max={today} onChange={(event) => { setCustomStart(event.target.value); setDateError(""); }} /></label><b>→</b><label><span>结束日期</span><input type="date" value={customEnd} min={customStart || earliest} max={today} onChange={(event) => { setCustomEnd(event.target.value); setDateError(""); }} /></label></div>
                 {dateError && <p className="date-error" role="alert">{dateError}</p>}
                 <div className="date-popover-foot"><span>{customStart && customEnd && customStart <= customEnd ? `共 ${countDays(customStart, customEnd)} 天` : "请选择有效日期"}</span><button onClick={applyCustomRange}>应用此周期</button></div>
               </section>}
@@ -188,35 +259,35 @@ export default function Home() {
           </div>
         </header>
 
-        <div className="notice">
-          <div className="notice-icon">↻</div>
-          <div><strong>连接 Wildberries API 后即可查看真实经营数据</strong><p>首版分析框架已经准备好，接入后将自动同步订单、商品、库存和财务数据。</p></div>
-          <button onClick={() => setShowConnect(true)}>查看接入说明</button>
+        <div className={`notice ${dataError ? "error" : "connected"}`}>
+          <div className="notice-icon">{loading ? "↻" : dataError ? "!" : "✓"}</div>
+          <div><strong>{loading ? "正在从 Wildberries 同步真实数据" : dataError ? "本次同步未完成" : "Wildberries 实时数据已连接"}</strong><p>{loading ? `正在读取 ${dateLabel} 的订单、销售、库存与财务数据。` : dataError || `统计周期 ${dateLabel}，最近同步于 ${syncTime(data?.syncedAt)}。`}</p></div>
+          <button onClick={dataError ? refresh : () => setShowConnect(true)}>{dataError ? "重新同步" : "安全状态"}</button>
         </div>
 
-        <section className="metric-grid" aria-label={`${active.label}核心经营指标`}>
-          <article className="metric-card featured"><div className="metric-head"><span>销售额</span><i>↗</i></div><strong>{active.sales}</strong><div className="metric-foot"><span className="up">↑ 18.4%</span><small>较上期</small></div><div className="spark-bars">{bars.slice(-10).map((h,i)=><span key={i} style={{height: `${h}%`}} />)}</div></article>
-          <article className="metric-card"><div className="metric-head"><span>订单数</span><i>⌑</i></div><strong>{active.orders}</strong><div className="metric-foot"><span className="up">↑ 12.6%</span><small>较上期</small></div><p className="metric-note">平均客单价 ₽ 696</p></article>
-          <article className="metric-card"><div className="metric-head"><span>利润估算</span><i>₽</i></div><strong>{active.profit}</strong><div className="metric-foot"><span className="up">↑ 9.2%</span><small>利润率 25.4%</small></div><p className="metric-note">已扣除平台费与物流</p></article>
-          <article className="metric-card"><div className="metric-head"><span>退货率</span><i>↩</i></div><strong>{active.returns}</strong><div className="metric-foot"><span className="down">↓ 1.3%</span><small>表现优于类目</small></div><p className="metric-note">退货原因接入后可下钻</p></article>
+        <section className="metric-grid" aria-label={`${rangeLabel}核心经营指标`}>
+          <article className="metric-card featured"><div className="metric-head"><span>销售额</span><i>↗</i></div><strong>{loading && !data ? "同步中…" : formatRubles(metrics?.salesAmount ?? 0)}</strong><div className="metric-foot"><span className="up">{metrics?.ordersCount ?? 0} 单</span><small>已售 {data?.products.reduce((sum, item) => sum + item.units, 0) ?? 0} 件</small></div><div className="spark-bars">{trend.slice(-10).map((item) => <span key={item.date} style={{ height: `${Math.max(5, (Math.max(0, item.sales) / maxSales) * 100)}%` }} />)}</div></article>
+          <article className="metric-card"><div className="metric-head"><span>有效订单</span><i>⌑</i></div><strong>{loading && !data ? "—" : (metrics?.ordersCount ?? 0).toLocaleString("en-US")}</strong><div className="metric-foot"><span className="up">实时</span><small>取消 {metrics?.cancelledOrders ?? 0} 单</small></div><p className="metric-note">订单数据来自 WB Statistics API</p></article>
+          <article className="metric-card" id="finance"><div className="metric-head"><span>预计回款</span><i>₽</i></div><strong>{loading && !data ? "—" : formatRubles(metrics?.payoutAmount ?? 0)}</strong><div className="metric-foot"><span className="up">可提现</span><small>{formatRubles(metrics?.balanceAvailable ?? 0)}</small></div><p className="metric-note">最终金额以 WB 财务结算报告为准</p></article>
+          <article className="metric-card"><div className="metric-head"><span>退货率</span><i>↩</i></div><strong>{loading && !data ? "—" : `${(metrics?.returnRate ?? 0).toFixed(1)}%`}</strong><div className="metric-foot"><span className="down">{metrics?.returnsCount ?? 0} 件</span><small>销售与退货记录</small></div><p className="metric-note">当前账户余额 {formatRubles(metrics?.balanceCurrent ?? 0)}</p></article>
         </section>
 
         <section className="dashboard-grid" id="sales">
           <article className="panel sales-panel">
-            <div className="panel-title"><div><h2>销售趋势</h2><p>{active.label}每日销售额表现</p></div><div className="legend"><span><i className="purple-dot" />销售额</span><span><i className="gray-dot" />订单</span></div></div>
-            <div className="chart-wrap"><div className="y-axis"><span>₽120K</span><span>₽90K</span><span>₽60K</span><span>₽30K</span><span>₽0</span></div><div className="bar-chart">{bars.map((height, index) => <div className="bar-col" key={`${periodStart}-${index}`} title={`${formatDate(barDates[index])} · 演示销售指数 ${height}`}><span className={index === bars.length - 1 ? "bar current" : "bar"} style={{height: `${height}%`}} /><small>{index % labelEvery === 0 || index === bars.length - 1 ? formatShortDate(barDates[index]) : ""}</small></div>)}</div></div>
-            <div className="chart-summary"><span>本期日均销售额 <b>{active.average}</b></span><span>峰值 <b>{active.peak}</b></span></div>
+            <div className="panel-title"><div><h2>销售趋势</h2><p>{rangeLabel}每日销售额表现</p></div><div className="legend"><span><i className="purple-dot" />销售额</span><span><i className="gray-dot" />订单</span></div></div>
+            <div className="chart-wrap"><div className="y-axis"><span>{formatCompactRubles(chartMax)}</span><span>{formatCompactRubles(chartMax * .75)}</span><span>{formatCompactRubles(chartMax * .5)}</span><span>{formatCompactRubles(chartMax * .25)}</span><span>₽0</span></div><div className="bar-chart">{trend.map((item, index) => <div className="bar-col" key={item.date} title={`${formatDate(item.date)} · ${formatRubles(item.sales)} · ${item.orders} 单`}><span className={index === trend.length - 1 ? "bar current" : "bar"} style={{ height: `${Math.max(3, (Math.max(0, item.sales) / maxSales) * 100)}%` }} /><small>{index % labelEvery === 0 || index === trend.length - 1 ? formatShortDate(item.date) : ""}</small></div>)}</div></div>
+            <div className="chart-summary"><span>本期日均销售额 <b>{formatRubles(averageSales)}</b></span><span>单日峰值 <b>{formatRubles(peakSales)}</b></span><span>峰值订单 <b>{maxOrders} 单</b></span></div>
           </article>
-          <article className="panel category-panel"><div className="panel-title"><div><h2>类目贡献</h2><p>销售额占比</p></div><span className="panel-tag">演示</span></div><div className="donut" aria-label="女装42%，家居28%，箱包18%，其他12%"><div><b>{active.shortSales}</b><small>总销售额</small></div></div><div className="category-list"><div><span><i className="c1" />女装</span><b>42%</b></div><div><span><i className="c2" />家居</span><b>28%</b></div><div><span><i className="c3" />箱包</span><b>18%</b></div><div><span><i className="c4" />其他</span><b>12%</b></div></div></article>
+          <article className="panel category-panel"><div className="panel-title"><div><h2>类目贡献</h2><p>销售额占比</p></div><span className="panel-tag live">实时</span></div><div className="donut" style={{ background: categoryStops }} aria-label="真实类目销售额占比"><div><b>{formatCompactRubles(metrics?.salesAmount ?? 0)}</b><small>总销售额</small></div></div><div className="category-list">{(data?.categories ?? []).map((category, index) => <div key={category.name}><span><i style={{ background: colors[index] }} />{category.name}</span><b>{category.share.toFixed(1)}%</b></div>)}{!loading && !data?.categories.length && <p className="empty-copy">本周期暂无类目数据</p>}</div></article>
         </section>
 
         <section className="bottom-grid">
-          <article className="panel products-panel" id="products"><div className="panel-title"><div><h2>热销商品</h2><p>按销售额排序</p></div><button className="text-action" onClick={exportCsv}>导出明细 →</button></div><div className="table-wrap"><table><thead><tr><th>商品</th><th>销售额</th><th>订单</th><th>转化率</th></tr></thead><tbody>{products.map((product) => <tr key={product.sku}><td><div className={`product-thumb ${product.tone}`}>{product.category.slice(0,1)}</div><div><b>{product.name}</b><small>{product.sku} · {product.category}</small></div></td><td><b>{product.sales}</b></td><td>{product.orders}</td><td><span className="rate">{product.rate}</span></td></tr>)}</tbody></table></div></article>
-          <article className="panel stock-panel" id="stock"><div className="panel-title"><div><h2>库存预警</h2><p>需要尽快处理</p></div><span className="alert-count">6 项</span></div><div className="stock-item"><div className="stock-icon urgent">!</div><div><b>3 个 SKU 即将缺货</b><p>预计可售不足 5 天</p></div><span>补货</span></div><div className="stock-item"><div className="stock-icon warning">↓</div><div><b>2 个 SKU 库存偏低</b><p>库存覆盖 6–10 天</p></div><span>查看</span></div><div className="stock-item"><div className="stock-icon calm">↗</div><div><b>1 个 SKU 周转过慢</b><p>近 30 天动销率低于 15%</p></div><span>分析</span></div><button className="stock-button" onClick={() => setShowConnect(true)}>接入库存数据</button></article>
+          <article className="panel products-panel" id="products"><div className="panel-title"><div><h2>热销商品</h2><p>按真实销售额排序</p></div><button className="text-action" onClick={exportCsv} disabled={!products.length}>导出明细 →</button></div><div className="table-wrap"><table><thead><tr><th>商品</th><th>销售额</th><th>订单</th><th>库存</th><th>成交率</th></tr></thead><tbody>{products.map((product, index) => <tr key={product.nmId}><td><div className={`product-thumb tone-${index % 4}`}>{product.category.slice(0, 1)}</div><div><b>{product.name}</b><small>{product.sku} · WB {product.nmId}</small></div></td><td><b>{formatRubles(product.sales)}</b></td><td>{product.orders}</td><td>{inventory?.available ? product.stock : "—"}</td><td><span className="rate">{product.buyoutRate.toFixed(1)}%</span></td></tr>)}{!loading && products.length === 0 && <tr className="empty-row"><td colSpan={5}>本周期暂无商品销售记录</td></tr>}</tbody></table></div></article>
+          <article className="panel stock-panel" id="stock"><div className="panel-title"><div><h2>库存监控</h2><p>{inventory?.available ? `${inventory.totalQuantity.toLocaleString("en-US")} 件 · ${inventory.productCount} 个商品` : "正在读取 WB 仓库库存"}</p></div><span className="alert-count">{inventory?.available ? `${inventoryAlerts} 项` : "—"}</span></div><div className="stock-item"><div className="stock-icon urgent">!</div><div><b>{inventory?.available ? `${inventory.critical} 个商品即将缺货` : "库存数据暂不可用"}</b><p>{inventory?.available ? "预计可售不足 5 天" : "稍后重新同步即可重试"}</p></div><span>重点</span></div><div className="stock-item"><div className="stock-icon warning">↓</div><div><b>{inventory?.available ? `${inventory.low} 个商品库存偏低` : "—"}</b><p>库存覆盖 5–10 天</p></div><span>关注</span></div><div className="stock-item"><div className="stock-icon calm">↗</div><div><b>{inventory?.available ? `${inventory.slow} 个商品周转较慢` : "—"}</b><p>本周期无订单但仍有库存</p></div><span>分析</span></div><button className="stock-button" onClick={refresh} disabled={loading}>{loading ? "同步中…" : "立即刷新库存"}</button></article>
         </section>
       </section>
 
-      {showConnect && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setShowConnect(false)}><section className="connect-modal" role="dialog" aria-modal="true" aria-labelledby="connect-title"><button className="modal-close" onClick={() => setShowConnect(false)} aria-label="关闭">×</button><div className="modal-mark">W</div><p className="modal-eyebrow">WB API CONNECTOR</p><h2 id="connect-title">接入您的 Wildberries 店铺</h2><p className="modal-lead">为了准确匹配您的 API，请先提供接口文档、鉴权方式和一份脱敏的返回样例。正式密钥会放在服务器安全配置中，不会暴露在网页里。</p><div className="api-needs"><div><span>01</span><p><b>接口信息</b><small>API 文档、Base URL、鉴权方式</small></p></div><div><span>02</span><p><b>数据范围</b><small>订单、商品、库存、广告、财务报表</small></p></div><div><span>03</span><p><b>同步规则</b><small>历史数据起始日期与更新频率</small></p></div></div><div className="modal-note"><b>建议先接入</b><span>订单 + 商品 + 库存 + 财务，这四类数据足够完成销售和利润首轮分析。</span></div><div className="modal-actions"><button className="secondary" onClick={copyChecklist}>{copied ? "已复制 ✓" : "复制接入清单"}</button><button className="primary" onClick={() => setShowConnect(false)}>知道了</button></div></section></div>}
+      {showConnect && <div className="modal-backdrop"><section className="connect-modal" role="dialog" aria-modal="true" aria-labelledby="connect-title"><button className="modal-close" onClick={() => setShowConnect(false)} aria-label="关闭">×</button><div className="modal-mark">W</div><p className="modal-eyebrow">WB API · SECURE CONNECTION</p><h2 id="connect-title">店铺连接已启用</h2><p className="modal-lead">订单、销售、库存和财务数据均由服务器端读取。浏览器不会收到 API 密钥，网页源码和导出的 CSV 中也不会包含密钥。</p><div className="api-needs"><div><span>01</span><p><b>服务器密钥</b><small>密钥加密保存在部署环境，不写入代码仓库</small></p></div><div><span>02</span><p><b>固定接口白名单</b><small>只请求官方 Wildberries API 地址</small></p></div><div><span>03</span><p><b>只读分析</b><small>当前功能不修改商品、价格、广告或账户数据</small></p></div></div><div className="modal-note"><b>已启用</b><span>真实订单、销售/退货、仓库库存和账户余额；自定义周期支持近 90 天。</span></div><div className="modal-actions"><button className="secondary" onClick={() => setShowConnect(false)}>关闭</button><button className="primary" onClick={refresh}>立即同步</button></div></section></div>}
     </main>
   );
 }
