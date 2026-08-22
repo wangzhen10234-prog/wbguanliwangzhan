@@ -130,6 +130,7 @@ type OrderFinance = {
   rowsCount: number;
   transactionAmount: number;
   forPay: number;
+  logisticsFee: number;
   wbExpenses: number;
   netPayout: number;
   currency: string;
@@ -624,8 +625,9 @@ function financeRowValues(row: WbFinanceRow) {
   const returned = isFinanceReturn(row);
   const transactionAmount = signedFinanceValue(row.retailPriceWithDisc ?? row.retailAmount, returned);
   const forPay = signedFinanceValue(row.forPay, returned);
+  const logisticsFee = Math.abs(financeNumber(row.deliveryService));
   const wbExpenses = [
-    row.deliveryService,
+    logisticsFee,
     row.acquiringFee,
     row.penalty,
     row.deduction,
@@ -633,7 +635,7 @@ function financeRowValues(row: WbFinanceRow) {
     row.acceptance ?? row.paidAcceptance,
   ].map(financeNumber).reduce((sum, value) => sum + Math.abs(value), 0);
   const additionalPayment = financeNumber(row.additionalPayment);
-  return { transactionAmount, forPay, wbExpenses, netPayout: forPay - wbExpenses + additionalPayment };
+  return { transactionAmount, forPay, logisticsFee, wbExpenses, netPayout: forPay - wbExpenses + additionalPayment };
 }
 
 function financeIdentity(value?: string) {
@@ -654,6 +656,7 @@ function orderFinanceMap(snapshot: FinanceRowsSnapshot) {
       rowsCount: 0,
       transactionAmount: 0,
       forPay: 0,
+      logisticsFee: 0,
       wbExpenses: 0,
       netPayout: 0,
       currency: row.currency || "CNY",
@@ -661,6 +664,7 @@ function orderFinanceMap(snapshot: FinanceRowsSnapshot) {
     current.rowsCount += 1;
     current.transactionAmount += values.transactionAmount;
     current.forPay += values.forPay;
+    current.logisticsFee += values.logisticsFee;
     current.wbExpenses += values.wbExpenses;
     current.netPayout += values.netPayout;
     if (row.currency) current.currency = row.currency;
@@ -683,6 +687,7 @@ function splitOrderFinance(finance: OrderFinance, divisor: number): OrderFinance
     ...finance,
     transactionAmount: finance.transactionAmount / divisor,
     forPay: finance.forPay / divisor,
+    logisticsFee: finance.logisticsFee / divisor,
     wbExpenses: finance.wbExpenses / divisor,
     netPayout: finance.netPayout / divisor,
   };
