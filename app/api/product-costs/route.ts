@@ -98,7 +98,11 @@ function databaseError(error: unknown) {
 export async function GET() {
   try {
     const db = getDb();
-    await db.insert(productCosts).values(SEED_ROWS).onConflictDoNothing();
+    // D1 limits the number of bound parameters in one statement. Keep the
+    // initialization idempotent while inserting each starter row separately.
+    for (const seedRow of SEED_ROWS) {
+      await db.insert(productCosts).values(seedRow).onConflictDoNothing();
+    }
     const rows = await db.select().from(productCosts).orderBy(asc(productCosts.sortOrder), asc(productCosts.sellerSku));
     return json({ rows });
   } catch (error) {
