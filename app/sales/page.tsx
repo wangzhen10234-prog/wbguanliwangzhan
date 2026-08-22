@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AppSidebar } from "../_components/app-sidebar";
+import { normalizeProductSku, productCostSourceKey } from "../_lib/product-cost-aliases";
 
 type Product = { nmId: number; name: string; sku: string; image: string | null };
 type OrderSettlement = {
@@ -77,7 +78,6 @@ function formatFinanceMoney(value: number) {
   const sign = value < 0 ? "−" : "";
   return `${sign}¥ ${Math.abs(value || 0).toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
-function normalizeSku(value: string) { return value.toLocaleLowerCase().replace(/[\s_.-]+/g, ""); }
 function formatDateTime(value?: string) {
   if (!value) return "—";
   return new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(value));
@@ -152,13 +152,16 @@ export default function SalesPage() {
 
   const productById = useMemo(() => new Map((data?.products ?? []).map((item) => [item.nmId, item])), [data]);
   const orders = useMemo(() => data?.orderDetails ?? [], [data?.orderDetails]);
-  const costBySku = useMemo(() => new Map(costRows.map((row) => [normalizeSku(row.sellerSku), row])), [costRows]);
+  const costBySku = useMemo(() => new Map(costRows.map((row) => [normalizeProductSku(row.sellerSku), row])), [costRows]);
   const costByNmId = useMemo(() => new Map(costRows.filter((row) => row.nmId).map((row) => [Number(row.nmId), row])), [costRows]);
   const financialByOrder = useMemo(() => {
     const result = new Map<string, OrderFinancial>();
     for (const order of orders) {
       const product = productById.get(order.nmId);
-      const cost = costByNmId.get(order.nmId) ?? costBySku.get(normalizeSku(order.article || product?.sku || ""));
+      const sellerSku = order.article || product?.sku || "";
+      const cost = costByNmId.get(order.nmId)
+        ?? costBySku.get(normalizeProductSku(sellerSku))
+        ?? costBySku.get(productCostSourceKey(sellerSku));
       const costReady = Boolean(cost);
       const principal = cost
         ? cost.productCostRub > 0 && cost.exchangeRate > 0

@@ -2,6 +2,7 @@
 
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { AppSidebar } from "../_components/app-sidebar";
+import { normalizeProductSku, productCostSourceKey } from "../_lib/product-cost-aliases";
 
 type Product = {
   nmId: number;
@@ -68,10 +69,6 @@ const ORIGINAL_ORDER = new Map(["wz311b", "wz311p", "wz310b", "wz810b", "wz810g"
 
 function inputDate(date: Date) {
   return date.toISOString().slice(0, 10);
-}
-
-function normalizeSku(value: string) {
-  return value.toLocaleLowerCase().replace(/[\s_.-]+/g, "");
 }
 
 function emptyCost(product: Product | null, sortOrder = 0): CostRow {
@@ -184,14 +181,20 @@ export default function ProductDetailsPage() {
         return body.rows ?? [];
       }),
     ]).then(([dashboardResult, storedRows]) => {
-      const nextCosts: Record<string, CostRow> = {};
-      for (const row of storedRows) nextCosts[normalizeSku(row.sellerSku)] = { ...row, targetMarginRate: Number(row.targetMarginRate ?? 10), sortOrder: Number(row.sortOrder ?? 0) };
+      const storedCosts: Record<string, CostRow> = {};
+      for (const row of storedRows) storedCosts[normalizeProductSku(row.sellerSku)] = { ...row, targetMarginRate: Number(row.targetMarginRate ?? 10), sortOrder: Number(row.sortOrder ?? 0) };
+      const nextCosts: Record<string, CostRow> = { ...storedCosts };
+      const consumedSourceKeys = new Set<string>();
       for (const product of dashboardResult.value?.products ?? []) {
-        const key = normalizeSku(product.sku);
-        nextCosts[key] = nextCosts[key]
-          ? { ...nextCosts[key], sellerSku: product.sku, nmId: product.nmId }
+        const key = normalizeProductSku(product.sku);
+        const sourceKey = productCostSourceKey(product.sku);
+        const source = storedCosts[key] ?? storedCosts[sourceKey];
+        nextCosts[key] = source
+          ? { ...source, sellerSku: product.sku, nmId: product.nmId }
           : emptyCost(product);
+        if (source && sourceKey !== key) consumedSourceKeys.add(sourceKey);
       }
+      for (const sourceKey of consumedSourceKeys) delete nextCosts[sourceKey];
       setData(dashboardResult.value);
       setCosts(nextCosts);
       setDirty(new Set());
@@ -205,14 +208,14 @@ export default function ProductDetailsPage() {
   }, [reloadKey]);
 
   const rows = useMemo<SheetRow[]>(() => {
-    const products = new Map((data?.products ?? []).map((product) => [normalizeSku(product.sku), product]));
+    const products = new Map((data?.products ?? []).map((product) => [normalizeProductSku(product.sku), product]));
     const keys = new Set([...products.keys(), ...Object.keys(costs)]);
     const productOrder = new Map([...products.keys()].sort((left, right) => left.localeCompare(right, "zh-CN")).map((key, index) => [key, 10_000 + index * 100]));
-    const manualOrder = new Map(Object.keys(costs).filter((key) => !products.has(normalizeSku(costs[key].sellerSku)) && !key.startsWith("draft:")).sort((left, right) => left.localeCompare(right, "zh-CN")).map((key, index) => [key, 100_000 + index * 100]));
+    const manualOrder = new Map(Object.keys(costs).filter((key) => !products.has(normalizeProductSku(costs[key].sellerSku)) && !key.startsWith("draft:")).sort((left, right) => left.localeCompare(right, "zh-CN")).map((key, index) => [key, 100_000 + index * 100]));
     return [...keys].map((key) => {
       const cost = costs[key];
       if (!cost) return null;
-      const sellerKey = normalizeSku(cost.sellerSku);
+      const sellerKey = normalizeProductSku(cost.sellerSku);
       const product = products.get(sellerKey) ?? products.get(key) ?? null;
       const order = cost.sortOrder > 0 ? cost.sortOrder : ORIGINAL_ORDER.get(sellerKey) ?? productOrder.get(sellerKey) ?? manualOrder.get(key) ?? 1_000_000;
       return { key, product, cost, order };
@@ -271,7 +274,7 @@ export default function ProductDetailsPage() {
     try {
       const owners = new Map<string, string>();
       for (const [key, cost] of Object.entries(costs)) {
-        const sellerKey = normalizeSku(cost.sellerSku);
+        const sellerKey = normalizeProductSku(cost.sellerSku);
         if (!sellerKey) {
           if (dirty.has(key)) throw new Error("新增产品必须先填写卖家商品编号");
           continue;
@@ -296,7 +299,7 @@ export default function ProductDetailsPage() {
         });
         const body = await response.json() as { row?: CostRow; error?: string };
         if (!response.ok || !body.row) throw new Error(body.error || `${cost.sellerSku} 保存失败`);
-        return [key, normalizeSku(body.row.sellerSku), body.row] as const;
+        return [key, normalizeProductSku(body.row.sellerSku), body.row] as const;
       }));
       setCosts((current) => {
         const next = { ...current };
