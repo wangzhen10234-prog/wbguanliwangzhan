@@ -9,11 +9,11 @@ const JSON_HEADERS = {
 };
 
 const SEED_ROWS: Array<typeof productCosts.$inferInsert> = [
-  { sellerSku: "wz311B", internalSku: "311B", category: "宠物牵引绳", specification: "5米黑色", lengthCm: 21, widthCm: 13, heightCm: 6, weightG: 270, productCostRub: 220, exchangeRate: 11.2, productCostCny: 19.64, handlingFeeCny: 5, lastMileFeeCny: 9.28, commissionRate: 19, activityDiscountRate: 5, returnLossRate: 10, referencePriceCny: 87 },
-  { sellerSku: "wz311P", internalSku: "311P", category: "宠物牵引绳", specification: "5米粉色", lengthCm: 21, widthCm: 13, heightCm: 6, weightG: 270, productCostRub: 220, exchangeRate: 11.2, productCostCny: 19.64, handlingFeeCny: 5, lastMileFeeCny: 9.28, commissionRate: 19, activityDiscountRate: 5, returnLossRate: 10, referencePriceCny: 87 },
-  { sellerSku: "wz310B", internalSku: "310B", category: "宠物牵引绳", specification: "5米黑色", lengthCm: 21, widthCm: 13, heightCm: 6, weightG: 270, exchangeRate: 11.2, productCostCny: 21.5, handlingFeeCny: 5, lastMileFeeCny: 9.28, commissionRate: 19, activityDiscountRate: 5, returnLossRate: 10, referencePriceCny: 91 },
-  { sellerSku: "wz810B", internalSku: "810B", category: "宠物牵引绳", specification: "5米", lengthCm: 21, widthCm: 13, heightCm: 6, weightG: 330, productCostRub: 350, exchangeRate: 11.2, productCostCny: 31.25, handlingFeeCny: 5, lastMileFeeCny: 9.28, commissionRate: 19, activityDiscountRate: 5, returnLossRate: 10, referencePriceCny: 116 },
-  { sellerSku: "wz810G", internalSku: "810G", category: "宠物牵引绳", specification: "5米", lengthCm: 21, widthCm: 13, heightCm: 6, weightG: 330, productCostRub: 350, exchangeRate: 11.2, productCostCny: 31.25, handlingFeeCny: 5, lastMileFeeCny: 9.28, commissionRate: 19, activityDiscountRate: 5, returnLossRate: 10, referencePriceCny: 116 },
+  { sellerSku: "wz311B", internalSku: "311B", category: "宠物牵引绳", specification: "5米黑色", lengthCm: 21, widthCm: 13, heightCm: 6, weightG: 270, productCostRub: 220, exchangeRate: 11.2, productCostCny: 19.64, handlingFeeCny: 5, lastMileFeeCny: 9.28, commissionRate: 19, activityDiscountRate: 5, returnLossRate: 10, referencePriceCny: 87, targetMarginRate: 10 },
+  { sellerSku: "wz311P", internalSku: "311P", category: "宠物牵引绳", specification: "5米粉色", lengthCm: 21, widthCm: 13, heightCm: 6, weightG: 270, productCostRub: 220, exchangeRate: 11.2, productCostCny: 19.64, handlingFeeCny: 5, lastMileFeeCny: 9.28, commissionRate: 19, activityDiscountRate: 5, returnLossRate: 10, referencePriceCny: 87, targetMarginRate: 10 },
+  { sellerSku: "wz310B", internalSku: "310B", category: "宠物牵引绳", specification: "5米黑色", lengthCm: 21, widthCm: 13, heightCm: 6, weightG: 270, productCostRub: 0, exchangeRate: 0, productCostCny: 21.5, handlingFeeCny: 5, lastMileFeeCny: 9.28, commissionRate: 19, activityDiscountRate: 5, returnLossRate: 10, referencePriceCny: 91, targetMarginRate: 10 },
+  { sellerSku: "wz810B", internalSku: "810B", category: "宠物牵引绳", specification: "5米", lengthCm: 21, widthCm: 13, heightCm: 6, weightG: 330, productCostRub: 350, exchangeRate: 11.2, productCostCny: 31.25, handlingFeeCny: 5, lastMileFeeCny: 9.28, commissionRate: 19, activityDiscountRate: 5, returnLossRate: 10, referencePriceCny: 116, targetMarginRate: 10 },
+  { sellerSku: "wz810G", internalSku: "810G", category: "宠物牵引绳", specification: "5米", lengthCm: 21, widthCm: 13, heightCm: 6, weightG: 330, productCostRub: 350, exchangeRate: 11.2, productCostCny: 31.25, handlingFeeCny: 5, lastMileFeeCny: 9.28, commissionRate: 19, activityDiscountRate: 5, returnLossRate: 10, referencePriceCny: 116, targetMarginRate: 10 },
 ];
 
 type CostPayload = {
@@ -36,6 +36,7 @@ type CostPayload = {
   activityDiscountRate?: unknown;
   returnLossRate?: unknown;
   referencePriceCny?: unknown;
+  targetMarginRate?: unknown;
   notes?: unknown;
 };
 
@@ -57,7 +58,8 @@ function normalizePayload(payload: CostPayload): typeof productCosts.$inferInser
   const sellerSku = stringField(payload.sellerSku, 120);
   if (!sellerSku) throw new Error("SELLER_SKU_REQUIRED");
   const exchangeRate = numericField(payload.exchangeRate, 10_000);
-  if (exchangeRate === 0) throw new Error("EXCHANGE_RATE_REQUIRED");
+  const productCostRub = numericField(payload.productCostRub);
+  if (productCostRub > 0 && exchangeRate === 0) throw new Error("EXCHANGE_RATE_REQUIRED");
   const nmId = numericField(payload.nmId, Number.MAX_SAFE_INTEGER);
   return {
     sellerSku,
@@ -69,7 +71,7 @@ function normalizePayload(payload: CostPayload): typeof productCosts.$inferInser
     widthCm: numericField(payload.widthCm, 100_000),
     heightCm: numericField(payload.heightCm, 100_000),
     weightG: numericField(payload.weightG, 100_000_000),
-    productCostRub: numericField(payload.productCostRub),
+    productCostRub,
     exchangeRate,
     productCostCny: numericField(payload.productCostCny),
     handlingFeeCny: numericField(payload.handlingFeeCny),
@@ -79,6 +81,7 @@ function normalizePayload(payload: CostPayload): typeof productCosts.$inferInser
     activityDiscountRate: numericField(payload.activityDiscountRate, 100),
     returnLossRate: numericField(payload.returnLossRate, 100),
     referencePriceCny: numericField(payload.referencePriceCny),
+    targetMarginRate: numericField(payload.targetMarginRate, 100),
     notes: stringField(payload.notes, 1000),
     updatedAt: new Date().toISOString(),
   };
@@ -130,6 +133,7 @@ export async function PUT(request: Request) {
           activityDiscountRate: value.activityDiscountRate,
           returnLossRate: value.returnLossRate,
           referencePriceCny: value.referencePriceCny,
+          targetMarginRate: value.targetMarginRate,
           notes: value.notes,
           updatedAt: value.updatedAt,
         },
@@ -138,7 +142,7 @@ export async function PUT(request: Request) {
     return json({ row });
   } catch (error) {
     if (error instanceof Error && error.message === "SELLER_SKU_REQUIRED") return json({ error: "卖家商品编号不能为空" }, 400);
-    if (error instanceof Error && error.message === "EXCHANGE_RATE_REQUIRED") return json({ error: "汇率必须大于 0" }, 400);
+    if (error instanceof Error && error.message === "EXCHANGE_RATE_REQUIRED") return json({ error: "填写卢布产品成本时，汇率必须大于 0" }, 400);
     if (error instanceof Error && error.message === "NUMERIC_FIELD_INVALID") return json({ error: "金额、比例或尺寸输入无效" }, 400);
     return databaseError(error);
   }

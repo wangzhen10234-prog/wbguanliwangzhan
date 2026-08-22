@@ -1,0 +1,1 @@
+ALTER TABLE `product_costs` ADD `target_margin_rate` real DEFAULT 10 NOT NULL;

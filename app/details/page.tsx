@@ -3,34 +3,18 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AppSidebar } from "../_components/app-sidebar";
 
-type Settlement = {
-  nmId: number;
-  sellerSku: string;
-  title: string;
-  settledUnits: number;
-  transactionAmount: number;
-  forPay: number;
-  wbExpenses: number;
-  netPayout: number;
-};
-
 type Product = {
   nmId: number;
   name: string;
   sku: string;
   category: string;
   image: string | null;
-  sales: number;
-  preliminaryPayout: number;
-  settlement: Settlement;
 };
 
 type DashboardData = {
   syncedAt: string;
   syncSchedule: { nextAt: string };
-  period: { from: string; to: string; days: number };
   products: Product[];
-  settlement: { available: boolean; source: string; rowsCount: number; unallocatedExpenses: number };
 };
 
 type CostRow = {
@@ -53,47 +37,42 @@ type CostRow = {
   activityDiscountRate: number;
   returnLossRate: number;
   referencePriceCny: number;
+  targetMarginRate: number;
   notes: string;
   updatedAt?: string;
 };
 
-type CalculatedRow = {
-  product: Product;
+type SheetRow = {
+  key: string;
+  product: Product | null;
   cost: CostRow;
-  productCostCny: number;
-  pricingCost: number;
-  payoutCny: number;
-  ownCostCny: number;
-  netProfitCny: number;
-  netMargin: number | null;
+};
+
+type FormulaValues = {
+  productCostCny: number | null;
+  lastMileFeeCny: number;
+  commissionFeeCny: number | null;
+  adFeeCny: number | null;
+  discountFeeCny: number | null;
+  returnLossFeeCny: number | null;
+  totalCostCny: number | null;
+  referencePriceCny: number | null;
+  actualSalePriceCny: number | null;
+  grossProfitCny: number | null;
 };
 
 const DAY_MS = 86_400_000;
+const ORIGINAL_ORDER = new Map(["wz311b", "wz311p", "wz310b", "wz810b", "wz810g"].map((sku, index) => [sku, index]));
 
-function toInputDate(date: Date) {
+function inputDate(date: Date) {
   return date.toISOString().slice(0, 10);
-}
-
-function shiftDate(dateString: string, days: number) {
-  const date = new Date(`${dateString}T12:00:00`);
-  date.setDate(date.getDate() + days);
-  return toInputDate(date);
-}
-
-function countDays(start: string, end: string) {
-  return Math.round((new Date(`${end}T12:00:00`).getTime() - new Date(`${start}T12:00:00`).getTime()) / DAY_MS) + 1;
 }
 
 function normalizeSku(value: string) {
   return value.toLocaleLowerCase().replace(/[\s_.-]+/g, "");
 }
 
-function money(value: number, currency: "CNY" | "RUB" = "CNY", digits = 2) {
-  const symbol = currency === "CNY" ? "¥" : "₽";
-  return `${symbol} ${Number(value || 0).toLocaleString("zh-CN", { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
-}
-
-function blankCost(product: Product): CostRow {
+function emptyCost(product: Product): CostRow {
   return {
     sellerSku: product.sku,
     nmId: product.nmId,
@@ -114,277 +93,277 @@ function blankCost(product: Product): CostRow {
     activityDiscountRate: 0,
     returnLossRate: 0,
     referencePriceCny: 0,
+    targetMarginRate: 10,
     notes: "",
   };
 }
 
-function effectiveProductCost(cost: CostRow) {
-  if (cost.productCostCny > 0) return cost.productCostCny;
-  return cost.exchangeRate > 0 ? cost.productCostRub / cost.exchangeRate : 0;
+function formulas(cost: CostRow): FormulaValues {
+  // 原 WPS 公式：P=(H*I*J/1000)*2+6。
+  const lastMileFeeCny = (cost.lengthCm * cost.widthCm * cost.heightCm / 1000) * 2 + 6;
+  // 原 WPS 多数行使用 N=L/M；像 wz310B 这种 L、M 留空的行则直接录入 N。
+  if (cost.productCostRub > 0 && cost.exchangeRate <= 0) {
+    return { productCostCny: null, lastMileFeeCny, commissionFeeCny: null, adFeeCny: null, discountFeeCny: null, returnLossFeeCny: null, totalCostCny: null, referencePriceCny: null, actualSalePriceCny: null, grossProfitCny: null };
+  }
+  const productCostCny = cost.productCostRub > 0 && cost.exchangeRate > 0 ? cost.productCostRub / cost.exchangeRate : cost.productCostCny;
+  // 原 WPS 公式：AA=(N+O+P)/(1-(Q+S+U+W+AC))，百分比在网页中以 0-100 输入。
+  const denominator = 1 - (cost.commissionRate + cost.adRate + cost.activityDiscountRate + cost.returnLossRate + cost.targetMarginRate) / 100;
+  if (denominator <= 0) {
+    return {
+      productCostCny,
+      lastMileFeeCny,
+      commissionFeeCny: null,
+      adFeeCny: null,
+      discountFeeCny: null,
+      returnLossFeeCny: null,
+      totalCostCny: null,
+      referencePriceCny: null,
+      actualSalePriceCny: null,
+      grossProfitCny: null,
+    };
+  }
+  const actualSalePriceCny = (productCostCny + cost.handlingFeeCny + lastMileFeeCny) / denominator;
+  const commissionFeeCny = actualSalePriceCny * cost.commissionRate / 100; // R=Q*AA
+  const adFeeCny = actualSalePriceCny * cost.adRate / 100; // T=S*AA
+  const discountFeeCny = actualSalePriceCny * cost.activityDiscountRate / 100; // V=U*AA
+  const returnLossFeeCny = actualSalePriceCny * cost.returnLossRate / 100; // X=W*AA
+  // 原 WPS 公式顺序：Y=N+O+P+R+T+X+V。
+  const totalCostCny = productCostCny + cost.handlingFeeCny + lastMileFeeCny + commissionFeeCny + adFeeCny + returnLossFeeCny + discountFeeCny;
+  const referencePriceCny = actualSalePriceCny / 0.7; // Z=AA/0.7
+  const grossProfitCny = actualSalePriceCny - totalCostCny; // AB=AA-Y
+  return { productCostCny, lastMileFeeCny, commissionFeeCny, adFeeCny, discountFeeCny, returnLossFeeCny, totalCostCny, referencePriceCny, actualSalePriceCny, grossProfitCny };
 }
 
-function calculate(product: Product, cost: CostRow): CalculatedRow {
-  const productCostCny = effectiveProductCost(cost);
-  const exchangeRate = cost.exchangeRate || 11.2;
-  const settledUnits = Math.max(0, product.settlement.settledUnits);
-  const transactionCny = product.settlement.transactionAmount / exchangeRate;
-  const payoutCny = product.settlement.netPayout / exchangeRate;
-  const unitOwnCost = productCostCny + cost.handlingFeeCny + cost.lastMileFeeCny;
-  const adCost = Math.abs(transactionCny) * cost.adRate / 100;
-  const returnProvision = Math.abs(transactionCny) * cost.returnLossRate / 100;
-  const ownCostCny = unitOwnCost * settledUnits + adCost + returnProvision;
-  const netProfitCny = payoutCny - ownCostCny;
-  const netMargin = Math.abs(transactionCny) > 0 ? (netProfitCny / Math.abs(transactionCny)) * 100 : null;
-  const actualAverageCny = settledUnits > 0 ? transactionCny / settledUnits : cost.referencePriceCny;
-  const pricingRate = cost.commissionRate + cost.adRate + cost.activityDiscountRate + cost.returnLossRate;
-  const pricingCost = unitOwnCost + Math.max(0, actualAverageCny) * pricingRate / 100;
-  return { product, cost, productCostCny, pricingCost, payoutCny, ownCostCny, netProfitCny, netMargin };
+function display(value: number | null, digits = 2) {
+  if (value === null || !Number.isFinite(value)) return "#DIV/0!";
+  return value.toLocaleString("zh-CN", { minimumFractionDigits: digits, maximumFractionDigits: digits });
 }
 
-function NumberInput({ value, onChange, ariaLabel, step = "0.01" }: { value: number; onChange: (value: number) => void; ariaLabel: string; step?: string }) {
-  return <input aria-label={ariaLabel} className="detail-number-input" inputMode="decimal" min="0" step={step} type="number" value={Number.isFinite(value) ? value : 0} onChange={(event) => onChange(Math.max(0, Number(event.target.value || 0)))} />;
+function NumberCell({ value, onChange, label, step = "0.01", suffix, blankZero = false }: { value: number; onChange: (value: number) => void; label: string; step?: string; suffix?: string; blankZero?: boolean }) {
+  return (
+    <label className={`sheet-input-wrap ${suffix ? "with-suffix" : ""}`}>
+      <input aria-label={label} inputMode="decimal" min="0" step={step} type="number" value={blankZero && value === 0 ? "" : Number.isFinite(value) ? value : 0} onChange={(event) => onChange(Math.max(0, Number(event.target.value || 0)))} />
+      {suffix && <span>{suffix}</span>}
+    </label>
+  );
 }
 
 export default function ProductDetailsPage() {
-  const today = toInputDate(new Date());
-  const earliest = shiftDate(today, -89);
-  const [draftStart, setDraftStart] = useState(() => shiftDate(today, -29));
-  const [draftEnd, setDraftEnd] = useState(today);
-  const [periodStart, setPeriodStart] = useState(() => shiftDate(today, -29));
-  const [periodEnd, setPeriodEnd] = useState(today);
   const [data, setData] = useState<DashboardData | null>(null);
-  const [costs, setCosts] = useState<Record<number, CostRow>>({});
+  const [costs, setCosts] = useState<Record<string, CostRow>>({});
   const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [dirty, setDirty] = useState<Set<string>>(new Set());
   const [error, setError] = useState("");
-  const [dateError, setDateError] = useState("");
+  const [message, setMessage] = useState("");
   const [query, setQuery] = useState("");
   const [reloadKey, setReloadKey] = useState(0);
-  const [saving, setSaving] = useState<Set<number>>(new Set());
-  const [saved, setSaved] = useState<Set<number>>(new Set());
   const forceRefreshRef = useRef(false);
 
   useEffect(() => {
     const controller = new AbortController();
-    const params = new URLSearchParams({ from: periodStart, to: periodEnd, includeFinance: "true" });
+    const today = new Date();
+    const start = new Date(today.getTime() - 6 * DAY_MS);
+    const params = new URLSearchParams({ from: inputDate(start), to: inputDate(today) });
     if (forceRefreshRef.current) params.set("refresh", "manual");
     forceRefreshRef.current = false;
+
     Promise.all([
       fetch(`/api/wb/dashboard?${params}`, { signal: controller.signal, cache: "no-store" }).then(async (response) => {
         const body = await response.json() as DashboardData | { error?: string };
-        if (!response.ok) throw new Error("error" in body && body.error ? body.error : "WB 数据读取失败");
-        return body as DashboardData;
-      }),
+        if (!response.ok) throw new Error("error" in body && body.error ? body.error : "WB 商品资料读取失败");
+        return { value: body as DashboardData, error: "" };
+      }).catch((reason: Error) => ({ value: null, error: reason.name === "AbortError" ? "" : reason.message })),
       fetch("/api/product-costs", { signal: controller.signal, cache: "no-store" }).then(async (response) => {
         const body = await response.json() as { rows?: CostRow[]; error?: string };
-        if (!response.ok) throw new Error(body.error || "产品成本表读取失败");
+        if (!response.ok) throw new Error(body.error || "产品记录表读取失败");
         return body.rows ?? [];
       }),
-    ]).then(([dashboard, storedRows]) => {
-      const bySku = new Map(storedRows.map((row) => [normalizeSku(row.sellerSku), row]));
-      const nextCosts: Record<number, CostRow> = {};
-      for (const product of dashboard.products) {
-        const stored = bySku.get(normalizeSku(product.sku));
-        nextCosts[product.nmId] = stored ? { ...stored, sellerSku: product.sku, nmId: product.nmId } : blankCost(product);
+    ]).then(([dashboardResult, storedRows]) => {
+      const nextCosts: Record<string, CostRow> = {};
+      for (const row of storedRows) nextCosts[normalizeSku(row.sellerSku)] = { ...row, targetMarginRate: Number(row.targetMarginRate ?? 10) };
+      for (const product of dashboardResult.value?.products ?? []) {
+        const key = normalizeSku(product.sku);
+        nextCosts[key] = nextCosts[key]
+          ? { ...nextCosts[key], sellerSku: product.sku, nmId: product.nmId }
+          : emptyCost(product);
       }
-      setData(dashboard);
+      setData(dashboardResult.value);
       setCosts(nextCosts);
-      setError("");
+      setDirty(new Set());
+      setError(dashboardResult.error ? `${dashboardResult.error}，产品记录表仍可编辑` : "");
     }).catch((reason: Error) => {
       if (reason.name !== "AbortError") setError(reason.message);
     }).finally(() => {
       if (!controller.signal.aborted) setLoading(false);
     });
     return () => controller.abort();
-  }, [periodStart, periodEnd, reloadKey]);
+  }, [reloadKey]);
 
-  useEffect(() => {
-    const nextAt = data?.syncSchedule.nextAt;
-    if (!nextAt) return;
-    const timer = window.setTimeout(() => {
-      setLoading(true);
-      setReloadKey((key) => key + 1);
-    }, Math.max(1_000, new Date(nextAt).getTime() - Date.now() + 1_500));
-    return () => window.clearTimeout(timer);
-  }, [data?.syncSchedule.nextAt]);
-
-  const calculatedRows = useMemo(() => {
-    const needle = query.trim().toLocaleLowerCase();
-    return (data?.products ?? [])
-      .filter((product) => !needle || [product.sku, product.name, product.category, String(product.nmId)].some((value) => value.toLocaleLowerCase().includes(needle)))
-      .map((product) => calculate(product, costs[product.nmId] ?? blankCost(product)))
-      .sort((a, b) => b.netProfitCny - a.netProfitCny);
-  }, [costs, data?.products, query]);
-
-  const summary = useMemo(() => {
-    const allRows = (data?.products ?? []).map((product) => calculate(product, costs[product.nmId] ?? blankCost(product)));
-    const transactionCny = allRows.reduce((sum, row) => sum + row.product.settlement.transactionAmount / (row.cost.exchangeRate || 11.2), 0);
-    const payout = allRows.reduce((sum, row) => sum + row.payoutCny, 0);
-    const ownCost = allRows.reduce((sum, row) => sum + row.ownCostCny, 0);
-    const profit = allRows.reduce((sum, row) => sum + row.netProfitCny, 0);
-    const registered = allRows.filter((row) => row.productCostCny > 0).length;
-    return {
-      transactionCny,
-      payout,
-      ownCost,
-      profit,
-      margin: Math.abs(transactionCny) > 0 ? profit / Math.abs(transactionCny) * 100 : null,
-      units: allRows.reduce((sum, row) => sum + row.product.settlement.settledUnits, 0),
-      registered,
-      total: allRows.length,
-    };
+  const rows = useMemo<SheetRow[]>(() => {
+    const products = new Map((data?.products ?? []).map((product) => [normalizeSku(product.sku), product]));
+    const keys = new Set([...products.keys(), ...Object.keys(costs)]);
+    return [...keys].map((key) => {
+      const product = products.get(key) ?? null;
+      return { key, product, cost: costs[key] };
+    }).filter((row): row is SheetRow => Boolean(row.cost)).sort((left, right) => {
+      const leftRank = ORIGINAL_ORDER.get(left.key) ?? 10_000;
+      const rightRank = ORIGINAL_ORDER.get(right.key) ?? 10_000;
+      return leftRank - rightRank || left.cost.sellerSku.localeCompare(right.cost.sellerSku, "zh-CN");
+    });
   }, [costs, data?.products]);
 
-  function beginLoad() {
-    setLoading(true);
-    setError("");
-  }
-
-  function choosePreset(days: number) {
-    const start = shiftDate(today, -(days - 1));
-    beginLoad();
-    setDraftStart(start);
-    setDraftEnd(today);
-    setPeriodStart(start);
-    setPeriodEnd(today);
-    setDateError("");
-    setReloadKey((key) => key + 1);
-  }
-
-  function applyDates() {
-    if (!draftStart || !draftEnd) return setDateError("请选择完整日期");
-    if (draftStart > draftEnd) return setDateError("开始日期不能晚于结束日期");
-    if (draftStart < earliest || countDays(draftStart, draftEnd) > 90) return setDateError("正式结算明细支持近 90 天、最长 90 天的查询周期");
-    beginLoad();
-    setPeriodStart(draftStart);
-    setPeriodEnd(draftEnd);
-    setDateError("");
-    setReloadKey((key) => key + 1);
-  }
+  const filteredRows = useMemo(() => {
+    const needle = query.trim().toLocaleLowerCase();
+    if (!needle) return rows;
+    return rows.filter(({ cost, product }) => [cost.sellerSku, cost.internalSku, cost.category, cost.specification, product?.name ?? "", String(product?.nmId ?? "")].some((value) => value.toLocaleLowerCase().includes(needle)));
+  }, [query, rows]);
 
   function refresh() {
+    if (dirty.size) {
+      setError("请先保存表格修改，再同步 WB 商品资料");
+      return;
+    }
     forceRefreshRef.current = true;
-    beginLoad();
+    setLoading(true);
+    setError("");
     setReloadKey((key) => key + 1);
   }
 
-  function updateCost(productId: number, field: keyof CostRow, value: string | number) {
-    setCosts((current) => {
-      const row = { ...current[productId], [field]: value } as CostRow;
-      if ((field === "productCostRub" || field === "exchangeRate") && row.productCostRub > 0 && row.exchangeRate > 0) {
-        row.productCostCny = Math.round(row.productCostRub / row.exchangeRate * 10_000) / 10_000;
-      }
-      return { ...current, [productId]: row };
-    });
-    setSaved((current) => {
-      const next = new Set(current);
-      next.delete(productId);
-      return next;
-    });
+  function updateCost(key: string, field: keyof CostRow, value: string | number) {
+    setCosts((current) => ({ ...current, [key]: { ...current[key], [field]: value } as CostRow }));
+    setDirty((current) => new Set(current).add(key));
+    setMessage("");
   }
 
-  async function saveRow(productId: number) {
-    const row = costs[productId];
-    if (!row) return;
-    setSaving((current) => new Set(current).add(productId));
+  async function saveAll() {
+    if (!dirty.size) return;
+    setSaving(true);
+    setError("");
+    setMessage("");
+    const pendingKeys = [...dirty];
     try {
-      const response = await fetch("/api/product-costs", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(row),
-      });
-      const body = await response.json() as { row?: CostRow; error?: string };
-      if (!response.ok || !body.row) throw new Error(body.error || "保存失败");
-      setCosts((current) => ({ ...current, [productId]: { ...body.row!, sellerSku: row.sellerSku, nmId: productId } }));
-      setSaved((current) => new Set(current).add(productId));
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "保存失败");
-    } finally {
-      setSaving((current) => {
-        const next = new Set(current);
-        next.delete(productId);
+      const savedRows = await Promise.all(pendingKeys.map(async (key) => {
+        const cost = costs[key];
+        const calculated = formulas(cost);
+        const payload = { ...cost, productCostCny: calculated.productCostCny ?? cost.productCostCny, lastMileFeeCny: calculated.lastMileFeeCny, referencePriceCny: calculated.referencePriceCny ?? 0 };
+        const response = await fetch("/api/product-costs", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const body = await response.json() as { row?: CostRow; error?: string };
+        if (!response.ok || !body.row) throw new Error(body.error || `${cost.sellerSku} 保存失败`);
+        return [key, body.row] as const;
+      }));
+      setCosts((current) => {
+        const next = { ...current };
+        for (const [key, row] of savedRows) next[key] = row;
         return next;
       });
+      setDirty((current) => {
+        const next = new Set(current);
+        for (const key of pendingKeys) next.delete(key);
+        return next;
+      });
+      setMessage(`已保存 ${savedRows.length} 行产品记录`);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "产品记录保存失败");
+    } finally {
+      setSaving(false);
     }
   }
 
   return (
     <main className="app-shell">
       <AppSidebar active="details" syncedAt={data?.syncedAt} nextSyncAt={data?.syncSchedule.nextAt} loading={loading} error={error} onRefresh={refresh}>
-        <div className="nav-section">成本登记进度</div>
-        <div className="product-side-summary"><span>已登记商品</span><b>{summary.registered} / {summary.total}</b><small>按卖家商品编号自动匹配</small></div>
-        <div className="product-side-summary scope"><span>结算口径</span><b>{data?.settlement.available ? "正式财务报告" : "销售接口预估"}</b><small>{periodStart} 至 {periodEnd}</small></div>
+        <div className="nav-section">产品统计表</div>
+        <div className="product-side-summary"><span>系统商品记录</span><b>{rows.length} 条</b><small>按卖家商品编号自动对应</small></div>
+        <div className="product-side-summary scope"><span>未保存修改</span><b>{dirty.size} 行</b><small>表内蓝字和红字均由公式自动计算</small></div>
       </AppSidebar>
 
-      <section className="workspace product-workspace details-workspace">
-        <header className="topbar product-topbar"><div><p className="eyebrow">PRODUCT DETAIL · 成本与实际利润</p><h1>产品详情</h1></div><div className="details-source"><span className={data?.settlement.available ? "exact" : "estimate"} />{data?.settlement.source || "正在读取结算数据"}</div></header>
+      <section className="workspace details-workspace sheet-workspace">
+        <header className="topbar product-topbar">
+          <div><p className="eyebrow">PRODUCT REGISTER · 原表公式复刻</p><h1>产品详情</h1></div>
+          <div className="sheet-save-state"><span className={error ? "error" : dirty.size ? "dirty" : "saved"} />{error || message || (loading ? "正在读取产品表" : dirty.size ? `${dirty.size} 行等待保存` : "所有修改已保存")}</div>
+        </header>
 
-        <section className="product-period-panel">
-          <div className="product-period-heading"><strong>利润周期</strong><small>成交、回款、成本与利润按所选周期重新计算</small></div>
-          <div className="period-presets"><span>快捷周期</span>{[7, 30, 90].map((days) => <button key={days} className={countDays(periodStart, periodEnd) === days ? "active" : ""} disabled={loading} onClick={() => choosePreset(days)}>近 {days} 天</button>)}</div>
-          <div className="period-custom"><label><span>开始日期</span><input max={today} min={earliest} type="date" value={draftStart} onChange={(event) => setDraftStart(event.target.value)} /></label><b>→</b><label><span>结束日期</span><input max={today} min={earliest} type="date" value={draftEnd} onChange={(event) => setDraftEnd(event.target.value)} /></label><button onClick={applyDates}>查询</button></div>
-          {dateError && <p className="product-date-error">{dateError}</p>}
-        </section>
+        <section className="sheet-panel">
+          <div className="sheet-toolbar">
+            <div><h2>产品统计表</h2><p>字段、分组和计算公式均按你提供的 WPS 原表制作；商品按卖家商品编号与 WB 系统对应。</p></div>
+            <div className="sheet-actions">
+              <label className="sheet-search"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索商品编码、SKU、分类或规格" /></label>
+              <button className="sheet-save-button" disabled={saving || dirty.size === 0} onClick={saveAll}>{saving ? "保存中…" : dirty.size ? `保存修改（${dirty.size}）` : "已全部保存"}</button>
+            </div>
+          </div>
 
-        <div className={`notice product-notice ${error ? "error" : "connected"}`}><div className="notice-icon">{loading ? "↻" : error ? "!" : "✓"}</div><div><strong>{loading ? "正在合并 WB 结算与产品成本" : error ? "部分数据读取未完成" : "产品、成交、回款与成本已完成对应"}</strong><p>{error || (data?.settlement.available ? `已读取 ${data.settlement.rowsCount} 条正式结算明细；卖家商品编号用于匹配成本表。` : "正式结算暂不可用，当前以销售接口 forPay 作为预估回款。")}</p></div></div>
-
-        <section className="details-stat-grid">
-          <article><span>本期成交额（折合）</span><strong>{money(summary.transactionCny)}</strong><small>按每个商品登记汇率折算</small></article>
-          <article className="featured"><span>WB 商品净回款</span><strong>{money(summary.payout)}</strong><small>回款减行级物流、收单及罚款</small></article>
-          <article><span>自有成本与预提</span><strong>{money(summary.ownCost)}</strong><small>货值、操作、尾程、广告、退损</small></article>
-          <article className={summary.profit < 0 ? "attention" : "profit"}><span>本期净利润</span><strong>{money(summary.profit)}</strong><small>已结算净销量 {summary.units.toLocaleString("zh-CN")} 件</small></article>
-          <article className={summary.profit < 0 ? "attention" : "profit"}><span>净利润率</span><strong>{summary.margin === null ? "—" : `${summary.margin.toFixed(1)}%`}</strong><small>净利润 ÷ 实际成交额</small></article>
-        </section>
-
-        <section className="details-formula-note">
-          <b>实际利润口径</b>
-          <span>WB 正式回款（RUB）÷ 商品汇率 −（产品成本 + 操作费 + 尾程）× 已结算净销量 − 广告费预提 − 退损预提。</span>
-          <small>平台佣金和活动折扣已体现在 WB 成交价与回款中，不重复扣除；它们仅用于“定价成本”测算。</small>
-        </section>
-
-        <section className="product-table-panel details-table-panel">
-          <div className="product-table-toolbar"><div><h2>产品成本与实际利润明细</h2><p>表格参考你的 WPS“产品统计表”结构；修改后点击该行“保存”。</p></div><label className="product-search"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索卖家商品编号、名称、WB 货号" /></label></div>
-          <div className="details-table-wrap">
-            <table className="details-table">
+          <div className="sheet-scroll">
+            <table className="wps-sheet" aria-label="产品统计表">
+              <colgroup>
+                <col className="col-row-number" />
+                <col className="col-a" /><col className="col-b" /><col className="col-c" /><col className="col-d" /><col className="col-e" /><col className="col-f" /><col className="col-g" />
+                <col className="col-h" /><col className="col-i" /><col className="col-j" /><col className="col-k" /><col className="col-l" /><col className="col-m" /><col className="col-n" />
+                <col className="col-o" /><col className="col-p" /><col className="col-q" /><col className="col-r" /><col className="col-s" /><col className="col-t" /><col className="col-u" />
+                <col className="col-v" /><col className="col-w" /><col className="col-x" /><col className="col-y" /><col className="col-z" /><col className="col-aa" /><col className="col-ab" /><col className="col-ac" />
+              </colgroup>
               <thead>
-                <tr className="details-group-head"><th rowSpan={2}>系统商品</th><th colSpan={6}>基础资料</th><th colSpan={5}>一、基础费用</th><th colSpan={4}>二、平台定价参数</th><th rowSpan={2}>参考售价<br />¥</th><th colSpan={5}>三、WB 实际结算</th><th colSpan={3}>四、利润结果</th><th rowSpan={2}>操作</th></tr>
-                <tr><th>内部 SKU</th><th>分类</th><th>规格</th><th>长×宽×高 cm</th><th>重量 g</th><th>WB 货号</th><th>产品成本 ₽</th><th>汇率<br />₽/¥</th><th>产品成本 ¥</th><th>操作费 ¥</th><th>尾程 ¥</th><th>佣金率</th><th>广告率</th><th>活动折扣</th><th>退损率</th><th>净销量</th><th>成交额 ₽</th><th>forPay ₽</th><th>WB 行级费用 ₽</th><th>净回款 ¥</th><th>定价成本/件 ¥</th><th>净利润 ¥</th><th>净利率</th></tr>
+                <tr className="sheet-formula-row">
+                  <th className="sheet-row-number">1</th><th colSpan={17} /><th className="formula-note">实际售价*平台佣金率</th><th /><th className="formula-note">实际售价*广告投流费率</th><th colSpan={3} /><th className="formula-note">实际售价*退损率</th><th colSpan={3} /><th className="formula-note">实际售价-总成本</th><th className="formula-note">毛利/实际售价*100%</th>
+                </tr>
+                <tr className="sheet-group-row">
+                  <th className="sheet-row-number">2</th><th colSpan={11} /><th colSpan={5}>一、基础费用</th><th colSpan={6}>二、平台费用</th><th colSpan={2}>三、售后费用</th><th colSpan={5} />
+                </tr>
+                <tr className="sheet-heading-row">
+                  <th className="sheet-row-number">3</th>
+                  <th>主推分类</th><th>商品编码</th><th>sku</th><th>是否上线</th><th>图片</th><th>图片是否齐全</th><th>规格</th><th>长（cm）</th><th>宽（cm）</th><th>高（cm）</th><th>重量（g）</th>
+                  <th>产品成本<br />（卢布）</th><th>汇率</th><th>1、产品成本<br />（元）</th><th>2、操作费<br />（元）</th><th>3、尾程物流费<br />（元）</th><th>平台佣金率（%）</th><th>4、平台佣金费用<br />（元）</th><th>广告投流费率（%）</th><th>5、广告投流费用<br />（元）</th><th>平台活动折扣率</th><th>折扣费用</th><th>退损率（%）</th><th>6、退损费（元）</th>
+                  <th className="blue-heading">总成本（元）</th><th className="red-heading">参考售价（元）</th><th className="red-heading">实际售价（元）</th><th>毛利（元）</th><th>毛利率（%）</th>
+                </tr>
               </thead>
               <tbody>
-                {calculatedRows.map(({ product, cost, productCostCny, pricingCost, payoutCny, netProfitCny, netMargin }) => (
-                  <tr key={product.nmId}>
-                    <td className="details-product-cell"><span className={`detail-product-photo ${product.image ? "" : "placeholder"}`} style={product.image ? { backgroundImage: `url(${product.image})` } : undefined}>{product.image ? "" : product.sku.slice(0, 1).toUpperCase()}</span><div><b>{product.sku}</b><span>{product.name}</span></div></td>
-                    <td><input className="detail-text-input short" value={cost.internalSku} onChange={(event) => updateCost(product.nmId, "internalSku", event.target.value)} aria-label={`${product.sku} 内部SKU`} /></td>
-                    <td><input className="detail-text-input" value={cost.category} onChange={(event) => updateCost(product.nmId, "category", event.target.value)} aria-label={`${product.sku} 分类`} /></td>
-                    <td><input className="detail-text-input" value={cost.specification} onChange={(event) => updateCost(product.nmId, "specification", event.target.value)} aria-label={`${product.sku} 规格`} /></td>
-                    <td><div className="dimension-inputs"><NumberInput ariaLabel={`${product.sku} 长`} value={cost.lengthCm} onChange={(value) => updateCost(product.nmId, "lengthCm", value)} /><NumberInput ariaLabel={`${product.sku} 宽`} value={cost.widthCm} onChange={(value) => updateCost(product.nmId, "widthCm", value)} /><NumberInput ariaLabel={`${product.sku} 高`} value={cost.heightCm} onChange={(value) => updateCost(product.nmId, "heightCm", value)} /></div></td>
-                    <td><NumberInput ariaLabel={`${product.sku} 重量`} step="1" value={cost.weightG} onChange={(value) => updateCost(product.nmId, "weightG", value)} /></td>
-                    <td><b className="detail-nmid">{product.nmId}</b></td>
-                    <td><NumberInput ariaLabel={`${product.sku} 卢布成本`} value={cost.productCostRub} onChange={(value) => updateCost(product.nmId, "productCostRub", value)} /></td>
-                    <td><NumberInput ariaLabel={`${product.sku} 汇率`} value={cost.exchangeRate} onChange={(value) => updateCost(product.nmId, "exchangeRate", value)} /></td>
-                    <td><NumberInput ariaLabel={`${product.sku} 人民币成本`} value={cost.productCostCny} onChange={(value) => updateCost(product.nmId, "productCostCny", value)} /><small>有效 {money(productCostCny, "CNY", 2)}</small></td>
-                    <td><NumberInput ariaLabel={`${product.sku} 操作费`} value={cost.handlingFeeCny} onChange={(value) => updateCost(product.nmId, "handlingFeeCny", value)} /></td>
-                    <td><NumberInput ariaLabel={`${product.sku} 尾程`} value={cost.lastMileFeeCny} onChange={(value) => updateCost(product.nmId, "lastMileFeeCny", value)} /></td>
-                    <td><NumberInput ariaLabel={`${product.sku} 佣金率`} value={cost.commissionRate} onChange={(value) => updateCost(product.nmId, "commissionRate", value)} /></td>
-                    <td><NumberInput ariaLabel={`${product.sku} 广告率`} value={cost.adRate} onChange={(value) => updateCost(product.nmId, "adRate", value)} /></td>
-                    <td><NumberInput ariaLabel={`${product.sku} 活动折扣`} value={cost.activityDiscountRate} onChange={(value) => updateCost(product.nmId, "activityDiscountRate", value)} /></td>
-                    <td><NumberInput ariaLabel={`${product.sku} 退损率`} value={cost.returnLossRate} onChange={(value) => updateCost(product.nmId, "returnLossRate", value)} /></td>
-                    <td><NumberInput ariaLabel={`${product.sku} 参考售价`} value={cost.referencePriceCny} onChange={(value) => updateCost(product.nmId, "referencePriceCny", value)} /></td>
-                    <td><b>{product.settlement.settledUnits}</b></td>
-                    <td><b>{money(product.settlement.transactionAmount, "RUB")}</b></td>
-                    <td><b>{money(product.settlement.forPay, "RUB")}</b></td>
-                    <td><span>{money(product.settlement.wbExpenses, "RUB")}</span></td>
-                    <td><b className="value-good">{money(payoutCny)}</b></td>
-                    <td><b>{money(pricingCost)}</b></td>
-                    <td><b className={netProfitCny >= 0 ? "value-good" : "value-bad"}>{money(netProfitCny)}</b></td>
-                    <td><b className={netProfitCny >= 0 ? "value-good" : "value-bad"}>{netMargin === null ? "—" : `${netMargin.toFixed(1)}%`}</b></td>
-                    <td><button className={`detail-save-button ${saved.has(product.nmId) ? "saved" : ""}`} disabled={saving.has(product.nmId)} onClick={() => saveRow(product.nmId)}>{saving.has(product.nmId) ? "保存中" : saved.has(product.nmId) ? "已保存" : "保存"}</button></td>
-                  </tr>
-                ))}
-                {!loading && calculatedRows.length === 0 && <tr className="empty-row"><td colSpan={26}>没有找到符合条件的商品</td></tr>}
+                {filteredRows.map(({ key, product, cost }, index) => {
+                  const value = formulas(cost);
+                  const invalid = value.actualSalePriceCny === null;
+                  return (
+                    <tr key={key} className={dirty.has(key) ? "is-dirty" : ""}>
+                      <th className="sheet-row-number">{index + 4}</th>
+                      <td className="sticky-a"><input className="sheet-text-input centered wrap" aria-label={`${cost.sellerSku} 主推分类`} value={cost.category} onChange={(event) => updateCost(key, "category", event.target.value)} /></td>
+                      <td className="sticky-b"><b className="sheet-seller-sku">{cost.sellerSku}</b></td>
+                      <td><input className="sheet-text-input centered" aria-label={`${cost.sellerSku} sku`} value={cost.internalSku} onChange={(event) => updateCost(key, "internalSku", event.target.value)} /></td>
+                      <td><span>{product ? "是" : "否"}</span></td>
+                      <td><span className={`sheet-product-image ${product?.image ? "" : "placeholder"}`} style={product?.image ? { backgroundImage: `url(${product.image})` } : undefined}>{product?.image ? "" : "—"}</span></td>
+                      <td><span className={product?.image ? "image-complete" : "image-missing"}>{product?.image ? "齐全" : "未齐全"}</span></td>
+                      <td><input className="sheet-text-input centered" aria-label={`${cost.sellerSku} 规格`} value={cost.specification} onChange={(event) => updateCost(key, "specification", event.target.value)} /></td>
+                      <td><NumberCell blankZero label={`${cost.sellerSku} 长`} value={cost.lengthCm} onChange={(next) => updateCost(key, "lengthCm", next)} /></td>
+                      <td><NumberCell blankZero label={`${cost.sellerSku} 宽`} value={cost.widthCm} onChange={(next) => updateCost(key, "widthCm", next)} /></td>
+                      <td><NumberCell blankZero label={`${cost.sellerSku} 高`} value={cost.heightCm} onChange={(next) => updateCost(key, "heightCm", next)} /></td>
+                      <td><NumberCell blankZero label={`${cost.sellerSku} 重量`} step="1" value={cost.weightG} onChange={(next) => updateCost(key, "weightG", next)} /></td>
+                      <td><NumberCell blankZero label={`${cost.sellerSku} 产品成本卢布`} value={cost.productCostRub} onChange={(next) => updateCost(key, "productCostRub", next)} /></td>
+                      <td><NumberCell blankZero label={`${cost.sellerSku} 汇率`} value={cost.productCostRub > 0 ? cost.exchangeRate : 0} onChange={(next) => updateCost(key, "exchangeRate", next)} /></td>
+                      <td className={cost.productCostRub > 0 ? "formula-cell" : "manual-cost-cell"}>{cost.productCostRub > 0 ? display(value.productCostCny) : <NumberCell blankZero label={`${cost.sellerSku} 人民币产品成本`} value={cost.productCostCny} onChange={(next) => updateCost(key, "productCostCny", next)} />}</td>
+                      <td><NumberCell blankZero label={`${cost.sellerSku} 操作费`} value={cost.handlingFeeCny} onChange={(next) => updateCost(key, "handlingFeeCny", next)} /></td>
+                      <td className="formula-cell">{display(value.lastMileFeeCny)}</td>
+                      <td><NumberCell label={`${cost.sellerSku} 平台佣金率`} suffix="%" value={cost.commissionRate} onChange={(next) => updateCost(key, "commissionRate", next)} /></td>
+                      <td className="formula-cell">{display(value.commissionFeeCny)}</td>
+                      <td><NumberCell label={`${cost.sellerSku} 广告投流费率`} suffix="%" value={cost.adRate} onChange={(next) => updateCost(key, "adRate", next)} /></td>
+                      <td className="formula-cell">{display(value.adFeeCny)}</td>
+                      <td><NumberCell label={`${cost.sellerSku} 平台活动折扣率`} suffix="%" value={cost.activityDiscountRate} onChange={(next) => updateCost(key, "activityDiscountRate", next)} /></td>
+                      <td className="formula-cell">{display(value.discountFeeCny)}</td>
+                      <td><NumberCell label={`${cost.sellerSku} 退损率`} suffix="%" value={cost.returnLossRate} onChange={(next) => updateCost(key, "returnLossRate", next)} /></td>
+                      <td className="formula-cell">{display(value.returnLossFeeCny)}</td>
+                      <td className="formula-cell total-cost">{display(value.totalCostCny)}</td>
+                      <td className="formula-cell reference-price">{display(value.referencePriceCny, 0)}</td>
+                      <td className={`formula-cell actual-price ${invalid ? "formula-error" : ""}`}>{display(value.actualSalePriceCny)}</td>
+                      <td className="formula-cell">{display(value.grossProfitCny)}</td>
+                      <td><NumberCell label={`${cost.sellerSku} 毛利率`} suffix="%" value={cost.targetMarginRate} onChange={(next) => updateCost(key, "targetMarginRate", next)} /></td>
+                    </tr>
+                  );
+                })}
+                {!loading && filteredRows.length === 0 && <tr className="sheet-empty-row"><td colSpan={30}>没有找到符合条件的商品</td></tr>}
               </tbody>
             </table>
           </div>
-          <footer className="product-table-footer"><span>共 {calculatedRows.length} 个商品 · 已登记成本 {summary.registered} 个</span><span>未分摊店铺级费用：{money((data?.settlement.unallocatedExpenses || 0) / 11.2, "CNY")}</span></footer>
+          <footer className="sheet-footer"><span>共 {filteredRows.length} 条产品记录</span><span>P=(H×I×J÷1000)×2+6 · N=L÷M（L 留空时可直接录入 N）· AA=(N+O+P)÷(1−Q−S−U−W−AC) · Z=AA÷0.7 · AB=AA−Y</span></footer>
         </section>
       </section>
     </main>
