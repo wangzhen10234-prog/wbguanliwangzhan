@@ -153,6 +153,7 @@ const DAY_MS = 86_400_000;
 const BEIJING_OFFSET_MS = 8 * 60 * 60_000;
 const AUTO_SYNC_HOURS = [8, 14, 19, 23] as const;
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+const ALL_HISTORY_START = "2024-01-29";
 const JSON_HEADERS = { "Content-Type": "application/json; charset=utf-8" };
 const EDGE_CACHE_BASE = "https://wb-insight-cache.invalid/v2";
 
@@ -369,8 +370,9 @@ async function loadSellerStocks(token: string, cards: WbCard[], forceRefresh = f
 
 async function loadFbsOrders(token: string, forceRefresh = false) {
   if (!forceRefresh && fbsOrderCache && fbsOrderCache.expiresAt > Date.now()) return fbsOrderCache.value;
-  return dedupe(forceRefresh ? "fbs-orders-180-manual" : "fbs-orders-180", async () => {
-    const cached = forceRefresh ? null : await readEdgeCache<FbsOrderSnapshot>("fbs-orders-180-v1");
+  return dedupe(forceRefresh ? "fbs-orders-all-manual" : "fbs-orders-all", async () => {
+    const cacheKey = "fbs-orders-all-v2";
+    const cached = forceRefresh ? null : await readEdgeCache<FbsOrderSnapshot>(cacheKey);
     if (cached) {
       fbsOrderCache = { value: cached, expiresAt: cacheExpiry() };
       return cached;
@@ -379,7 +381,7 @@ async function loadFbsOrders(token: string, forceRefresh = false) {
     const base = "https://marketplace-api.wildberries.ru/api/v3";
     const now = Date.now();
     const end = new Date(now);
-    const start = new Date(now - 179 * DAY_MS);
+    const start = new Date(`${ALL_HISTORY_START}T00:00:00Z`);
     start.setUTCHours(0, 0, 0, 0);
     end.setUTCHours(23, 59, 59, 999);
     const byOrder = new Map<string, FbsOrder>();
@@ -423,7 +425,7 @@ async function loadFbsOrders(token: string, forceRefresh = false) {
 
     const result = { available: true, orders };
     fbsOrderCache = { value: result, expiresAt: cacheExpiry() };
-    await writeEdgeCache("fbs-orders-180-v1", result);
+    await writeEdgeCache(cacheKey, result);
     return result;
   });
 }
@@ -571,8 +573,8 @@ function signedFinanceValue(value: unknown, returned: boolean) {
 
 async function loadFinanceRows(token: string, forceRefresh = false): Promise<FinanceRowsSnapshot> {
   if (!forceRefresh && financeRowsCache && financeRowsCache.expiresAt > Date.now()) return financeRowsCache.value;
-  return dedupe(forceRefresh ? "finance-details-180-manual" : "finance-details-180", async () => {
-    const cacheKey = "finance-details-180-v3";
+  return dedupe(forceRefresh ? "finance-details-all-manual" : "finance-details-all", async () => {
+    const cacheKey = "finance-details-all-v4";
     const cached = forceRefresh ? null : await readEdgeCache<FinanceRowsSnapshot>(cacheKey);
     if (cached) {
       financeRowsCache = { value: cached, expiresAt: cacheExpiry() };
@@ -580,7 +582,7 @@ async function loadFinanceRows(token: string, forceRefresh = false): Promise<Fin
     }
 
     const dateTo = new Date().toISOString().slice(0, 10);
-    const dateFrom = new Date(Date.now() - 179 * DAY_MS).toISOString().slice(0, 10);
+    const dateFrom = ALL_HISTORY_START;
 
     const response = await fetch("https://finance-api.wildberries.ru/api/finance/v1/sales-reports/detailed", {
       method: "POST",
@@ -749,8 +751,12 @@ export async function GET(request: Request) {
   const toValue = dateValue(to);
   const days = Math.round((toValue - fromValue) / DAY_MS) + 1;
   if (!Number.isFinite(days) || days < 1) return json({ error: "开始日期不能晚于结束日期" }, 400);
-  const maxDays = includeOrderDetails ? 180 : 90;
-  if (days > maxDays || fromValue < Date.now() - (maxDays + 1) * DAY_MS) return json({ error: `当前页面支持查询近 ${maxDays} 天` }, 400);
+  if (includeOrderDetails) {
+    if (from < ALL_HISTORY_START) return json({ error: `订单与财务账单支持查询 ${ALL_HISTORY_START} 至今的数据` }, 400);
+  } else {
+    const maxDays = 90;
+    if (days > maxDays || fromValue < Date.now() - (maxDays + 1) * DAY_MS) return json({ error: `当前页面支持查询近 ${maxDays} 天` }, 400);
+  }
   if (toValue > Date.now() + DAY_MS) return json({ error: "不能查询未来日期" }, 400);
 
   try {

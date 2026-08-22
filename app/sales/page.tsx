@@ -88,10 +88,10 @@ function supplierStatusLabel(value: string) {
 
 export default function SalesPage() {
   const today = toInputDate(new Date());
-  const earliest = shiftDate(today, -179);
-  const [draftStart, setDraftStart] = useState(() => shiftDate(today, -29));
+  const earliest = "2024-01-29";
+  const [draftStart, setDraftStart] = useState(earliest);
   const [draftEnd, setDraftEnd] = useState(today);
-  const [periodStart, setPeriodStart] = useState(() => shiftDate(today, -29));
+  const [periodStart, setPeriodStart] = useState(earliest);
   const [periodEnd, setPeriodEnd] = useState(today);
   const [warehouse, setWarehouse] = useState("");
   const [data, setData] = useState<SalesData | null>(null);
@@ -255,10 +255,13 @@ export default function SalesPage() {
     const start = shiftDate(today, -(days - 1));
     beginLoad(); setDraftStart(start); setDraftEnd(today); setPeriodStart(start); setPeriodEnd(today); setDateError("");
   }
+  function chooseAllHistory() {
+    beginLoad(); setDraftStart(earliest); setDraftEnd(today); setPeriodStart(earliest); setPeriodEnd(today); setDateError("");
+  }
   function applyDates() {
     if (!draftStart || !draftEnd) return setDateError("请选择完整日期");
     if (draftStart > draftEnd) return setDateError("开始日期不能晚于结束日期");
-    if (draftStart < earliest || countDays(draftStart, draftEnd) > 180) return setDateError("支持近 180 天内、最长 180 天的查询周期");
+    if (draftStart < earliest) return setDateError(`支持查询 ${earliest} 至今的数据`);
     beginLoad(); setPeriodStart(draftStart); setPeriodEnd(draftEnd); setDateError(""); setReloadKey((key) => key + 1);
   }
   function refresh() { forceRefreshRef.current = true; beginLoad(); setReloadKey((key) => key + 1); }
@@ -274,8 +277,8 @@ export default function SalesPage() {
         <header className="topbar product-topbar"><div><p className="eyebrow">ORDER STATUS · WB 实时订单</p><h1>销售状况</h1></div><div className="avatar">Z</div></header>
 
         <section className="product-period-panel" aria-label="选择订单周期">
-          <div className="product-period-heading"><strong>时间筛选</strong><small>订单与状态按所选周期重新汇总</small></div>
-          <div className="period-presets"><span>快捷周期</span>{[7, 30, 90, 180].map((days) => <button key={days} disabled={loading} className={countDays(periodStart, periodEnd) === days ? "active" : ""} onClick={() => choosePreset(days)}>近 {days} 天</button>)}</div>
+          <div className="product-period-heading"><strong>时间筛选</strong><small>默认汇总全部历史订单，可按周期筛选</small></div>
+          <div className="period-presets"><span>快捷周期</span><button disabled={loading} className={periodStart === earliest && periodEnd === today ? "active" : ""} onClick={chooseAllHistory}>全部历史</button>{[7, 30, 90, 180].map((days) => <button key={days} disabled={loading} className={countDays(periodStart, periodEnd) === days ? "active" : ""} onClick={() => choosePreset(days)}>近 {days} 天</button>)}</div>
           <div className="period-custom"><label><span>开始日期</span><input disabled={loading} type="date" value={draftStart} min={earliest} max={today} onChange={(event) => { setDraftStart(event.target.value); setDateError(""); }} /></label><b>→</b><label><span>结束日期</span><input disabled={loading} type="date" value={draftEnd} min={draftStart || earliest} max={today} onChange={(event) => { setDraftEnd(event.target.value); setDateError(""); }} /></label><button disabled={loading} onClick={applyDates}>{loading ? "计算中…" : "查询"}</button></div>
           {dateError && <p className="product-date-error" role="alert">{dateError}</p>}
         </section>
