@@ -9,11 +9,11 @@ const JSON_HEADERS = {
 };
 
 const SEED_ROWS: Array<typeof productCosts.$inferInsert> = [
-  { sellerSku: "wz311B", internalSku: "311B", category: "宠物牵引绳", specification: "5米黑色", lengthCm: 21, widthCm: 13, heightCm: 6, weightG: 270, productCostRub: 220, exchangeRate: 11.2, productCostCny: 19.64, handlingFeeCny: 5, lastMileFeeCny: 9.28, commissionRate: 19, activityDiscountRate: 5, returnLossRate: 10, referencePriceCny: 87, targetMarginRate: 10 },
-  { sellerSku: "wz311P", internalSku: "311P", category: "宠物牵引绳", specification: "5米粉色", lengthCm: 21, widthCm: 13, heightCm: 6, weightG: 270, productCostRub: 220, exchangeRate: 11.2, productCostCny: 19.64, handlingFeeCny: 5, lastMileFeeCny: 9.28, commissionRate: 19, activityDiscountRate: 5, returnLossRate: 10, referencePriceCny: 87, targetMarginRate: 10 },
-  { sellerSku: "wz310B", internalSku: "310B", category: "宠物牵引绳", specification: "5米黑色", lengthCm: 21, widthCm: 13, heightCm: 6, weightG: 270, productCostRub: 0, exchangeRate: 0, productCostCny: 21.5, handlingFeeCny: 5, lastMileFeeCny: 9.28, commissionRate: 19, activityDiscountRate: 5, returnLossRate: 10, referencePriceCny: 91, targetMarginRate: 10 },
-  { sellerSku: "wz810B", internalSku: "810B", category: "宠物牵引绳", specification: "5米", lengthCm: 21, widthCm: 13, heightCm: 6, weightG: 330, productCostRub: 350, exchangeRate: 11.2, productCostCny: 31.25, handlingFeeCny: 5, lastMileFeeCny: 9.28, commissionRate: 19, activityDiscountRate: 5, returnLossRate: 10, referencePriceCny: 116, targetMarginRate: 10 },
-  { sellerSku: "wz810G", internalSku: "810G", category: "宠物牵引绳", specification: "5米", lengthCm: 21, widthCm: 13, heightCm: 6, weightG: 330, productCostRub: 350, exchangeRate: 11.2, productCostCny: 31.25, handlingFeeCny: 5, lastMileFeeCny: 9.28, commissionRate: 19, activityDiscountRate: 5, returnLossRate: 10, referencePriceCny: 116, targetMarginRate: 10 },
+  { sellerSku: "wz311B", internalSku: "311B", category: "宠物牵引绳", specification: "5米黑色", lengthCm: 21, widthCm: 13, heightCm: 6, weightG: 270, productCostRub: 220, exchangeRate: 11.2, productCostCny: 19.64, handlingFeeCny: 5, lastMileFeeCny: 9.28, commissionRate: 19, activityDiscountRate: 5, returnLossRate: 10, referencePriceCny: 87, targetMarginRate: 10, sortOrder: 100 },
+  { sellerSku: "wz311P", internalSku: "311P", category: "宠物牵引绳", specification: "5米粉色", lengthCm: 21, widthCm: 13, heightCm: 6, weightG: 270, productCostRub: 220, exchangeRate: 11.2, productCostCny: 19.64, handlingFeeCny: 5, lastMileFeeCny: 9.28, commissionRate: 19, activityDiscountRate: 5, returnLossRate: 10, referencePriceCny: 87, targetMarginRate: 10, sortOrder: 200 },
+  { sellerSku: "wz310B", internalSku: "310B", category: "宠物牵引绳", specification: "5米黑色", lengthCm: 21, widthCm: 13, heightCm: 6, weightG: 270, productCostRub: 0, exchangeRate: 0, productCostCny: 21.5, handlingFeeCny: 5, lastMileFeeCny: 9.28, commissionRate: 19, activityDiscountRate: 5, returnLossRate: 10, referencePriceCny: 91, targetMarginRate: 10, sortOrder: 300 },
+  { sellerSku: "wz810B", internalSku: "810B", category: "宠物牵引绳", specification: "5米", lengthCm: 21, widthCm: 13, heightCm: 6, weightG: 330, productCostRub: 350, exchangeRate: 11.2, productCostCny: 31.25, handlingFeeCny: 5, lastMileFeeCny: 9.28, commissionRate: 19, activityDiscountRate: 5, returnLossRate: 10, referencePriceCny: 116, targetMarginRate: 10, sortOrder: 400 },
+  { sellerSku: "wz810G", internalSku: "810G", category: "宠物牵引绳", specification: "5米", lengthCm: 21, widthCm: 13, heightCm: 6, weightG: 330, productCostRub: 350, exchangeRate: 11.2, productCostCny: 31.25, handlingFeeCny: 5, lastMileFeeCny: 9.28, commissionRate: 19, activityDiscountRate: 5, returnLossRate: 10, referencePriceCny: 116, targetMarginRate: 10, sortOrder: 500 },
 ];
 
 type CostPayload = {
@@ -37,6 +37,7 @@ type CostPayload = {
   returnLossRate?: unknown;
   referencePriceCny?: unknown;
   targetMarginRate?: unknown;
+  sortOrder?: unknown;
   notes?: unknown;
 };
 
@@ -82,6 +83,7 @@ function normalizePayload(payload: CostPayload): typeof productCosts.$inferInser
     returnLossRate: numericField(payload.returnLossRate, 100),
     referencePriceCny: numericField(payload.referencePriceCny),
     targetMarginRate: numericField(payload.targetMarginRate, 100),
+    sortOrder: numericField(payload.sortOrder, 1_000_000_000),
     notes: stringField(payload.notes, 1000),
     updatedAt: new Date().toISOString(),
   };
@@ -97,7 +99,7 @@ export async function GET() {
   try {
     const db = getDb();
     await db.insert(productCosts).values(SEED_ROWS).onConflictDoNothing();
-    const rows = await db.select().from(productCosts).orderBy(asc(productCosts.sellerSku));
+    const rows = await db.select().from(productCosts).orderBy(asc(productCosts.sortOrder), asc(productCosts.sellerSku));
     return json({ rows });
   } catch (error) {
     return databaseError(error);
@@ -134,6 +136,7 @@ export async function PUT(request: Request) {
           returnLossRate: value.returnLossRate,
           referencePriceCny: value.referencePriceCny,
           targetMarginRate: value.targetMarginRate,
+          sortOrder: value.sortOrder,
           notes: value.notes,
           updatedAt: value.updatedAt,
         },

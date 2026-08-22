@@ -22,6 +22,7 @@ export const productCosts = sqliteTable("product_costs", {
   returnLossRate: real("return_loss_rate").notNull().default(0),
   referencePriceCny: real("reference_price_cny").notNull().default(0),
   targetMarginRate: real("target_margin_rate").notNull().default(10),
+  sortOrder: real("sort_order").notNull().default(0),
   notes: text("notes").notNull().default(""),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
