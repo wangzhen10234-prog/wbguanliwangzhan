@@ -4,6 +4,15 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { AppSidebar } from "../_components/app-sidebar";
 
 type Product = { nmId: number; name: string; sku: string; image: string | null };
+type OrderSettlement = {
+  matched: boolean;
+  rowsCount: number;
+  transactionAmount: number;
+  forPay: number;
+  wbExpenses: number;
+  netPayout: number;
+  currency: string;
+};
 type Order = {
   id: string;
   orderNumber: string;
@@ -17,6 +26,18 @@ type Order = {
   wbStatus: string;
   outcome: "success" | "abnormal" | "pending";
   statusLabel: string;
+  settlement: OrderSettlement | null;
+};
+type CostRow = {
+  sellerSku: string;
+  nmId: number | null;
+  lengthCm: number;
+  widthCm: number;
+  heightCm: number;
+  productCostRub: number;
+  exchangeRate: number;
+  productCostCny: number;
+  handlingFeeCny: number;
 };
 type SalesData = {
   syncedAt: string;
@@ -24,7 +45,17 @@ type SalesData = {
   warehouses: Array<{ name: string; orders: number; stock: number }>;
   products: Product[];
   orderDetails: Order[];
-  dataAvailability: { orderDetails: boolean };
+  dataAvailability: { orderDetails: boolean; financeReport: boolean };
+};
+
+type OrderFinancial = {
+  kind: "settled" | "waiting" | "abnormal";
+  costReady: boolean;
+  platformPayout: number | null;
+  platformDeduction: number | null;
+  productCost: number | null;
+  profit: number | null;
+  profitRate: number | null;
 };
 
 const DAY_MS = 86_400_000;
@@ -40,6 +71,11 @@ function countDays(start: string, end: string) {
   return Math.round((new Date(`${end}T12:00:00`).getTime() - new Date(`${start}T12:00:00`).getTime()) / DAY_MS) + 1;
 }
 function formatMoney(value: number) { return `¥ ${Math.round(value || 0).toLocaleString("en-US")}`; }
+function formatFinanceMoney(value: number) {
+  const sign = value < 0 ? "−" : "";
+  return `${sign}¥ ${Math.abs(value || 0).toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+function normalizeSku(value: string) { return value.toLocaleLowerCase().replace(/[\s_.-]+/g, ""); }
 function formatDateTime(value?: string) {
   if (!value) return "—";
   return new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(value));
@@ -57,6 +93,7 @@ export default function SalesPage() {
   const [periodEnd, setPeriodEnd] = useState(today);
   const [warehouse, setWarehouse] = useState("");
   const [data, setData] = useState<SalesData | null>(null);
+  const [costRows, setCostRows] = useState<CostRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [dateError, setDateError] = useState("");
@@ -68,17 +105,29 @@ export default function SalesPage() {
 
   useEffect(() => {
     const controller = new AbortController();
-    const params = new URLSearchParams({ from: periodStart, to: periodEnd, includeOrders: "true" });
+    const params = new URLSearchParams({ from: periodStart, to: periodEnd, includeOrders: "true", includeFinance: "true" });
     if (warehouse) params.set("warehouse", warehouse);
     if (forceRefreshRef.current) params.set("refresh", "manual");
     forceRefreshRef.current = false;
-    fetch(`/api/wb/dashboard?${params.toString()}`, { signal: controller.signal, headers: { Accept: "application/json" }, cache: "no-store" })
-      .then(async (response) => {
-        const body = await response.json() as SalesData | { error?: string };
-        if (!response.ok) throw new Error("error" in body && body.error ? body.error : "同步失败，请稍后重试");
-        return body as SalesData;
-      })
-      .then(setData)
+    Promise.all([
+      fetch(`/api/wb/dashboard?${params.toString()}`, { signal: controller.signal, headers: { Accept: "application/json" }, cache: "no-store" })
+        .then(async (response) => {
+          const body = await response.json() as SalesData | { error?: string };
+          if (!response.ok) throw new Error("error" in body && body.error ? body.error : "同步失败，请稍后重试");
+          return body as SalesData;
+        }),
+      fetch("/api/product-costs", { signal: controller.signal, headers: { Accept: "application/json" }, cache: "no-store" })
+        .then(async (response) => {
+          const body = await response.json() as { rows?: CostRow[]; error?: string };
+          if (!response.ok) throw new Error(body.error || "产品成本读取失败");
+          return body.rows ?? [];
+        })
+        .catch((reason: Error) => {
+          if (reason.name === "AbortError") throw reason;
+          return [] as CostRow[];
+        }),
+    ])
+      .then(([dashboard, costs]) => { setData(dashboard); setCostRows(costs); })
       .catch((reason: Error) => { if (reason.name !== "AbortError") setError(reason.message); })
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
@@ -101,6 +150,56 @@ export default function SalesPage() {
 
   const productById = useMemo(() => new Map((data?.products ?? []).map((item) => [item.nmId, item])), [data]);
   const orders = useMemo(() => data?.orderDetails ?? [], [data?.orderDetails]);
+  const costBySku = useMemo(() => new Map(costRows.map((row) => [normalizeSku(row.sellerSku), row])), [costRows]);
+  const costByNmId = useMemo(() => new Map(costRows.filter((row) => row.nmId).map((row) => [Number(row.nmId), row])), [costRows]);
+  const financialByOrder = useMemo(() => {
+    const result = new Map<string, OrderFinancial>();
+    for (const order of orders) {
+      const product = productById.get(order.nmId);
+      const cost = costByNmId.get(order.nmId) ?? costBySku.get(normalizeSku(order.article || product?.sku || ""));
+      const costReady = Boolean(cost);
+      const principal = cost
+        ? cost.productCostRub > 0 && cost.exchangeRate > 0
+          ? cost.productCostRub / cost.exchangeRate
+          : Number(cost.productCostCny || 0)
+        : 0;
+      const handling = Number(cost?.handlingFeeCny || 0);
+      const lastMile = cost ? (Number(cost.lengthCm || 0) * Number(cost.widthCm || 0) * Number(cost.heightCm || 0) / 1000) * 2 + 6 : 0;
+
+      if (order.outcome === "abnormal") {
+        const loss = costReady ? -(lastMile + handling) : null;
+        result.set(order.id, {
+          kind: "abnormal",
+          costReady,
+          platformPayout: costReady ? 0 : null,
+          platformDeduction: costReady ? -lastMile : null,
+          productCost: costReady ? -handling : null,
+          profit: loss,
+          profitRate: loss !== null && order.amount > 0 ? (loss / order.amount) * 100 : null,
+        });
+        continue;
+      }
+
+      if (order.outcome !== "success" || !order.settlement?.matched) {
+        result.set(order.id, { kind: "waiting", costReady, platformPayout: null, platformDeduction: null, productCost: null, profit: null, profitRate: null });
+        continue;
+      }
+
+      const platformPayout = Number(order.settlement.netPayout || 0);
+      const productCost = costReady ? principal + handling : null;
+      const profit = productCost === null ? null : platformPayout - productCost;
+      result.set(order.id, {
+        kind: "settled",
+        costReady,
+        platformPayout,
+        platformDeduction: order.amount - platformPayout,
+        productCost,
+        profit,
+        profitRate: profit !== null && order.amount > 0 ? (profit / order.amount) * 100 : null,
+      });
+    }
+    return result;
+  }, [costByNmId, costBySku, orders, productById]);
   const rollup = useMemo(() => {
     const result = orders.reduce((sum, order) => {
       sum.orders += 1;
@@ -111,6 +210,23 @@ export default function SalesPage() {
     const completed = result.success + result.abnormal;
     return { ...result, abnormalRate: completed ? (result.abnormal / completed) * 100 : 0 };
   }, [orders]);
+  const financeRollup = useMemo(() => {
+    const summary = { settled: 0, waiting: 0, abnormal: 0, costReady: 0, platformPayout: 0, platformDeduction: 0, productCost: 0, profit: 0, saleBase: 0 };
+    for (const order of orders) {
+      const finance = financialByOrder.get(order.id);
+      if (!finance) continue;
+      summary[finance.kind] += 1;
+      if (finance.profit !== null) {
+        summary.costReady += 1;
+        summary.saleBase += order.amount;
+      }
+      summary.platformPayout += finance.platformPayout ?? 0;
+      summary.platformDeduction += finance.platformDeduction ?? 0;
+      summary.productCost += finance.productCost ?? 0;
+      summary.profit += finance.profit ?? 0;
+    }
+    return { ...summary, profitRate: summary.saleBase ? (summary.profit / summary.saleBase) * 100 : 0 };
+  }, [financialByOrder, orders]);
   const filteredOrders = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase();
     return orders.filter((order) => {
@@ -169,16 +285,22 @@ export default function SalesPage() {
 
         <section className="order-detail-panel sales-order-panel">
           <div className="order-detail-toolbar">
-            <div><h2>全部订单与状态</h2><p>第一行为综合统计；取消、拒收、退回、瑕疵和卖家取消全部计入非正常签收。</p></div>
-            <div className="order-detail-filters"><label><span>⌕</span><input type="search" value={query} placeholder="搜索数字订单号、卖家编号、商品或仓库" onChange={(event) => { setQuery(event.target.value); setPage(1); }} /></label><select value={statusFilter} onChange={(event) => { setStatusFilter(event.target.value); setPage(1); }}><option value="all">全部订单状态</option><option value="success">正常签收</option><option value="abnormal">非正常签收</option><option value="pending">待签收/处理中</option></select></div>
+            <div><h2>全部订单、签收与利润</h2><p>正常单以 WB 正式账单核算；拒收、取消、退回和瑕疵单按尾程物流费＋操作费核损。</p></div>
+            <div className="order-detail-actions"><span className={`finance-source-status ${data?.dataAvailability.financeReport ? "connected" : "waiting"}`}>{data?.dataAvailability.financeReport ? "财务账单已连接" : "财务账单待同步"}</span><div className="order-detail-filters"><label><span>⌕</span><input type="search" value={query} placeholder="搜索订单号、SKU 或仓库" onChange={(event) => { setQuery(event.target.value); setPage(1); }} /></label><select value={statusFilter} onChange={(event) => { setStatusFilter(event.target.value); setPage(1); }}><option value="all">全部订单状态</option><option value="success">正常签收</option><option value="abnormal">非正常签收</option><option value="pending">待签收/处理中</option></select></div></div>
           </div>
           <div className="order-detail-table-wrap">
             <table className="order-detail-table">
-              <thead><tr><th>订单时间</th><th>订单号</th><th>商品</th><th>仓库</th><th>订单金额</th><th>供应商状态</th><th>WB 状态</th><th>签收结果</th></tr></thead>
+              <thead><tr><th>订单时间</th><th>订单号</th><th>SKU 编码</th><th>仓库</th><th>成交价</th><th>供应商状态</th><th>WB 状态</th><th>签收结果</th><th>结账状态</th><th>平台结账</th><th>平台扣费</th><th>商品成本</th><th>单笔利润</th><th>利润率</th></tr></thead>
               <tbody>
-                <tr className="order-rollup-row"><td><b>综合统计</b><small>{periodStart} 至 {periodEnd}</small></td><td><b>{rollup.orders} 笔订单</b></td><td><b>{new Set(orders.map((order) => order.nmId)).size} 个商品</b></td><td><b>{warehouse || "全部仓库"}</b></td><td><b>{formatMoney(rollup.amount)}</b><small>订单结算币</small></td><td><b className="value-good">正常 {rollup.success}</b></td><td><b>待签 {rollup.pending}</b></td><td><b className={rollup.abnormal ? "value-bad" : "value-good"}>非正常 {rollup.abnormal} · {rollup.abnormalRate.toFixed(1)}%</b></td></tr>
-                {visibleOrders.map((order) => { const product = productById.get(order.nmId); return <tr key={order.id}><td><b>{formatDateTime(order.createdAt)}</b><small>{order.createdAt.slice(0, 10)}</small></td><td><div className="order-id-with-photo">{product?.image ? <span className="order-photo" style={{ backgroundImage: `url(${product.image})` }} aria-hidden="true" /> : <span className="order-photo placeholder">W</span>}<div><b className="order-number" title={order.orderNumber}>{order.orderNumber}</b><small>WB {order.nmId}</small></div></div></td><td><div className="order-product-copy"><b>{product?.name || order.article}</b><small>{order.article}</small></div></td><td><span>{order.warehouseName}</span></td><td><b>{formatMoney(order.amount)}</b></td><td><span>{supplierStatusLabel(order.supplierStatus)}</span><small>{order.supplierStatus || "—"}</small></td><td><span>{order.statusLabel}</span><small>{order.wbStatus || "—"}</small></td><td><span className={`order-outcome ${order.outcome}`}>{order.outcome === "success" ? "正常签收" : order.outcome === "abnormal" ? "非正常签收" : "待签收"}</span></td></tr>; })}
-                {!loading && visibleOrders.length === 0 && <tr className="empty-row"><td colSpan={8}>{data?.dataAvailability.orderDetails ? "没有符合当前筛选条件的订单" : "WB 订单状态暂时无法读取，请稍后手动同步"}</td></tr>}
+                <tr className="order-rollup-row"><td><b>综合统计</b><small>{periodStart} 至 {periodEnd}</small></td><td><b>{rollup.orders} 笔订单</b></td><td><b>{new Set(orders.map((order) => order.article)).size} 个 SKU</b></td><td><b>{warehouse || "全部仓库"}</b></td><td><b>{formatMoney(rollup.amount)}</b><small>平台成交价合计</small></td><td><b className="value-good">正常 {rollup.success}</b></td><td><b>待签 {rollup.pending}</b></td><td><b className={rollup.abnormal ? "value-bad" : "value-good"}>非正常 {rollup.abnormal} · {rollup.abnormalRate.toFixed(1)}%</b></td><td><b className="value-good">已结 {financeRollup.settled}</b><small>待结 {financeRollup.waiting}</small></td><td><b>{formatFinanceMoney(financeRollup.platformPayout)}</b></td><td><b>{formatFinanceMoney(financeRollup.platformDeduction)}</b></td><td><b>{formatFinanceMoney(financeRollup.productCost)}</b><small>{financeRollup.costReady} 笔已核成本</small></td><td><b className={financeRollup.profit >= 0 ? "value-good" : "value-bad"}>{formatFinanceMoney(financeRollup.profit)}</b></td><td><b className={financeRollup.profitRate >= 0 ? "value-good" : "value-bad"}>{financeRollup.profitRate.toFixed(1)}%</b></td></tr>
+                {visibleOrders.map((order) => {
+                  const product = productById.get(order.nmId);
+                  const finance = financialByOrder.get(order.id) ?? { kind: "waiting", costReady: false, platformPayout: null, platformDeduction: null, productCost: null, profit: null, profitRate: null };
+                  const financeClass = finance.kind === "abnormal" ? "finance-abnormal" : finance.kind === "waiting" ? "finance-waiting" : (finance.profit ?? 0) >= 0 ? "finance-positive" : "finance-negative";
+                  const pendingCopy = finance.kind === "settled" && !finance.costReady ? "待录成本" : "待结账";
+                  return <tr key={order.id} className={financeClass}><td><b>{formatDateTime(order.createdAt)}</b><small>{order.createdAt.slice(0, 10)}</small></td><td><div className="order-id-with-photo">{product?.image ? <span className="order-photo" style={{ backgroundImage: `url(${product.image})` }} aria-hidden="true" /> : <span className="order-photo placeholder">W</span>}<div><b className="order-number" title={order.orderNumber}>{order.orderNumber}</b><small>WB {order.nmId}</small></div></div></td><td><b className="order-sku-code">{order.article || product?.sku || "—"}</b></td><td><span>{order.warehouseName}</span></td><td><b>{formatMoney(order.amount)}</b></td><td><span>{supplierStatusLabel(order.supplierStatus)}</span><small>{order.supplierStatus || "—"}</small></td><td><span>{order.statusLabel}</span><small>{order.wbStatus || "—"}</small></td><td><span className={`order-outcome ${order.outcome}`}>{order.outcome === "success" ? "正常签收" : order.outcome === "abnormal" ? "非正常签收" : "待签收"}</span></td><td className="finance-cell"><span className={`finance-status ${finance.kind}`}>{finance.kind === "settled" ? "已结账" : finance.kind === "abnormal" ? "异常核损" : "待结账"}</span></td><td className="finance-cell"><b>{finance.platformPayout === null ? pendingCopy : formatFinanceMoney(finance.platformPayout)}</b></td><td className="finance-cell"><b>{finance.platformDeduction === null ? pendingCopy : formatFinanceMoney(finance.platformDeduction)}</b></td><td className="finance-cell"><b>{finance.productCost === null ? pendingCopy : formatFinanceMoney(finance.productCost)}</b></td><td className="finance-cell"><b>{finance.profit === null ? pendingCopy : formatFinanceMoney(finance.profit)}</b></td><td className="finance-cell"><b>{finance.profitRate === null ? pendingCopy : `${finance.profitRate.toFixed(1)}%`}</b></td></tr>;
+                })}
+                {!loading && visibleOrders.length === 0 && <tr className="empty-row"><td colSpan={14}>{data?.dataAvailability.orderDetails ? "没有符合当前筛选条件的订单" : "WB 订单状态暂时无法读取，请稍后手动同步"}</td></tr>}
               </tbody>
             </table>
           </div>

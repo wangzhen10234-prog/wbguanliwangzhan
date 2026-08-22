@@ -44,6 +44,7 @@ type SellerStockSnapshot = {
 type FbsOrder = {
   id?: number;
   orderUid?: string;
+  rid?: string;
   createdAt?: string;
   nmId?: number;
   article?: string;
@@ -79,6 +80,9 @@ type WbFeedback = {
 type WbFinanceRow = {
   rrdId?: number;
   nmId?: number;
+  orderUid?: string;
+  srid?: string;
+  currency?: string;
   vendorCode?: string;
   title?: string;
   docTypeName?: string;
@@ -120,6 +124,16 @@ type FinanceSnapshot = {
 };
 
 type FinanceRowsSnapshot = { available: boolean; rows: WbFinanceRow[] };
+
+type OrderFinance = {
+  matched: boolean;
+  rowsCount: number;
+  transactionAmount: number;
+  forPay: number;
+  wbExpenses: number;
+  netPayout: number;
+  currency: string;
+};
 
 type CacheEntry<T> = { value: T; expiresAt: number };
 type WorkerCacheStorage = CacheStorage & { default?: Cache };
@@ -556,8 +570,8 @@ function signedFinanceValue(value: unknown, returned: boolean) {
 
 async function loadFinanceRows(token: string, forceRefresh = false): Promise<FinanceRowsSnapshot> {
   if (!forceRefresh && financeRowsCache && financeRowsCache.expiresAt > Date.now()) return financeRowsCache.value;
-  return dedupe(forceRefresh ? "finance-details-90-manual" : "finance-details-90", async () => {
-    const cacheKey = "finance-details-90-v2";
+  return dedupe(forceRefresh ? "finance-details-180-manual" : "finance-details-180", async () => {
+    const cacheKey = "finance-details-180-v3";
     const cached = forceRefresh ? null : await readEdgeCache<FinanceRowsSnapshot>(cacheKey);
     if (cached) {
       financeRowsCache = { value: cached, expiresAt: cacheExpiry() };
@@ -565,7 +579,7 @@ async function loadFinanceRows(token: string, forceRefresh = false): Promise<Fin
     }
 
     const dateTo = new Date().toISOString().slice(0, 10);
-    const dateFrom = new Date(Date.now() - 89 * DAY_MS).toISOString().slice(0, 10);
+    const dateFrom = new Date(Date.now() - 179 * DAY_MS).toISOString().slice(0, 10);
 
     const response = await fetch("https://finance-api.wildberries.ru/api/finance/v1/sales-reports/detailed", {
       method: "POST",
@@ -606,6 +620,74 @@ async function loadFinanceRows(token: string, forceRefresh = false): Promise<Fin
   });
 }
 
+function financeRowValues(row: WbFinanceRow) {
+  const returned = isFinanceReturn(row);
+  const transactionAmount = signedFinanceValue(row.retailPriceWithDisc ?? row.retailAmount, returned);
+  const forPay = signedFinanceValue(row.forPay, returned);
+  const wbExpenses = [
+    row.deliveryService,
+    row.acquiringFee,
+    row.penalty,
+    row.deduction,
+    row.storageFee ?? row.paidStorage,
+    row.acceptance ?? row.paidAcceptance,
+  ].map(financeNumber).reduce((sum, value) => sum + Math.abs(value), 0);
+  const additionalPayment = financeNumber(row.additionalPayment);
+  return { transactionAmount, forPay, wbExpenses, netPayout: forPay - wbExpenses + additionalPayment };
+}
+
+function financeIdentity(value?: string) {
+  const normalized = String(value || "").trim().toLocaleLowerCase();
+  const embeddedId = normalized.match(/[a-f0-9]{32}/)?.[0];
+  return embeddedId || normalized;
+}
+
+function orderFinanceMap(snapshot: FinanceRowsSnapshot) {
+  const byOrderProduct = new Map<string, OrderFinance>();
+  const byRidProduct = new Map<string, OrderFinance>();
+
+  const add = (map: Map<string, OrderFinance>, key: string, row: WbFinanceRow) => {
+    if (!key) return;
+    const values = financeRowValues(row);
+    const current = map.get(key) ?? {
+      matched: true,
+      rowsCount: 0,
+      transactionAmount: 0,
+      forPay: 0,
+      wbExpenses: 0,
+      netPayout: 0,
+      currency: row.currency || "CNY",
+    };
+    current.rowsCount += 1;
+    current.transactionAmount += values.transactionAmount;
+    current.forPay += values.forPay;
+    current.wbExpenses += values.wbExpenses;
+    current.netPayout += values.netPayout;
+    if (row.currency) current.currency = row.currency;
+    map.set(key, current);
+  };
+
+  for (const row of snapshot.rows) {
+    const nmId = Number(row.nmId || 0);
+    const orderUid = String(row.orderUid || "").trim();
+    const rid = financeIdentity(row.srid);
+    if (orderUid) add(byOrderProduct, `${orderUid}|${nmId}`, row);
+    if (rid) add(byRidProduct, `${rid}|${nmId}`, row);
+  }
+  return { byOrderProduct, byRidProduct };
+}
+
+function splitOrderFinance(finance: OrderFinance, divisor: number): OrderFinance {
+  if (divisor <= 1) return finance;
+  return {
+    ...finance,
+    transactionAmount: finance.transactionAmount / divisor,
+    forPay: finance.forPay / divisor,
+    wbExpenses: finance.wbExpenses / divisor,
+    netPayout: finance.netPayout / divisor,
+  };
+}
+
 function aggregateFinanceRows(snapshot: FinanceRowsSnapshot, from: string, to: string): FinanceSnapshot {
     const rows = snapshot.rows.filter((row) => {
       const date = dayKey(row.rrDate || row.saleDt || row.orderDt);
@@ -616,17 +698,8 @@ function aggregateFinanceRows(snapshot: FinanceRowsSnapshot, from: string, to: s
     for (const row of rows) {
       const returned = isFinanceReturn(row);
       const nmId = Number(row.nmId || 0);
-      const transactionAmount = signedFinanceValue(row.retailPriceWithDisc ?? row.retailAmount, returned);
-      const forPay = signedFinanceValue(row.forPay, returned);
-      const wbExpenses = [
-        row.deliveryService,
-        row.acquiringFee,
-        row.penalty,
-        row.deduction,
-        row.storageFee ?? row.paidStorage,
-        row.acceptance ?? row.paidAcceptance,
-      ].map(financeNumber).reduce((sum, value) => sum + Math.abs(value), 0);
-      const additionalPayment = financeNumber(row.additionalPayment);
+      const { transactionAmount, forPay, wbExpenses, netPayout } = financeRowValues(row);
+      const additionalPayment = netPayout - forPay + wbExpenses;
       if (!nmId) {
         unallocatedExpenses += wbExpenses - additionalPayment;
         continue;
@@ -680,12 +753,11 @@ export async function GET(request: Request) {
     const fbsOrdersPromise = includeOrderDetails
       ? loadFbsOrders(token, forceRefresh).catch(() => ({ available: false, orders: [] } as FbsOrderSnapshot))
       : Promise.resolve({ available: false, orders: [] } as FbsOrderSnapshot);
-    const financeDetailsPromise = includeFinanceDetails
+    const financeRowsPromise = includeFinanceDetails
       ? loadFinanceRows(token, forceRefresh)
-          .then((snapshot) => aggregateFinanceRows(snapshot, from, to))
-          .catch(() => ({ available: false, rowsCount: 0, products: [], unallocatedExpenses: 0 } as FinanceSnapshot))
-      : Promise.resolve({ available: false, rowsCount: 0, products: [], unallocatedExpenses: 0 } as FinanceSnapshot);
-    const [statistics, stockResult, balanceResult, cardsResult, feedbacksResult, sellerStockResult, fbsOrderResult, financeDetailsResult] = await Promise.all([
+          .catch(() => ({ available: false, rows: [] } as FinanceRowsSnapshot))
+      : Promise.resolve({ available: false, rows: [] } as FinanceRowsSnapshot);
+    const [statistics, stockResult, balanceResult, cardsResult, feedbacksResult, sellerStockResult, fbsOrderResult, financeRowsResult] = await Promise.all([
       loadStatistics(token, forceRefresh),
       loadStocks(token, forceRefresh).catch(() => [] as WbStock[]),
       loadBalance(token, forceRefresh).catch(() => ({} as { current?: number; for_withdraw?: number })),
@@ -693,8 +765,9 @@ export async function GET(request: Request) {
       loadFeedbacks(token, forceRefresh).catch(() => [] as WbFeedback[]),
       cardsPromise.then((cards) => loadSellerStocks(token, cards, forceRefresh)).catch(() => ({ warehouses: [] } as SellerStockSnapshot)),
       fbsOrdersPromise,
-      financeDetailsPromise,
+      financeRowsPromise,
     ]);
+    const financeDetailsResult = aggregateFinanceRows(financeRowsResult, from, to);
 
     const inPeriod = (row: { date?: string }) => {
       const date = dayKey(row.date);
@@ -735,17 +808,32 @@ export async function GET(request: Request) {
     if (requestedWarehouse && !warehouseNames.includes(requestedWarehouse)) return json({ error: "未找到所选仓库，请重新选择" }, 400);
 
     const matchesWarehouse = (row: { warehouseName?: string }) => !requestedWarehouse || row.warehouseName?.trim() === requestedWarehouse;
-    const allDetailedOrders = fbsOrderResult.orders
-      .filter((order) => {
+    const periodFbsOrders = fbsOrderResult.orders.filter((order) => {
         const date = dayKey(order.createdAt);
         return date >= from && date <= to;
-      })
+      });
+    const financeMaps = orderFinanceMap(financeRowsResult);
+    const orderProductCounts = new Map<string, number>();
+    for (const order of periodFbsOrders) {
+      const key = `${String(order.orderUid || "").trim()}|${Number(order.nmId || 0)}`;
+      if (order.orderUid) orderProductCounts.set(key, (orderProductCounts.get(key) ?? 0) + 1);
+    }
+    const allDetailedOrders = periodFbsOrders
       .map((order) => {
         const outcome = orderOutcome(order);
+        const nmId = Number(order.nmId || 0);
+        const orderUid = String(order.orderUid || "").trim();
+        const rid = financeIdentity(order.rid);
+        const ridFinance = rid ? financeMaps.byRidProduct.get(`${rid}|${nmId}`) : undefined;
+        const orderFinance = orderUid ? financeMaps.byOrderProduct.get(`${orderUid}|${nmId}`) : undefined;
+        const settlement = ridFinance ?? (orderFinance
+          ? splitOrderFinance(orderFinance, orderProductCounts.get(`${orderUid}|${nmId}`) ?? 1)
+          : null);
         return {
-          id: order.orderUid || String(order.id || ""),
+          id: String(order.id || order.orderUid || ""),
+          orderUid,
           orderNumber: String(order.id || ""),
-          nmId: Number(order.nmId || 0),
+          nmId,
           article: order.article || "—",
           createdAt: order.createdAt || "",
           warehouseName: sellerWarehouseNames.get(Number(order.warehouseId || 0)) || `仓库 ${order.warehouseId}`,
@@ -755,6 +843,7 @@ export async function GET(request: Request) {
           wbStatus: order.wbStatus || "",
           outcome,
           statusLabel: orderStatusLabel(order),
+          settlement,
         };
       })
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
