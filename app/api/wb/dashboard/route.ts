@@ -76,6 +76,51 @@ type WbFeedback = {
   productDetails?: { nmId?: number };
 };
 
+type WbFinanceRow = {
+  rrdId?: number;
+  nmId?: number;
+  vendorCode?: string;
+  title?: string;
+  docTypeName?: string;
+  sellerOperName?: string;
+  rrDate?: string;
+  saleDt?: string;
+  orderDt?: string;
+  quantity?: number;
+  retailPriceWithDisc?: string | number;
+  retailAmount?: string | number;
+  forPay?: string | number;
+  deliveryService?: string | number;
+  acquiringFee?: string | number;
+  penalty?: string | number;
+  deduction?: string | number;
+  storageFee?: string | number;
+  paidStorage?: string | number;
+  acceptance?: string | number;
+  paidAcceptance?: string | number;
+  additionalPayment?: string | number;
+};
+
+type FinanceProduct = {
+  nmId: number;
+  sellerSku: string;
+  title: string;
+  settledUnits: number;
+  transactionAmount: number;
+  forPay: number;
+  wbExpenses: number;
+  netPayout: number;
+};
+
+type FinanceSnapshot = {
+  available: boolean;
+  rowsCount: number;
+  products: FinanceProduct[];
+  unallocatedExpenses: number;
+};
+
+type FinanceRowsSnapshot = { available: boolean; rows: WbFinanceRow[] };
+
 type CacheEntry<T> = { value: T; expiresAt: number };
 type WorkerCacheStorage = CacheStorage & { default?: Cache };
 
@@ -86,6 +131,7 @@ let fbsOrderCache: CacheEntry<FbsOrderSnapshot> | null = null;
 let balanceCache: CacheEntry<{ current?: number; for_withdraw?: number }> | null = null;
 let cardsCache: CacheEntry<WbCard[]> | null = null;
 let feedbacksCache: CacheEntry<WbFeedback[]> | null = null;
+let financeRowsCache: CacheEntry<FinanceRowsSnapshot> | null = null;
 const pendingLoads = new Map<string, Promise<unknown>>();
 
 const DAY_MS = 86_400_000;
@@ -494,6 +540,119 @@ async function loadFeedbacks(token: string, forceRefresh = false) {
   });
 }
 
+function financeNumber(value: unknown) {
+  const number = Number(value ?? 0);
+  return Number.isFinite(number) ? number : 0;
+}
+
+function isFinanceReturn(row: WbFinanceRow) {
+  return /возврат|return/i.test(`${row.docTypeName || ""} ${row.sellerOperName || ""}`);
+}
+
+function signedFinanceValue(value: unknown, returned: boolean) {
+  const number = financeNumber(value);
+  return returned ? -Math.abs(number) : number;
+}
+
+async function loadFinanceRows(token: string, forceRefresh = false): Promise<FinanceRowsSnapshot> {
+  if (!forceRefresh && financeRowsCache && financeRowsCache.expiresAt > Date.now()) return financeRowsCache.value;
+  return dedupe(forceRefresh ? "finance-details-90-manual" : "finance-details-90", async () => {
+    const cacheKey = "finance-details-90-v2";
+    const cached = forceRefresh ? null : await readEdgeCache<FinanceRowsSnapshot>(cacheKey);
+    if (cached) {
+      financeRowsCache = { value: cached, expiresAt: cacheExpiry() };
+      return cached;
+    }
+
+    const dateTo = new Date().toISOString().slice(0, 10);
+    const dateFrom = new Date(Date.now() - 89 * DAY_MS).toISOString().slice(0, 10);
+
+    const response = await fetch("https://finance-api.wildberries.ru/api/finance/v1/sales-reports/detailed", {
+      method: "POST",
+      cache: "no-store",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ dateFrom, dateTo, limit: 100000, rrdId: 0, period: "daily" }),
+      signal: AbortSignal.timeout(35_000),
+    });
+
+    if (response.status === 204) {
+      const empty = { available: true, rows: [] };
+      financeRowsCache = { value: empty, expiresAt: cacheExpiry() };
+      await writeEdgeCache(cacheKey, empty);
+      return empty;
+    }
+    if (!response.ok) {
+      if (response.status === 429) {
+        const peerValue = await waitForPeerCache<FinanceRowsSnapshot>(cacheKey);
+        if (peerValue) {
+          financeRowsCache = { value: peerValue, expiresAt: cacheExpiry() };
+          return peerValue;
+        }
+      }
+      const error = new Error(`WB finance request failed with status ${response.status}`);
+      Object.assign(error, { status: response.status });
+      throw error;
+    }
+
+    const rows = await response.json() as WbFinanceRow[];
+    const snapshot = { available: true, rows };
+    financeRowsCache = { value: snapshot, expiresAt: cacheExpiry() };
+    await writeEdgeCache(cacheKey, snapshot);
+    return snapshot;
+  });
+}
+
+function aggregateFinanceRows(snapshot: FinanceRowsSnapshot, from: string, to: string): FinanceSnapshot {
+    const rows = snapshot.rows.filter((row) => {
+      const date = dayKey(row.rrDate || row.saleDt || row.orderDt);
+      return date >= from && date <= to;
+    });
+    const byProduct = new Map<number, FinanceProduct>();
+    let unallocatedExpenses = 0;
+    for (const row of rows) {
+      const returned = isFinanceReturn(row);
+      const nmId = Number(row.nmId || 0);
+      const transactionAmount = signedFinanceValue(row.retailPriceWithDisc ?? row.retailAmount, returned);
+      const forPay = signedFinanceValue(row.forPay, returned);
+      const wbExpenses = [
+        row.deliveryService,
+        row.acquiringFee,
+        row.penalty,
+        row.deduction,
+        row.storageFee ?? row.paidStorage,
+        row.acceptance ?? row.paidAcceptance,
+      ].map(financeNumber).reduce((sum, value) => sum + Math.abs(value), 0);
+      const additionalPayment = financeNumber(row.additionalPayment);
+      if (!nmId) {
+        unallocatedExpenses += wbExpenses - additionalPayment;
+        continue;
+      }
+      const product = byProduct.get(nmId) ?? {
+        nmId,
+        sellerSku: row.vendorCode || String(nmId),
+        title: row.title || row.vendorCode || `WB ${nmId}`,
+        settledUnits: 0,
+        transactionAmount: 0,
+        forPay: 0,
+        wbExpenses: 0,
+        netPayout: 0,
+      };
+      product.settledUnits += returned ? -Math.abs(Number(row.quantity || 1)) : Math.abs(Number(row.quantity || 1));
+      product.transactionAmount += transactionAmount;
+      product.forPay += forPay;
+      product.wbExpenses += wbExpenses;
+      product.netPayout += forPay - wbExpenses + additionalPayment;
+      if (!product.sellerSku || product.sellerSku === String(nmId)) product.sellerSku = row.vendorCode || product.sellerSku;
+      if (!product.title || product.title === `WB ${nmId}`) product.title = row.title || product.title;
+      byProduct.set(nmId, product);
+    }
+    return { available: snapshot.available, rowsCount: rows.length, products: [...byProduct.values()], unallocatedExpenses };
+}
+
 export async function GET(request: Request) {
   const token = process.env.WB_API_TOKEN?.trim();
   if (!token) return json({ error: "WB API 尚未配置" }, 503);
@@ -503,6 +662,7 @@ export async function GET(request: Request) {
   const to = url.searchParams.get("to") ?? "";
   const requestedWarehouse = url.searchParams.get("warehouse")?.trim() ?? "";
   const includeOrderDetails = url.searchParams.get("includeOrders") === "true";
+  const includeFinanceDetails = url.searchParams.get("includeFinance") === "true";
   const forceRefresh = url.searchParams.get("refresh") === "manual";
   if (!DATE_PATTERN.test(from) || !DATE_PATTERN.test(to)) return json({ error: "日期格式无效" }, 400);
   if (requestedWarehouse.length > 160) return json({ error: "仓库名称无效" }, 400);
@@ -520,14 +680,20 @@ export async function GET(request: Request) {
     const fbsOrdersPromise = includeOrderDetails
       ? loadFbsOrders(token, forceRefresh).catch(() => ({ available: false, orders: [] } as FbsOrderSnapshot))
       : Promise.resolve({ available: false, orders: [] } as FbsOrderSnapshot);
-    const [statistics, stockResult, balanceResult, cardsResult, feedbacksResult, sellerStockResult, fbsOrderResult] = await Promise.all([
+    const financeDetailsPromise = includeFinanceDetails
+      ? loadFinanceRows(token, forceRefresh)
+          .then((snapshot) => aggregateFinanceRows(snapshot, from, to))
+          .catch(() => ({ available: false, rowsCount: 0, products: [], unallocatedExpenses: 0 } as FinanceSnapshot))
+      : Promise.resolve({ available: false, rowsCount: 0, products: [], unallocatedExpenses: 0 } as FinanceSnapshot);
+    const [statistics, stockResult, balanceResult, cardsResult, feedbacksResult, sellerStockResult, fbsOrderResult, financeDetailsResult] = await Promise.all([
       loadStatistics(token, forceRefresh),
       loadStocks(token, forceRefresh).catch(() => [] as WbStock[]),
-      loadBalance(token, forceRefresh).catch(() => ({})),
+      loadBalance(token, forceRefresh).catch(() => ({} as { current?: number; for_withdraw?: number })),
       cardsPromise,
       loadFeedbacks(token, forceRefresh).catch(() => [] as WbFeedback[]),
       cardsPromise.then((cards) => loadSellerStocks(token, cards, forceRefresh)).catch(() => ({ warehouses: [] } as SellerStockSnapshot)),
       fbsOrdersPromise,
+      financeDetailsPromise,
     ]);
 
     const inPeriod = (row: { date?: string }) => {
@@ -651,6 +817,7 @@ export async function GET(request: Request) {
       brand: string;
       image: string | null;
       sales: number;
+      preliminaryPayout: number;
       orders: number;
       grossSalesUnits: number;
       returnsCount: number;
@@ -669,6 +836,7 @@ export async function GET(request: Request) {
         brand: card.brand || "—",
         image: card.photos?.[0]?.c246x328 || card.photos?.[0]?.c516x688 || card.photos?.[0]?.big || card.photos?.[0]?.square || null,
         sales: 0,
+        preliminaryPayout: 0,
         orders: 0,
         grossSalesUnits: 0,
         returnsCount: 0,
@@ -686,6 +854,7 @@ export async function GET(request: Request) {
         brand: "—",
         image: null,
         sales: 0,
+        preliminaryPayout: 0,
         orders: 0,
         grossSalesUnits: 0,
         returnsCount: 0,
@@ -704,6 +873,7 @@ export async function GET(request: Request) {
         brand: row.brand || "—",
         image: null,
         sales: 0,
+        preliminaryPayout: 0,
         orders: 0,
         grossSalesUnits: 0,
         returnsCount: 0,
@@ -726,11 +896,17 @@ export async function GET(request: Request) {
       if (days <= 90) {
         for (const sale of completedSales) {
           const product = ensureProduct(sale);
-          if (product) product.sales += amount(sale);
+          if (product) {
+            product.sales += amount(sale);
+            product.preliminaryPayout += Number(sale.forPay || 0);
+          }
         }
         for (const sale of returns) {
           const product = ensureProduct(sale);
-          if (product) product.sales -= amount(sale);
+          if (product) {
+            product.sales -= amount(sale);
+            product.preliminaryPayout -= Math.abs(Number(sale.forPay || 0));
+          }
         }
       }
     } else {
@@ -740,13 +916,19 @@ export async function GET(request: Request) {
       }
       for (const sale of completedSales) {
         const product = ensureProduct(sale);
-        if (product) { product.sales += amount(sale); product.grossSalesUnits += 1; }
+        if (product) { product.sales += amount(sale); product.preliminaryPayout += Number(sale.forPay || 0); product.grossSalesUnits += 1; }
       }
       for (const sale of returns) {
         const product = ensureProduct(sale);
-        if (product) { product.sales -= amount(sale); product.returnsCount += 1; }
+        if (product) { product.sales -= amount(sale); product.preliminaryPayout -= Math.abs(Number(sale.forPay || 0)); product.returnsCount += 1; }
       }
     }
+
+    for (const financeProduct of financeDetailsResult.products) {
+      const product = ensureProduct({ nmId: financeProduct.nmId, supplierArticle: financeProduct.sellerSku, subject: financeProduct.title });
+      if (product && product.name === `WB ${financeProduct.nmId}`) product.name = financeProduct.title;
+    }
+    const financeByProduct = new Map(financeDetailsResult.products.map((item) => [item.nmId, item]));
 
     const reviewsByProduct = new Map<number, { total: number; sum: number; positive: number; period: number; periodSum: number; periodPositive: number }>();
     for (const feedback of feedbacksResult) {
@@ -787,6 +969,16 @@ export async function GET(request: Request) {
         else if (dailyUnits >= 1) status = "热销";
         return {
           ...product,
+          settlement: financeByProduct.get(product.nmId) ?? {
+            nmId: product.nmId,
+            sellerSku: product.sku,
+            title: product.name,
+            settledUnits: netUnits,
+            transactionAmount: product.sales,
+            forPay: product.preliminaryPayout,
+            wbExpenses: 0,
+            netPayout: product.preliminaryPayout,
+          },
           units: netUnits,
           netUnits,
           returnRate,
@@ -839,6 +1031,7 @@ export async function GET(request: Request) {
     });
 
     const schedule = syncSchedule();
+    const financePayoutAmount = financeDetailsResult.products.reduce((sum, item) => sum + item.netPayout, 0);
     return json({
       source: "wildberries",
       syncedAt: new Date().toISOString(),
@@ -858,12 +1051,13 @@ export async function GET(request: Request) {
         feedbacks: feedbacksResult.length > 0,
         inventory: stockResult.length > 0 || sellerStockResult.warehouses.length > 0,
         orderDetails: fbsOrderResult.available,
+        financeReport: financeDetailsResult.available,
       },
       metrics: {
         salesAmount: useDetailedMetrics && days > 90 ? detailedSummary.salesAmount : salesAmount,
         ordersCount: useDetailedMetrics ? detailedSummary.orders : activeOrders.length,
         cancelledOrders: useDetailedMetrics ? detailedSummary.abnormal : cancelledOrders,
-        payoutAmount,
+        payoutAmount: financeDetailsResult.available ? financePayoutAmount : payoutAmount,
         returnsCount: useDetailedMetrics ? detailedSummary.abnormal : returns.length + cancelledOrders,
         returnRate: useDetailedMetrics ? detailedAbnormalRate : ((completedSales.length + returns.length + cancelledOrders) ? ((returns.length + cancelledOrders) / (completedSales.length + returns.length + cancelledOrders)) * 100 : returnRate),
         balanceCurrent: Number(balanceResult.current || 0),
@@ -872,6 +1066,12 @@ export async function GET(request: Request) {
       trend: [...trendMap.values()],
       categories,
       products,
+      settlement: {
+        available: financeDetailsResult.available,
+        source: financeDetailsResult.available ? "WB 销售实现报告（正式结算）" : "WB 销售接口（预估）",
+        rowsCount: financeDetailsResult.rowsCount,
+        unallocatedExpenses: financeDetailsResult.unallocatedExpenses,
+      },
       orderSummary: {
         ...detailedSummary,
         abnormalRate: detailedAbnormalRate,

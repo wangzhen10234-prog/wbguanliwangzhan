@@ -25,6 +25,7 @@ test("server-renders the WB Insight dashboard", async () => {
   assert.match(html, /销售趋势/);
   assert.match(html, /销售状况/);
   assert.match(html, /综合商品分析/);
+  assert.match(html, /产品详情/);
   assert.match(html, /库存监控/);
   assert.match(html, /08:00 · 14:00 · 19:00 · 23:00/);
   assert.doesNotMatch(html, /codex-preview|SkeletonPreview|Your site is taking shape/);
