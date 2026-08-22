@@ -65,8 +65,53 @@ type FormulaValues = {
   grossProfitCny: number | null;
 };
 
+type BatchEditableField =
+  | "category"
+  | "internalSku"
+  | "imageUrl"
+  | "specification"
+  | "lengthCm"
+  | "widthCm"
+  | "heightCm"
+  | "weightG"
+  | "productCostRub"
+  | "exchangeRate"
+  | "productCostCny"
+  | "handlingFeeCny"
+  | "commissionRate"
+  | "adRate"
+  | "activityDiscountRate"
+  | "returnLossRate"
+  | "targetMarginRate";
+
+type BatchFieldOption = {
+  key: BatchEditableField;
+  label: string;
+  kind: "text" | "number" | "percent" | "url";
+};
+
 const DAY_MS = 86_400_000;
 const ORIGINAL_ORDER = new Map(["wz311b", "wz311p", "wz310b", "wz810b", "wz810g"].map((sku, index) => [sku, (index + 1) * 100]));
+const BATCH_FIELDS: BatchFieldOption[] = [
+  { key: "commissionRate", label: "% 平台佣金率", kind: "percent" },
+  { key: "adRate", label: "% 广告投流率", kind: "percent" },
+  { key: "activityDiscountRate", label: "% 活动折扣率", kind: "percent" },
+  { key: "returnLossRate", label: "% 退损率", kind: "percent" },
+  { key: "targetMarginRate", label: "% 目标毛利率", kind: "percent" },
+  { key: "category", label: "主推分类", kind: "text" },
+  { key: "internalSku", label: "内部 SKU", kind: "text" },
+  { key: "specification", label: "规格", kind: "text" },
+  { key: "imageUrl", label: "商品图片链接", kind: "url" },
+  { key: "lengthCm", label: "长度（cm）", kind: "number" },
+  { key: "widthCm", label: "宽度（cm）", kind: "number" },
+  { key: "heightCm", label: "高度（cm）", kind: "number" },
+  { key: "weightG", label: "重量（g）", kind: "number" },
+  { key: "productCostRub", label: "产品成本（₽）", kind: "number" },
+  { key: "exchangeRate", label: "汇率", kind: "number" },
+  { key: "productCostCny", label: "产品成本（¥）", kind: "number" },
+  { key: "handlingFeeCny", label: "操作费（¥）", kind: "number" },
+];
+const RATE_FIELDS = new Set<BatchEditableField>(["commissionRate", "adRate", "activityDiscountRate", "returnLossRate", "targetMarginRate"]);
 
 function inputDate(date: Date) {
   return date.toISOString().slice(0, 10);
@@ -159,6 +204,9 @@ export default function ProductDetailsPage() {
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [query, setQuery] = useState("");
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [batchField, setBatchField] = useState<BatchEditableField>("commissionRate");
+  const [batchValue, setBatchValue] = useState("");
   const [reloadKey, setReloadKey] = useState(0);
   const forceRefreshRef = useRef(false);
   const draftSequenceRef = useRef(0);
@@ -200,6 +248,7 @@ export default function ProductDetailsPage() {
       setData(dashboardResult.value);
       setCosts(nextCosts);
       setDirty(new Set());
+      setSelected(new Set());
       setError(dashboardResult.error ? `${dashboardResult.error}，产品记录表仍可编辑` : "");
     }).catch((reason: Error) => {
       if (reason.name !== "AbortError") setError(reason.message);
@@ -230,6 +279,9 @@ export default function ProductDetailsPage() {
     return rows.filter(({ cost, product }) => [cost.sellerSku, cost.internalSku, cost.category, cost.specification, product?.name ?? "", String(product?.nmId ?? "")].some((value) => value.toLocaleLowerCase().includes(needle)));
   }, [query, rows]);
 
+  const batchOption = BATCH_FIELDS.find((option) => option.key === batchField) ?? BATCH_FIELDS[0];
+  const allFilteredSelected = filteredRows.length > 0 && filteredRows.every((row) => selected.has(row.key));
+
   function refresh() {
     if (dirty.size) {
       setError("请先保存表格修改，再同步 WB 商品资料");
@@ -246,6 +298,83 @@ export default function ProductDetailsPage() {
     setDirty((current) => new Set(current).add(key));
     setError("");
     setMessage("");
+  }
+
+  function toggleRow(key: string) {
+    setSelected((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
+
+  function toggleFilteredRows() {
+    setSelected((current) => {
+      const next = new Set(current);
+      const shouldSelect = filteredRows.some((row) => !next.has(row.key));
+      for (const row of filteredRows) {
+        if (shouldSelect) next.add(row.key);
+        else next.delete(row.key);
+      }
+      return next;
+    });
+  }
+
+  function applyBatchEdit() {
+    const selectedKeys = [...selected].filter((key) => costs[key]);
+    if (!selectedKeys.length) {
+      setError("请先勾选需要批量修改的商品");
+      setMessage("");
+      return;
+    }
+
+    let nextValue: string | number = batchValue.trim();
+    if (batchOption.kind === "number" || batchOption.kind === "percent") {
+      const numericValue = Number(batchValue);
+      if (batchValue.trim() === "" || !Number.isFinite(numericValue) || numericValue < 0 || (batchOption.kind === "percent" && numericValue > 100)) {
+        setError(batchOption.kind === "percent" ? "百分比请输入 0–100 之间的数值" : "请输入不小于 0 的有效数值");
+        setMessage("");
+        return;
+      }
+      nextValue = numericValue;
+    } else if (batchOption.kind === "url" && nextValue) {
+      try {
+        const parsed = new URL(nextValue);
+        if (parsed.protocol !== "https:" || parsed.username || parsed.password) throw new Error("INVALID_URL");
+        nextValue = parsed.href;
+      } catch {
+        setError("图片链接无效，请粘贴以 https:// 开头的 WB 主图链接");
+        setMessage("");
+        return;
+      }
+    }
+
+    if (RATE_FIELDS.has(batchField)) {
+      const invalidKey = selectedKeys.find((key) => {
+        const row = { ...costs[key], [batchField]: nextValue } as CostRow;
+        return row.commissionRate + row.adRate + row.activityDiscountRate + row.returnLossRate + row.targetMarginRate >= 100;
+      });
+      if (invalidKey) {
+        setError(`${costs[invalidKey].sellerSku} 修改后的费率与毛利率合计必须小于 100%`);
+        setMessage("");
+        return;
+      }
+    }
+
+    setCosts((current) => {
+      const next = { ...current };
+      for (const key of selectedKeys) next[key] = { ...next[key], [batchField]: nextValue } as CostRow;
+      return next;
+    });
+    setDirty((current) => {
+      const next = new Set(current);
+      for (const key of selectedKeys) next.add(key);
+      return next;
+    });
+    setError("");
+    setMessage(`已批量修改 ${selectedKeys.length} 行“${batchOption.label.replace("% ", "")}”，请保存修改`);
+    setBatchValue("");
   }
 
   function editImageUrl(key: string, currentUrl: string) {
@@ -338,6 +467,13 @@ export default function ProductDetailsPage() {
         }
         return next;
       });
+      setSelected((current) => {
+        const next = new Set(current);
+        for (const [oldKey, newKey] of savedRows) {
+          if (next.delete(oldKey)) next.add(newKey);
+        }
+        return next;
+      });
       setMessage(`已保存 ${savedRows.length} 行产品记录`);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "产品记录保存失败");
@@ -374,6 +510,14 @@ export default function ProductDetailsPage() {
             </div>
           </div>
 
+          <div className={`batch-edit-bar ${selected.size ? "active" : ""}`}>
+            <div className="batch-selection-summary"><b>{selected.size}</b><span>个商品已选</span>{selected.size > 0 && <button type="button" onClick={() => setSelected(new Set())}>清除选择</button>}</div>
+            <label className="batch-control"><span>批量修改</span><select value={batchField} onChange={(event) => { setBatchField(event.target.value as BatchEditableField); setBatchValue(""); }} aria-label="选择批量修改字段">{BATCH_FIELDS.map((option) => <option key={option.key} value={option.key}>{option.label}</option>)}</select></label>
+            <label className={`batch-value ${batchOption.kind === "percent" ? "with-percent" : ""}`}><input type={batchOption.kind === "number" || batchOption.kind === "percent" ? "number" : "text"} min={batchOption.kind === "number" || batchOption.kind === "percent" ? "0" : undefined} max={batchOption.kind === "percent" ? "100" : undefined} step={batchOption.kind === "number" || batchOption.kind === "percent" ? "0.01" : undefined} value={batchValue} onChange={(event) => setBatchValue(event.target.value)} placeholder={batchOption.kind === "url" ? "粘贴 HTTPS 图片链接" : batchOption.kind === "text" ? "输入统一内容" : "输入统一数值"} aria-label={`${batchOption.label}批量修改值`} />{batchOption.kind === "percent" && <span>%</span>}</label>
+            <button className="batch-apply-button" type="button" disabled={!selected.size} onClick={applyBatchEdit}>应用到 {selected.size || 0} 行</button>
+            <small>可连续修改多个字段，最后统一保存</small>
+          </div>
+
           <div className="pricing-table-scroll">
             <table className="pricing-ledger-table" aria-label="产品定价表">
               <colgroup>
@@ -385,7 +529,7 @@ export default function ProductDetailsPage() {
               <thead>
                 <tr className="pricing-group-row"><th colSpan={11}><span>01</span>商品资料</th><th colSpan={5}><span>02</span>基础费用</th><th colSpan={6}><span>03</span>平台费用</th><th colSpan={2}><span>04</span>售后费用</th><th colSpan={5} className="result-group"><span>05</span>价格与利润</th></tr>
                 <tr className="pricing-heading-row">
-                  <th>主推分类</th><th>卖家商品编号</th><th>SKU</th><th>上线状态</th><th>商品图片</th><th>图片状态</th><th>规格</th><th>长<br /><small>cm</small></th><th>宽<br /><small>cm</small></th><th>高<br /><small>cm</small></th><th>重量<br /><small>g</small></th>
+                  <th><label className="batch-check-all"><input type="checkbox" checked={allFilteredSelected} onChange={toggleFilteredRows} aria-label={allFilteredSelected ? "取消选择当前筛选结果" : "选择当前筛选结果"} /><span>主推分类</span></label></th><th>卖家商品编号</th><th>SKU</th><th>上线状态</th><th>商品图片</th><th>图片状态</th><th>规格</th><th>长<br /><small>cm</small></th><th>宽<br /><small>cm</small></th><th>高<br /><small>cm</small></th><th>重量<br /><small>g</small></th>
                   <th>产品成本<br /><small>₽</small></th><th>汇率</th><th>产品成本<br /><small>¥</small></th><th>操作费<br /><small>¥</small></th><th>尾程物流费<br /><small>¥ · 自动</small></th><th>平台佣金率</th><th>平台佣金<br /><small>¥ · 自动</small></th><th>广告投流率</th><th>广告费用<br /><small>¥ · 自动</small></th><th>活动折扣率</th><th>折扣费用<br /><small>¥ · 自动</small></th><th>退损率</th><th>退损费<br /><small>¥ · 自动</small></th>
                   <th>总成本<br /><small>¥</small></th><th>参考售价<br /><small>¥</small></th><th className="final-price-heading">最终售价<br /><small>¥ · 反推</small></th><th>毛利<br /><small>¥</small></th><th>目标毛利率</th>
                 </tr>
@@ -400,8 +544,8 @@ export default function ProductDetailsPage() {
                   const imageLabel = product?.image ? "WB 主图" : cost.imageUrl ? "链接图片" : "待补图片";
                   return (
                     <Fragment key={key}>
-                      <tr className={`pricing-data-row ${dirty.has(key) ? "is-dirty" : ""} ${isDraft ? "is-new" : ""}`}>
-                        <td className="sticky-a"><input className="sheet-text-input" aria-label={`${label} 主推分类`} value={cost.category} placeholder="输入分类" onChange={(event) => updateCost(key, "category", event.target.value)} /></td>
+                      <tr className={`pricing-data-row ${dirty.has(key) ? "is-dirty" : ""} ${selected.has(key) ? "is-selected" : ""} ${isDraft ? "is-new" : ""}`}>
+                        <td className="sticky-a"><div className="row-select-cell"><input className="row-select-checkbox" type="checkbox" checked={selected.has(key)} onChange={() => toggleRow(key)} aria-label={`选择 ${label}`} /><input className="sheet-text-input" aria-label={`${label} 主推分类`} value={cost.category} placeholder="输入分类" onChange={(event) => updateCost(key, "category", event.target.value)} /></div></td>
                         <td className="sticky-b">{isDraft ? <input className="sheet-text-input product-code-input" aria-label="新产品卖家商品编号" value={cost.sellerSku} placeholder="必填商品编号" onChange={(event) => updateCost(key, "sellerSku", event.target.value)} /> : <div className="product-code-lock"><b>{cost.sellerSku}</b><small>{product ? "已匹配 WB" : "手工记录"}</small></div>}</td>
                         <td><input className="sheet-text-input" aria-label={`${label} SKU`} value={cost.internalSku} placeholder="内部 SKU" onChange={(event) => updateCost(key, "internalSku", event.target.value)} /></td>
                         <td><span className={`data-status ${product ? "online" : "offline"}`}><i />{product ? "已上线" : isDraft ? "待登记" : "未匹配"}</span></td>
