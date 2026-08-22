@@ -50,6 +50,7 @@ const SEED_ROWS: Array<typeof productCosts.$inferInsert> = [
 type CostPayload = {
   sellerSku?: unknown;
   nmId?: unknown;
+  imageUrl?: unknown;
   internalSku?: unknown;
   category?: unknown;
   specification?: unknown;
@@ -86,6 +87,18 @@ function numericField(value: unknown, max = 1_000_000_000) {
   return Math.round(number * 10_000) / 10_000;
 }
 
+function imageUrlField(value: unknown) {
+  const imageUrl = stringField(value, 2048);
+  if (!imageUrl) return "";
+  try {
+    const parsed = new URL(imageUrl);
+    if (parsed.protocol !== "https:" || parsed.username || parsed.password) throw new Error("IMAGE_URL_INVALID");
+    return parsed.href;
+  } catch {
+    throw new Error("IMAGE_URL_INVALID");
+  }
+}
+
 function normalizePayload(payload: CostPayload): typeof productCosts.$inferInsert {
   const sellerSku = stringField(payload.sellerSku, 120);
   if (!sellerSku) throw new Error("SELLER_SKU_REQUIRED");
@@ -96,6 +109,7 @@ function normalizePayload(payload: CostPayload): typeof productCosts.$inferInser
   return {
     sellerSku,
     nmId: nmId ? Math.trunc(nmId) : null,
+    imageUrl: imageUrlField(payload.imageUrl),
     internalSku: stringField(payload.internalSku, 120),
     category: stringField(payload.category, 120),
     specification: stringField(payload.specification, 240),
@@ -153,6 +167,7 @@ export async function PUT(request: Request) {
         target: productCosts.sellerSku,
         set: {
           nmId: value.nmId,
+          imageUrl: value.imageUrl,
           internalSku: value.internalSku,
           category: value.category,
           specification: value.specification,
@@ -181,6 +196,7 @@ export async function PUT(request: Request) {
   } catch (error) {
     if (error instanceof Error && error.message === "SELLER_SKU_REQUIRED") return json({ error: "卖家商品编号不能为空" }, 400);
     if (error instanceof Error && error.message === "EXCHANGE_RATE_REQUIRED") return json({ error: "填写卢布产品成本时，汇率必须大于 0" }, 400);
+    if (error instanceof Error && error.message === "IMAGE_URL_INVALID") return json({ error: "商品图片必须使用有效的 HTTPS 链接" }, 400);
     if (error instanceof Error && error.message === "NUMERIC_FIELD_INVALID") return json({ error: "金额、比例或尺寸输入无效" }, 400);
     return databaseError(error);
   }

@@ -4,6 +4,7 @@ import { integer, real, sqliteTable, text } from "drizzle-orm/sqlite-core";
 export const productCosts = sqliteTable("product_costs", {
   sellerSku: text("seller_sku").primaryKey(),
   nmId: integer("nm_id"),
+  imageUrl: text("image_url").notNull().default(""),
   internalSku: text("internal_sku").notNull().default(""),
   category: text("category").notNull().default(""),
   specification: text("specification").notNull().default(""),

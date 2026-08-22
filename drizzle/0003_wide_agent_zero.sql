@@ -1,0 +1,1 @@
+ALTER TABLE `product_costs` ADD `image_url` text DEFAULT '' NOT NULL;

@@ -21,6 +21,7 @@ type DashboardData = {
 type CostRow = {
   sellerSku: string;
   nmId: number | null;
+  imageUrl: string;
   internalSku: string;
   category: string;
   specification: string;
@@ -75,6 +76,7 @@ function emptyCost(product: Product | null, sortOrder = 0): CostRow {
   return {
     sellerSku: product?.sku ?? "",
     nmId: product?.nmId ?? null,
+    imageUrl: "",
     internalSku: "",
     category: product?.category || "",
     specification: "",
@@ -246,6 +248,25 @@ export default function ProductDetailsPage() {
     setMessage("");
   }
 
+  function editImageUrl(key: string, currentUrl: string) {
+    const nextUrl = window.prompt("粘贴 WB 商品主图的 HTTPS 链接；留空后保存可删除自定义图片。", currentUrl);
+    if (nextUrl === null) return;
+    const imageUrl = nextUrl.trim();
+    let normalizedImageUrl = imageUrl;
+    if (imageUrl) {
+      try {
+        const parsed = new URL(imageUrl);
+        if (parsed.protocol !== "https:" || parsed.username || parsed.password) throw new Error("INVALID_URL");
+        normalizedImageUrl = parsed.href;
+      } catch {
+        setError("图片链接无效，请粘贴以 https:// 开头的 WB 主图链接");
+        setMessage("");
+        return;
+      }
+    }
+    updateCost(key, "imageUrl", normalizedImageUrl);
+  }
+
   function addRowAfter(afterKey: string | null) {
     const afterIndex = afterKey ? rows.findIndex((row) => row.key === afterKey) : -1;
     const previous = afterIndex >= 0 ? rows[afterIndex] : null;
@@ -375,6 +396,8 @@ export default function ProductDetailsPage() {
                   const invalid = value.actualSalePriceCny === null;
                   const isDraft = key.startsWith("draft:");
                   const label = cost.sellerSku || "新产品";
+                  const imageUrl = product?.image || cost.imageUrl;
+                  const imageLabel = product?.image ? "WB 主图" : cost.imageUrl ? "链接图片" : "待补图片";
                   return (
                     <Fragment key={key}>
                       <tr className={`pricing-data-row ${dirty.has(key) ? "is-dirty" : ""} ${isDraft ? "is-new" : ""}`}>
@@ -382,8 +405,8 @@ export default function ProductDetailsPage() {
                         <td className="sticky-b">{isDraft ? <input className="sheet-text-input product-code-input" aria-label="新产品卖家商品编号" value={cost.sellerSku} placeholder="必填商品编号" onChange={(event) => updateCost(key, "sellerSku", event.target.value)} /> : <div className="product-code-lock"><b>{cost.sellerSku}</b><small>{product ? "已匹配 WB" : "手工记录"}</small></div>}</td>
                         <td><input className="sheet-text-input" aria-label={`${label} SKU`} value={cost.internalSku} placeholder="内部 SKU" onChange={(event) => updateCost(key, "internalSku", event.target.value)} /></td>
                         <td><span className={`data-status ${product ? "online" : "offline"}`}><i />{product ? "已上线" : isDraft ? "待登记" : "未匹配"}</span></td>
-                        <td><span className={`sheet-product-image ${product?.image ? "" : "placeholder"}`} style={product?.image ? { backgroundImage: `url(${product.image})` } : undefined}>{product?.image ? "" : isDraft ? "+" : "—"}</span></td>
-                        <td><span className={`image-status ${product?.image ? "complete" : "missing"}`}>{product?.image ? "图片齐全" : "待补图片"}</span></td>
+                        <td><div className="sheet-image-editor"><span className={`sheet-product-image ${imageUrl ? "" : "placeholder"}`}>{imageUrl ? <img src={imageUrl} alt="" loading="lazy" referrerPolicy="no-referrer" /> : isDraft ? "+" : "—"}</span>{!product?.image && <button type="button" onClick={() => editImageUrl(key, cost.imageUrl)}>{cost.imageUrl ? "更换链接" : "粘贴链接"}</button>}</div></td>
+                        <td><span className={`image-status ${imageUrl ? "complete" : "missing"}`}>{imageLabel}</span></td>
                         <td><input className="sheet-text-input" aria-label={`${label} 规格`} value={cost.specification} placeholder="型号 / 颜色" onChange={(event) => updateCost(key, "specification", event.target.value)} /></td>
                         <td><NumberCell blankZero label={`${label} 长`} value={cost.lengthCm} onChange={(next) => updateCost(key, "lengthCm", next)} /></td>
                         <td><NumberCell blankZero label={`${label} 宽`} value={cost.widthCm} onChange={(next) => updateCost(key, "widthCm", next)} /></td>
