@@ -28,3 +28,14 @@ export const productCosts = sqliteTable("product_costs", {
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 });
+
+export const wbSyncSnapshots = sqliteTable("wb_sync_snapshots", {
+  cacheKey: text("cache_key").primaryKey(),
+  payload: text("payload").notNull(),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+
+export const wbSyncLocks = sqliteTable("wb_sync_locks", {
+  cacheKey: text("cache_key").primaryKey(),
+  expiresAt: integer("expires_at").notNull(),
+});
