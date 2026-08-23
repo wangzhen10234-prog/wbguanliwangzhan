@@ -286,24 +286,44 @@ function writeRecentEdgeCache(key: string, value: unknown) {
   return writeNamedEdgeCache(RECENT_CACHE_BASE, key, value, RECENT_REFRESH_TTL_SECONDS);
 }
 
-async function readDurableSnapshot<T>(key: string): Promise<T | null> {
+type DurableSnapshot<T> = { value: T; syncSlot: string; manualBucket: number };
+
+function manualRefreshBucket() {
+  return Math.floor(Date.now() / (RECENT_REFRESH_TTL_SECONDS * 1000));
+}
+
+async function readDurableRecord<T>(key: string): Promise<DurableSnapshot<T> | null> {
   try {
-    const row = await env.DB.prepare("SELECT payload FROM wb_sync_snapshots WHERE cache_key = ?")
+    const row = await env.DB.prepare("SELECT payload, sync_slot AS syncSlot, manual_bucket AS manualBucket FROM wb_sync_snapshots WHERE cache_key = ?")
       .bind(key)
-      .first<{ payload: string }>();
-    return row?.payload ? JSON.parse(row.payload) as T : null;
+      .first<{ payload: string; syncSlot: string; manualBucket: number }>();
+    return row?.payload ? { value: JSON.parse(row.payload) as T, syncSlot: row.syncSlot || "", manualBucket: Number(row.manualBucket || 0) } : null;
   } catch {
     return null;
   }
 }
 
-async function writeDurableSnapshot(key: string, value: unknown) {
+async function readDurableSnapshot<T>(key: string): Promise<T | null> {
+  return (await readDurableRecord<T>(key))?.value ?? null;
+}
+
+function durableRecordIsFresh(record: DurableSnapshot<unknown> | null, forceRefresh: boolean) {
+  return forceRefresh
+    ? record?.manualBucket === manualRefreshBucket()
+    : record?.syncSlot === syncSchedule().slot;
+}
+
+async function writeDurableSnapshot(key: string, value: unknown, forceRefresh = false) {
   try {
     await env.DB.prepare(`
-      INSERT INTO wb_sync_snapshots (cache_key, payload, updated_at)
-      VALUES (?, ?, CURRENT_TIMESTAMP)
-      ON CONFLICT(cache_key) DO UPDATE SET payload = excluded.payload, updated_at = CURRENT_TIMESTAMP
-    `).bind(key, JSON.stringify(value)).run();
+      INSERT INTO wb_sync_snapshots (cache_key, payload, sync_slot, manual_bucket, updated_at)
+      VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(cache_key) DO UPDATE SET
+        payload = excluded.payload,
+        sync_slot = excluded.sync_slot,
+        manual_bucket = CASE WHEN excluded.manual_bucket > 0 THEN excluded.manual_bucket ELSE wb_sync_snapshots.manual_bucket END,
+        updated_at = CURRENT_TIMESTAMP
+    `).bind(key, JSON.stringify(value), syncSchedule().slot, forceRefresh ? manualRefreshBucket() : 0).run();
   } catch {
     // A cache write must never make a successful WB response fail.
   }
@@ -384,12 +404,18 @@ async function loadStatistics(token: string, forceRefresh = false) {
   if (!forceRefresh && statisticsCache && statisticsCache.expiresAt > Date.now()) return statisticsCache.value;
   return dedupe(forceRefresh ? "statistics-manual" : "statistics", async () => {
     const cached = await readEdgeCache<{ orders: WbOrder[]; sales: WbSale[] }>("statistics");
-    const durable = await readDurableSnapshot<{ orders: WbOrder[]; sales: WbSale[] }>("statistics");
+    const durableRecord = await readDurableRecord<{ orders: WbOrder[]; sales: WbSale[] }>("statistics");
+    const durable = durableRecord?.value ?? null;
     const fallback = statisticsCache?.value ?? cached ?? durable;
     if (!forceRefresh && cached) {
       statisticsCache = { value: cached, expiresAt: cacheExpiry() };
       await writeDurableSnapshot("statistics", cached);
       return cached;
+    }
+    if (durable && durableRecordIsFresh(durableRecord, forceRefresh)) {
+      statisticsCache = { value: durable, expiresAt: cacheExpiry() };
+      await writeEdgeCache("statistics", durable);
+      return durable;
     }
     const hasLease = await acquireDurableRefreshLock("statistics");
     if (!hasLease) {
@@ -417,13 +443,13 @@ async function loadStatistics(token: string, forceRefresh = false) {
         }
         if (fallback) {
           statisticsCache = { value: fallback, expiresAt: cacheExpiry() };
-          await writeEdgeCache("statistics", fallback);
+          await Promise.all([writeEdgeCache("statistics", fallback), writeDurableSnapshot("statistics", fallback, forceRefresh)]);
           return fallback;
         }
         throw error;
       }
       statisticsCache = { value: { orders, sales }, expiresAt: cacheExpiry() };
-      await Promise.all([writeEdgeCache("statistics", statisticsCache.value), writeDurableSnapshot("statistics", statisticsCache.value)]);
+      await Promise.all([writeEdgeCache("statistics", statisticsCache.value), writeDurableSnapshot("statistics", statisticsCache.value, forceRefresh)]);
       return statisticsCache.value;
     } finally {
       if (hasLease) await releaseDurableRefreshLock("statistics");
@@ -435,12 +461,18 @@ async function loadStocks(token: string, forceRefresh = false) {
   if (!forceRefresh && stockCache && stockCache.expiresAt > Date.now()) return stockCache.value;
   return dedupe(forceRefresh ? "stocks-manual" : "stocks", async () => {
     const cached = await readEdgeCache<WbStock[]>("stocks");
-    const durable = await readDurableSnapshot<WbStock[]>("stocks");
+    const durableRecord = await readDurableRecord<WbStock[]>("stocks");
+    const durable = durableRecord?.value ?? null;
     const fallback = stockCache?.value ?? cached ?? durable;
     if (!forceRefresh && cached) {
       stockCache = { value: cached, expiresAt: cacheExpiry() };
       await writeDurableSnapshot("stocks", cached);
       return cached;
+    }
+    if (durable && durableRecordIsFresh(durableRecord, forceRefresh)) {
+      stockCache = { value: durable, expiresAt: cacheExpiry() };
+      await writeEdgeCache("stocks", durable);
+      return durable;
     }
     try {
       const response = await wbRequest<{ data?: { items?: WbStock[] } }>(
@@ -450,7 +482,7 @@ async function loadStocks(token: string, forceRefresh = false) {
       );
       const stocks = response.data?.items ?? [];
       stockCache = { value: stocks, expiresAt: cacheExpiry() };
-      await Promise.all([writeEdgeCache("stocks", stocks), writeDurableSnapshot("stocks", stocks)]);
+      await Promise.all([writeEdgeCache("stocks", stocks), writeDurableSnapshot("stocks", stocks, forceRefresh)]);
       return stocks;
     } catch (error) {
       if (fallback) {
@@ -468,11 +500,17 @@ async function loadSellerWarehouseDirectory(token: string, forceRefresh = false)
   return dedupe(forceRefresh ? "seller-warehouses-manual" : "seller-warehouses", async () => {
     const cacheKey = "seller-warehouses";
     const cached = await readEdgeCache<SellerStockSnapshot>(cacheKey);
-    const durable = await readDurableSnapshot<SellerStockSnapshot>(cacheKey);
+    const durableRecord = await readDurableRecord<SellerStockSnapshot>(cacheKey);
+    const durable = durableRecord?.value ?? null;
     if (!forceRefresh && cached) {
       sellerWarehouseDirectoryCache = { value: cached, expiresAt: cacheExpiry() };
       await writeDurableSnapshot(cacheKey, cached);
       return cached;
+    }
+    if (durable && durableRecordIsFresh(durableRecord, forceRefresh)) {
+      sellerWarehouseDirectoryCache = { value: durable, expiresAt: cacheExpiry() };
+      await writeEdgeCache(cacheKey, durable);
+      return durable;
     }
     const fallback = sellerWarehouseDirectoryCache?.value ?? cached ?? durable;
     try {
@@ -484,7 +522,7 @@ async function loadSellerWarehouseDirectory(token: string, forceRefresh = false)
       const officeNames = new Map(offices.map((office) => [Number(office.id || 0), office.name || ""]));
       const result = { warehouses: warehouses.map((warehouse) => ({ ...warehouse, officeName: officeNames.get(Number(warehouse.officeId || 0)) || "", stocks: [] })) };
       sellerWarehouseDirectoryCache = { value: result, expiresAt: cacheExpiry() };
-      await Promise.all([writeEdgeCache(cacheKey, result), writeDurableSnapshot(cacheKey, result)]);
+      await Promise.all([writeEdgeCache(cacheKey, result), writeDurableSnapshot(cacheKey, result, forceRefresh)]);
       return result;
     } catch (error) {
       if (fallback) {
@@ -501,12 +539,18 @@ async function loadSellerStocks(token: string, cards: WbCard[], forceRefresh = f
   if (!forceRefresh && sellerStockCache && sellerStockCache.expiresAt > Date.now()) return sellerStockCache.value;
   return dedupe(forceRefresh ? "seller-stocks-manual" : "seller-stocks", async () => {
     const cached = await readEdgeCache<SellerStockSnapshot>("seller-stocks");
-    const durable = await readDurableSnapshot<SellerStockSnapshot>("seller-stocks");
+    const durableRecord = await readDurableRecord<SellerStockSnapshot>("seller-stocks");
+    const durable = durableRecord?.value ?? null;
     const fallback = sellerStockCache?.value ?? cached ?? durable;
     if (!forceRefresh && cached) {
       sellerStockCache = { value: cached, expiresAt: cacheExpiry() };
       await writeDurableSnapshot("seller-stocks", cached);
       return cached;
+    }
+    if (durable && durableRecordIsFresh(durableRecord, forceRefresh)) {
+      sellerStockCache = { value: durable, expiresAt: cacheExpiry() };
+      await writeEdgeCache("seller-stocks", durable);
+      return durable;
     }
     try {
       const base = "https://marketplace-api.wildberries.ru/api/v3";
@@ -531,7 +575,7 @@ async function loadSellerStocks(token: string, cards: WbCard[], forceRefresh = f
       }
 
       sellerStockCache = { value: result, expiresAt: cacheExpiry() };
-      await Promise.all([writeEdgeCache("seller-stocks", result), writeDurableSnapshot("seller-stocks", result)]);
+      await Promise.all([writeEdgeCache("seller-stocks", result), writeDurableSnapshot("seller-stocks", result, forceRefresh)]);
       return result;
     } catch (error) {
       if (fallback) {
@@ -598,17 +642,24 @@ async function loadFbsOrders(token: string, forceRefresh = false) {
     const cacheKey = "fbs-orders-all-v2";
     const slotCached = await readEdgeCache<FbsOrderSnapshot>(cacheKey);
     const stableCached = await readStableEdgeCache<FbsOrderSnapshot>(cacheKey);
-    const durableCached = await readDurableSnapshot<FbsOrderSnapshot>(cacheKey);
+    const durableRecord = await readDurableRecord<FbsOrderSnapshot>(cacheKey);
+    const durableCached = durableRecord?.value ?? null;
     const fallback = fbsOrderCache?.value ?? slotCached ?? stableCached ?? durableCached;
     if (!forceRefresh && slotCached) {
       fbsOrderCache = { value: slotCached, expiresAt: cacheExpiry() };
       await Promise.all([writeStableEdgeCache(cacheKey, slotCached), writeDurableSnapshot(cacheKey, slotCached)]);
       return slotCached;
     }
+    if (durableCached && durableRecordIsFresh(durableRecord, forceRefresh)) {
+      fbsOrderCache = { value: durableCached, expiresAt: cacheExpiry() };
+      await writeEdgeCache(cacheKey, durableCached);
+      return durableCached;
+    }
     if (forceRefresh) {
       const recentCached = await readRecentEdgeCache<FbsOrderSnapshot>(cacheKey);
       if (recentCached) {
         fbsOrderCache = { value: recentCached, expiresAt: cacheExpiry() };
+        await writeDurableSnapshot(cacheKey, recentCached, true);
         return recentCached;
       }
     }
@@ -635,12 +686,12 @@ async function loadFbsOrders(token: string, forceRefresh = false) {
       for (const order of refreshedOrders) byOrder.set(fbsOrderKey(order), order);
       const result = { available: true, orders: [...byOrder.values()] };
       fbsOrderCache = { value: result, expiresAt: cacheExpiry() };
-      await Promise.all([writeEdgeCache(cacheKey, result), writeStableEdgeCache(cacheKey, result), writeRecentEdgeCache(cacheKey, result), writeDurableSnapshot(cacheKey, result)]);
+      await Promise.all([writeEdgeCache(cacheKey, result), writeStableEdgeCache(cacheKey, result), writeRecentEdgeCache(cacheKey, result), writeDurableSnapshot(cacheKey, result, forceRefresh)]);
       return result;
     } catch (error) {
       if (fallback) {
         fbsOrderCache = { value: fallback, expiresAt: cacheExpiry() };
-        await writeEdgeCache(cacheKey, fallback);
+        await Promise.all([writeEdgeCache(cacheKey, fallback), writeDurableSnapshot(cacheKey, fallback, forceRefresh)]);
         return fallback;
       }
       throw error;
@@ -700,12 +751,18 @@ async function loadBalance(token: string, forceRefresh = false) {
   if (!forceRefresh && balanceCache && balanceCache.expiresAt > Date.now()) return balanceCache.value;
   return dedupe(forceRefresh ? "balance-manual" : "balance", async () => {
     const cached = await readEdgeCache<{ current?: number; for_withdraw?: number }>("balance");
-    const durable = await readDurableSnapshot<{ current?: number; for_withdraw?: number }>("balance");
+    const durableRecord = await readDurableRecord<{ current?: number; for_withdraw?: number }>("balance");
+    const durable = durableRecord?.value ?? null;
     const fallback = balanceCache?.value ?? cached ?? durable;
     if (!forceRefresh && cached) {
       balanceCache = { value: cached, expiresAt: cacheExpiry() };
       await writeDurableSnapshot("balance", cached);
       return cached;
+    }
+    if (durable && durableRecordIsFresh(durableRecord, forceRefresh)) {
+      balanceCache = { value: durable, expiresAt: cacheExpiry() };
+      await writeEdgeCache("balance", durable);
+      return durable;
     }
     try {
       const balance = await wbRequest<{ current?: number; for_withdraw?: number }>(
@@ -713,7 +770,7 @@ async function loadBalance(token: string, forceRefresh = false) {
         token,
       );
       balanceCache = { value: balance, expiresAt: cacheExpiry() };
-      await Promise.all([writeEdgeCache("balance", balance), writeDurableSnapshot("balance", balance)]);
+      await Promise.all([writeEdgeCache("balance", balance), writeDurableSnapshot("balance", balance, forceRefresh)]);
       return balance;
     } catch (error) {
       if (fallback) {
@@ -730,12 +787,18 @@ async function loadCards(token: string, forceRefresh = false) {
   if (!forceRefresh && cardsCache && cardsCache.expiresAt > Date.now()) return cardsCache.value;
   return dedupe(forceRefresh ? "cards-manual" : "cards", async () => {
     const cached = await readEdgeCache<WbCard[]>("cards");
-    const durable = await readDurableSnapshot<WbCard[]>("cards");
+    const durableRecord = await readDurableRecord<WbCard[]>("cards");
+    const durable = durableRecord?.value ?? null;
     const fallback = cardsCache?.value ?? cached ?? durable;
     if (!forceRefresh && cached) {
       cardsCache = { value: cached, expiresAt: cacheExpiry() };
       await writeDurableSnapshot("cards", cached);
       return cached;
+    }
+    if (durable && durableRecordIsFresh(durableRecord, forceRefresh)) {
+      cardsCache = { value: durable, expiresAt: cacheExpiry() };
+      await writeEdgeCache("cards", durable);
+      return durable;
     }
 
     try {
@@ -762,7 +825,7 @@ async function loadCards(token: string, forceRefresh = false) {
         cursor = { updatedAt: response.cursor.updatedAt, nmID: response.cursor.nmID };
       }
       cardsCache = { value: cards, expiresAt: cacheExpiry() };
-      await Promise.all([writeEdgeCache("cards", cards), writeDurableSnapshot("cards", cards)]);
+      await Promise.all([writeEdgeCache("cards", cards), writeDurableSnapshot("cards", cards, forceRefresh)]);
       return cards;
     } catch (error) {
       if (fallback) {
@@ -779,12 +842,18 @@ async function loadFeedbacks(token: string, forceRefresh = false) {
   if (!forceRefresh && feedbacksCache && feedbacksCache.expiresAt > Date.now()) return feedbacksCache.value;
   return dedupe(forceRefresh ? "feedbacks-manual" : "feedbacks", async () => {
     const cached = await readEdgeCache<WbFeedback[]>("feedbacks");
-    const durable = await readDurableSnapshot<WbFeedback[]>("feedbacks");
+    const durableRecord = await readDurableRecord<WbFeedback[]>("feedbacks");
+    const durable = durableRecord?.value ?? null;
     const fallback = feedbacksCache?.value ?? cached ?? durable;
     if (!forceRefresh && cached) {
       feedbacksCache = { value: cached, expiresAt: cacheExpiry() };
       await writeDurableSnapshot("feedbacks", cached);
       return cached;
+    }
+    if (durable && durableRecordIsFresh(durableRecord, forceRefresh)) {
+      feedbacksCache = { value: durable, expiresAt: cacheExpiry() };
+      await writeEdgeCache("feedbacks", durable);
+      return durable;
     }
 
     try {
@@ -800,7 +869,7 @@ async function loadFeedbacks(token: string, forceRefresh = false) {
       }
       const feedbacks = [...byId.values()];
       feedbacksCache = { value: feedbacks, expiresAt: cacheExpiry() };
-      await Promise.all([writeEdgeCache("feedbacks", feedbacks), writeDurableSnapshot("feedbacks", feedbacks)]);
+      await Promise.all([writeEdgeCache("feedbacks", feedbacks), writeDurableSnapshot("feedbacks", feedbacks, forceRefresh)]);
       return feedbacks;
     } catch (error) {
       if (fallback) {
@@ -837,17 +906,24 @@ async function loadFinanceRows(token: string, forceRefresh = false): Promise<Fin
     const cacheKey = "finance-details-all-v4";
     const slotCached = await readEdgeCache<FinanceRowsSnapshot>(cacheKey);
     const stableCached = await readStableEdgeCache<FinanceRowsSnapshot>(cacheKey);
-    const durableCached = await readDurableSnapshot<FinanceRowsSnapshot>(cacheKey);
+    const durableRecord = await readDurableRecord<FinanceRowsSnapshot>(cacheKey);
+    const durableCached = durableRecord?.value ?? null;
     const fallback = financeRowsCache?.value ?? slotCached ?? stableCached ?? durableCached;
     if (!forceRefresh && slotCached) {
       financeRowsCache = { value: slotCached, expiresAt: cacheExpiry() };
       await Promise.all([writeStableEdgeCache(cacheKey, slotCached), writeDurableSnapshot(cacheKey, slotCached)]);
       return slotCached;
     }
+    if (durableCached && durableRecordIsFresh(durableRecord, forceRefresh)) {
+      financeRowsCache = { value: durableCached, expiresAt: cacheExpiry() };
+      await writeEdgeCache(cacheKey, durableCached);
+      return durableCached;
+    }
     if (forceRefresh) {
       const recentCached = await readRecentEdgeCache<FinanceRowsSnapshot>(cacheKey);
       if (recentCached) {
         financeRowsCache = { value: recentCached, expiresAt: cacheExpiry() };
+        await writeDurableSnapshot(cacheKey, recentCached, true);
         return recentCached;
       }
     }
@@ -880,7 +956,7 @@ async function loadFinanceRows(token: string, forceRefresh = false): Promise<Fin
       } catch (error) {
         if (fallback) {
           financeRowsCache = { value: fallback, expiresAt: cacheExpiry() };
-          await writeEdgeCache(cacheKey, fallback);
+          await Promise.all([writeEdgeCache(cacheKey, fallback), writeDurableSnapshot(cacheKey, fallback, forceRefresh)]);
           return fallback;
         }
         throw error;
@@ -889,7 +965,7 @@ async function loadFinanceRows(token: string, forceRefresh = false): Promise<Fin
       if (!response.ok) {
         if (fallback) {
           financeRowsCache = { value: fallback, expiresAt: cacheExpiry() };
-          await writeEdgeCache(cacheKey, fallback);
+          await Promise.all([writeEdgeCache(cacheKey, fallback), writeDurableSnapshot(cacheKey, fallback, forceRefresh)]);
           return fallback;
         } else if (response.status === 429) {
           const peerValue = await waitForPeerCache<FinanceRowsSnapshot>(cacheKey);
@@ -913,7 +989,7 @@ async function loadFinanceRows(token: string, forceRefresh = false): Promise<Fin
       for (const row of refreshedRows) byRow.set(financeRowKey(row), row);
       const snapshot = { available: true, rows: [...byRow.values()] };
       financeRowsCache = { value: snapshot, expiresAt: cacheExpiry() };
-      await Promise.all([writeEdgeCache(cacheKey, snapshot), writeStableEdgeCache(cacheKey, snapshot), writeRecentEdgeCache(cacheKey, snapshot), writeDurableSnapshot(cacheKey, snapshot)]);
+      await Promise.all([writeEdgeCache(cacheKey, snapshot), writeStableEdgeCache(cacheKey, snapshot), writeRecentEdgeCache(cacheKey, snapshot), writeDurableSnapshot(cacheKey, snapshot, forceRefresh)]);
       return snapshot;
     } finally {
       if (hasLease) await releaseDurableRefreshLock(cacheKey);

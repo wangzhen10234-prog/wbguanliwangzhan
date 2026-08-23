@@ -32,6 +32,8 @@ export const productCosts = sqliteTable("product_costs", {
 export const wbSyncSnapshots = sqliteTable("wb_sync_snapshots", {
   cacheKey: text("cache_key").primaryKey(),
   payload: text("payload").notNull(),
+  syncSlot: text("sync_slot").notNull().default(""),
+  manualBucket: integer("manual_bucket").notNull().default(0),
   updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 });
 
