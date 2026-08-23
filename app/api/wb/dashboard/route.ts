@@ -228,6 +228,13 @@ function beijingDateKey(value: string | number | Date = new Date()) {
   }).format(date);
 }
 
+function wbSaleBeijingDateKey(value?: string) {
+  if (!value) return "";
+  // WB statistics timestamps omit the offset and use Moscow time (UTC+3).
+  const normalized = /(?:z|[+-]\d{2}:?\d{2})$/i.test(value) ? value : `${value}+03:00`;
+  return beijingDateKey(normalized);
+}
+
 function orderIdentity(value: unknown) {
   return String(value || "").trim().toLocaleLowerCase();
 }
@@ -1291,32 +1298,31 @@ export async function GET(request: Request) {
       })
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
     const detailedOrders = allDetailedOrders.filter((order) => !requestedWarehouse || order.warehouseName === requestedWarehouse);
-    const orderIdByIdentity = new Map<string, string>();
-    for (const order of detailedOrders) {
+    const orderByIdentity = new Map<string, (typeof allDetailedOrders)[number]>();
+    for (const order of allDetailedOrders) {
       for (const identity of [order.id, order.orderUid, order.rid].map(orderIdentity).filter(Boolean)) {
-        orderIdByIdentity.set(identity, order.id);
+        orderByIdentity.set(identity, order);
       }
     }
     const todayDate = beijingDateKey();
     const todaySignedOrderIds = new Set<string>();
     const todaySignedSaleKeys = new Set<string>();
     for (const sale of statistics.sales) {
-      if (todayDate < from || todayDate > to || beijingDateKey(sale.date) !== todayDate || isReturn(sale) || !matchesWarehouse(sale)) continue;
+      if (todayDate < from || todayDate > to || wbSaleBeijingDateKey(sale.date) !== todayDate || isReturn(sale)) continue;
       const identities = saleOrderIdentities(sale);
-      let matched = false;
+      let matchedOrder: (typeof allDetailedOrders)[number] | undefined;
       for (const identity of identities) {
-        const orderId = orderIdByIdentity.get(identity);
-        if (!orderId) continue;
-        todaySignedOrderIds.add(orderId);
-        matched = true;
+        matchedOrder = orderByIdentity.get(identity);
+        if (!matchedOrder) continue;
         break;
       }
-      if (!matched) {
+      if (matchedOrder) {
+        if (!requestedWarehouse || matchedOrder.warehouseName === requestedWarehouse) todaySignedOrderIds.add(matchedOrder.id);
+      } else if (matchesWarehouse(sale)) {
         const fallbackKey = identities[0] || `${Number(sale.nmId || 0)}|${sale.warehouseName || ""}|${sale.date || ""}|${sale.saleID || ""}`;
         todaySignedSaleKeys.add(fallbackKey);
       }
     }
-    const todaySignedApiCount = todaySignedOrderIds.size + todaySignedSaleKeys.size;
     const useDetailedMetrics = includeOrderDetails && fbsOrderResult.available;
     const detailedSummary = detailedOrders.reduce((summary, order) => {
       summary.orders += 1;
@@ -1633,7 +1639,7 @@ export async function GET(request: Request) {
       orderSummary: {
         ...detailedSummary,
         abnormalRate: detailedAbnormalRate,
-        todaySigned: todaySignedApiCount,
+        todaySigned: todaySignedOrderIds.size,
         todaySignedDate: todayDate,
         todaySignedOrderIds: [...todaySignedOrderIds],
         todaySignedUnmatched: todaySignedSaleKeys.size,
