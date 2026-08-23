@@ -148,6 +148,7 @@ type WorkerCacheStorage = CacheStorage & { default?: Cache };
 let statisticsCache: CacheEntry<{ orders: WbOrder[]; sales: WbSale[] }> | null = null;
 let stockCache: CacheEntry<WbStock[]> | null = null;
 let sellerStockCache: CacheEntry<SellerStockSnapshot> | null = null;
+let sellerWarehouseDirectoryCache: CacheEntry<SellerStockSnapshot> | null = null;
 let fbsOrderCache: CacheEntry<FbsOrderSnapshot> | null = null;
 let balanceCache: CacheEntry<{ current?: number; for_withdraw?: number }> | null = null;
 let cardsCache: CacheEntry<WbCard[]> | null = null;
@@ -162,6 +163,10 @@ const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const ALL_HISTORY_START = "2024-01-29";
 const JSON_HEADERS = { "Content-Type": "application/json; charset=utf-8" };
 const EDGE_CACHE_BASE = "https://wb-insight-cache.invalid/v2";
+const STABLE_CACHE_BASE = "https://wb-insight-cache.invalid/stable-v1";
+const RECENT_CACHE_BASE = "https://wb-insight-cache.invalid/recent-v1";
+const HISTORY_REFRESH_DAYS = 120;
+const RECENT_REFRESH_TTL_SECONDS = 90;
 
 function syncSchedule(now = Date.now()) {
   const beijingNow = new Date(now + BEIJING_OFFSET_MS);
@@ -240,6 +245,45 @@ async function writeEdgeCache(key: string, value: unknown) {
   }
 }
 
+async function readNamedEdgeCache<T>(base: string, key: string): Promise<T | null> {
+  try {
+    const cache = edgeCache();
+    if (!cache) return null;
+    const response = await cache.match(new Request(`${base}/${key}`));
+    return response ? await response.json() as T : null;
+  } catch {
+    return null;
+  }
+}
+
+async function writeNamedEdgeCache(base: string, key: string, value: unknown, maxAge: number) {
+  try {
+    const cache = edgeCache();
+    if (!cache) return;
+    await cache.put(new Request(`${base}/${key}`), new Response(JSON.stringify(value), {
+      headers: { "Content-Type": "application/json", "Cache-Control": `public, max-age=${maxAge}` },
+    }));
+  } catch {
+    // Local development runtimes may not expose the Cloudflare default cache.
+  }
+}
+
+function readStableEdgeCache<T>(key: string) {
+  return readNamedEdgeCache<T>(STABLE_CACHE_BASE, key);
+}
+
+function writeStableEdgeCache(key: string, value: unknown) {
+  return writeNamedEdgeCache(STABLE_CACHE_BASE, key, value, 35 * 24 * 60 * 60);
+}
+
+function readRecentEdgeCache<T>(key: string) {
+  return readNamedEdgeCache<T>(RECENT_CACHE_BASE, key);
+}
+
+function writeRecentEdgeCache(key: string, value: unknown) {
+  return writeNamedEdgeCache(RECENT_CACHE_BASE, key, value, RECENT_REFRESH_TTL_SECONDS);
+}
+
 async function dedupe<T>(key: string, loader: () => Promise<T>): Promise<T> {
   const existing = pendingLoads.get(key) as Promise<T> | undefined;
   if (existing) return existing;
@@ -284,8 +328,9 @@ async function wbRequest<T>(url: string, token: string, init?: RequestInit): Pro
 async function loadStatistics(token: string, forceRefresh = false) {
   if (!forceRefresh && statisticsCache && statisticsCache.expiresAt > Date.now()) return statisticsCache.value;
   return dedupe(forceRefresh ? "statistics-manual" : "statistics", async () => {
-    const cached = forceRefresh ? null : await readEdgeCache<{ orders: WbOrder[]; sales: WbSale[] }>("statistics");
-    if (cached) {
+    const cached = await readEdgeCache<{ orders: WbOrder[]; sales: WbSale[] }>("statistics");
+    const fallback = statisticsCache?.value ?? cached;
+    if (!forceRefresh && cached) {
       statisticsCache = { value: cached, expiresAt: cacheExpiry() };
       return cached;
     }
@@ -299,12 +344,17 @@ async function loadStatistics(token: string, forceRefresh = false) {
         wbRequest<WbSale[]>(`${base}/sales?dateFrom=${start}&flag=0`, token),
       ]);
     } catch (error) {
-      if (Number((error as { status?: number }).status || 0) === 429) {
+      if (Number((error as { status?: number }).status || 0) === 429 && !fallback) {
         const peerValue = await waitForPeerCache<{ orders: WbOrder[]; sales: WbSale[] }>("statistics");
         if (peerValue) {
           statisticsCache = { value: peerValue, expiresAt: cacheExpiry() };
           return peerValue;
         }
+      }
+      if (fallback) {
+        statisticsCache = { value: fallback, expiresAt: cacheExpiry() };
+        await writeEdgeCache("statistics", fallback);
+        return fallback;
       }
       throw error;
     }
@@ -317,103 +367,136 @@ async function loadStatistics(token: string, forceRefresh = false) {
 async function loadStocks(token: string, forceRefresh = false) {
   if (!forceRefresh && stockCache && stockCache.expiresAt > Date.now()) return stockCache.value;
   return dedupe(forceRefresh ? "stocks-manual" : "stocks", async () => {
-    const cached = forceRefresh ? null : await readEdgeCache<WbStock[]>("stocks");
-    if (cached) {
+    const cached = await readEdgeCache<WbStock[]>("stocks");
+    const fallback = stockCache?.value ?? cached;
+    if (!forceRefresh && cached) {
       stockCache = { value: cached, expiresAt: cacheExpiry() };
       return cached;
     }
-    const response = await wbRequest<{ data?: { items?: WbStock[] } }>(
-      "https://seller-analytics-api.wildberries.ru/api/analytics/v1/stocks-report/wb-warehouses",
-      token,
-      { method: "POST", body: JSON.stringify({ nmIds: [], limit: 250000, offset: 0 }) },
-    );
-    const stocks = response.data?.items ?? [];
-    stockCache = { value: stocks, expiresAt: cacheExpiry() };
-    await writeEdgeCache("stocks", stocks);
-    return stocks;
+    try {
+      const response = await wbRequest<{ data?: { items?: WbStock[] } }>(
+        "https://seller-analytics-api.wildberries.ru/api/analytics/v1/stocks-report/wb-warehouses",
+        token,
+        { method: "POST", body: JSON.stringify({ nmIds: [], limit: 250000, offset: 0 }) },
+      );
+      const stocks = response.data?.items ?? [];
+      stockCache = { value: stocks, expiresAt: cacheExpiry() };
+      await writeEdgeCache("stocks", stocks);
+      return stocks;
+    } catch (error) {
+      if (fallback) {
+        stockCache = { value: fallback, expiresAt: cacheExpiry() };
+        await writeEdgeCache("stocks", fallback);
+        return fallback;
+      }
+      throw error;
+    }
+  });
+}
+
+async function loadSellerWarehouseDirectory(token: string, forceRefresh = false) {
+  if (!forceRefresh && sellerWarehouseDirectoryCache && sellerWarehouseDirectoryCache.expiresAt > Date.now()) return sellerWarehouseDirectoryCache.value;
+  return dedupe(forceRefresh ? "seller-warehouses-manual" : "seller-warehouses", async () => {
+    const cacheKey = "seller-warehouses";
+    const cached = await readEdgeCache<SellerStockSnapshot>(cacheKey);
+    if (!forceRefresh && cached) {
+      sellerWarehouseDirectoryCache = { value: cached, expiresAt: cacheExpiry() };
+      return cached;
+    }
+    const fallback = sellerWarehouseDirectoryCache?.value ?? cached;
+    try {
+      const base = "https://marketplace-api.wildberries.ru/api/v3";
+      const [warehouses, offices] = await Promise.all([
+        wbRequest<SellerWarehouse[]>(`${base}/warehouses`, token),
+        wbRequest<Array<{ id?: number; name?: string }>>(`${base}/offices`, token),
+      ]);
+      const officeNames = new Map(offices.map((office) => [Number(office.id || 0), office.name || ""]));
+      const result = { warehouses: warehouses.map((warehouse) => ({ ...warehouse, officeName: officeNames.get(Number(warehouse.officeId || 0)) || "", stocks: [] })) };
+      sellerWarehouseDirectoryCache = { value: result, expiresAt: cacheExpiry() };
+      await writeEdgeCache(cacheKey, result);
+      return result;
+    } catch (error) {
+      if (fallback) {
+        sellerWarehouseDirectoryCache = { value: fallback, expiresAt: cacheExpiry() };
+        await writeEdgeCache(cacheKey, fallback);
+        return fallback;
+      }
+      throw error;
+    }
   });
 }
 
 async function loadSellerStocks(token: string, cards: WbCard[], forceRefresh = false) {
   if (!forceRefresh && sellerStockCache && sellerStockCache.expiresAt > Date.now()) return sellerStockCache.value;
   return dedupe(forceRefresh ? "seller-stocks-manual" : "seller-stocks", async () => {
-    const cached = forceRefresh ? null : await readEdgeCache<SellerStockSnapshot>("seller-stocks");
-    if (cached) {
+    const cached = await readEdgeCache<SellerStockSnapshot>("seller-stocks");
+    const fallback = sellerStockCache?.value ?? cached;
+    if (!forceRefresh && cached) {
       sellerStockCache = { value: cached, expiresAt: cacheExpiry() };
       return cached;
     }
+    try {
+      const base = "https://marketplace-api.wildberries.ru/api/v3";
+      const directory = await loadSellerWarehouseDirectory(token, forceRefresh);
+      const chrtIds = [...new Set(cards.flatMap((card) => card.sizes?.map((size) => Number(size.chrtID || 0)) ?? []).filter(Boolean))];
+      const result: SellerStockSnapshot = { warehouses: [] };
 
-    const base = "https://marketplace-api.wildberries.ru/api/v3";
-    const [warehouses, offices] = await Promise.all([
-      wbRequest<SellerWarehouse[]>(`${base}/warehouses`, token),
-      wbRequest<Array<{ id?: number; name?: string }>>(`${base}/offices`, token),
-    ]);
-    const officeNames = new Map(offices.map((office) => [Number(office.id || 0), office.name || ""]));
-    const chrtIds = [...new Set(cards.flatMap((card) => card.sizes?.map((size) => Number(size.chrtID || 0)) ?? []).filter(Boolean))];
-    const result: SellerStockSnapshot = { warehouses: [] };
-
-    for (const warehouse of warehouses) {
-      const warehouseId = Number(warehouse.id || 0);
-      if (!warehouseId) continue;
-      const stocks: SellerStock[] = [];
-      for (let offset = 0; offset < chrtIds.length; offset += 1000) {
-        const response = await wbRequest<{ stocks?: SellerStock[] }>(
-          `${base}/stocks/${warehouseId}`,
-          token,
-          { method: "POST", body: JSON.stringify({ chrtIds: chrtIds.slice(offset, offset + 1000) }) },
-        );
-        stocks.push(...(response.stocks ?? []));
-        if (offset + 1000 < chrtIds.length) await new Promise((resolve) => setTimeout(resolve, 220));
+      for (const warehouse of directory.warehouses) {
+        const warehouseId = Number(warehouse.id || 0);
+        if (!warehouseId) continue;
+        const stocks: SellerStock[] = [];
+        for (let offset = 0; offset < chrtIds.length; offset += 1000) {
+          const response = await wbRequest<{ stocks?: SellerStock[] }>(
+            `${base}/stocks/${warehouseId}`,
+            token,
+            { method: "POST", body: JSON.stringify({ chrtIds: chrtIds.slice(offset, offset + 1000) }) },
+          );
+          stocks.push(...(response.stocks ?? []));
+          if (offset + 1000 < chrtIds.length) await new Promise((resolve) => setTimeout(resolve, 220));
+        }
+        result.warehouses.push({ ...warehouse, stocks });
       }
-      result.warehouses.push({ ...warehouse, officeName: officeNames.get(Number(warehouse.officeId || 0)) || "", stocks });
-    }
 
-    sellerStockCache = { value: result, expiresAt: cacheExpiry() };
-    await writeEdgeCache("seller-stocks", result);
-    return result;
+      sellerStockCache = { value: result, expiresAt: cacheExpiry() };
+      await writeEdgeCache("seller-stocks", result);
+      return result;
+    } catch (error) {
+      if (fallback) {
+        sellerStockCache = { value: fallback, expiresAt: cacheExpiry() };
+        await writeEdgeCache("seller-stocks", fallback);
+        return fallback;
+      }
+      throw error;
+    }
   });
 }
 
-async function loadFbsOrders(token: string, forceRefresh = false) {
-  if (!forceRefresh && fbsOrderCache && fbsOrderCache.expiresAt > Date.now()) return fbsOrderCache.value;
-  return dedupe(forceRefresh ? "fbs-orders-all-manual" : "fbs-orders-all", async () => {
-    const cacheKey = "fbs-orders-all-v2";
-    const cached = forceRefresh ? null : await readEdgeCache<FbsOrderSnapshot>(cacheKey);
-    if (cached) {
-      fbsOrderCache = { value: cached, expiresAt: cacheExpiry() };
-      return cached;
+async function fetchFbsOrders(token: string, start: Date, end: Date) {
+  const base = "https://marketplace-api.wildberries.ru/api/v3";
+  const byOrder = new Map<string, FbsOrder>();
+  let requestCount = 0;
+  for (let chunkStart = start.getTime(); chunkStart <= end.getTime(); chunkStart += 30 * DAY_MS) {
+    const chunkEnd = Math.min(chunkStart + 30 * DAY_MS - 1, end.getTime());
+    let next = 0;
+    for (let page = 0; page < 100; page += 1) {
+      if (requestCount > 0) await new Promise((resolve) => setTimeout(resolve, 220));
+      requestCount += 1;
+      const params = new URLSearchParams({
+        limit: "1000",
+        next: String(next),
+        dateFrom: String(Math.floor(chunkStart / 1000)),
+        dateTo: String(Math.floor(chunkEnd / 1000)),
+      });
+      const response = await wbRequest<{ next?: number; orders?: FbsOrder[] }>(`${base}/orders?${params}`, token);
+      const batch = response.orders ?? [];
+      for (const order of batch) byOrder.set(order.orderUid || String(order.id), order);
+      if (batch.length < 1000 || !response.next || response.next === next) break;
+      next = response.next;
     }
+  }
 
-    const base = "https://marketplace-api.wildberries.ru/api/v3";
-    const now = Date.now();
-    const end = new Date(now);
-    const start = new Date(`${ALL_HISTORY_START}T00:00:00Z`);
-    start.setUTCHours(0, 0, 0, 0);
-    end.setUTCHours(23, 59, 59, 999);
-    const byOrder = new Map<string, FbsOrder>();
-    let requestCount = 0;
-
-    for (let chunkStart = start.getTime(); chunkStart <= end.getTime(); chunkStart += 30 * DAY_MS) {
-      const chunkEnd = Math.min(chunkStart + 30 * DAY_MS - 1, end.getTime());
-      let next = 0;
-      for (let page = 0; page < 100; page += 1) {
-        if (requestCount > 0) await new Promise((resolve) => setTimeout(resolve, 220));
-        requestCount += 1;
-        const params = new URLSearchParams({
-          limit: "1000",
-          next: String(next),
-          dateFrom: String(Math.floor(chunkStart / 1000)),
-          dateTo: String(Math.floor(chunkEnd / 1000)),
-        });
-        const response = await wbRequest<{ next?: number; orders?: FbsOrder[] }>(`${base}/orders?${params}`, token);
-        const batch = response.orders ?? [];
-        for (const order of batch) byOrder.set(order.orderUid || String(order.id), order);
-        if (batch.length < 1000 || !response.next || response.next === next) break;
-        next = response.next;
-      }
-    }
-
-    const orders = [...byOrder.values()];
+  const orders = [...byOrder.values()];
+  if (orders.length) {
     const statusById = new Map<string, { supplierStatus?: string; wbStatus?: string }>();
     for (let offset = 0; offset < orders.length; offset += 1000) {
       if (requestCount > 0) await new Promise((resolve) => setTimeout(resolve, 220));
@@ -428,11 +511,60 @@ async function loadFbsOrders(token: string, forceRefresh = false) {
       for (const status of response.orders ?? []) statusById.set(String(status.id), status);
     }
     for (const order of orders) Object.assign(order, statusById.get(String(order.id)) ?? {});
+  }
+  return orders;
+}
 
-    const result = { available: true, orders };
-    fbsOrderCache = { value: result, expiresAt: cacheExpiry() };
-    await writeEdgeCache(cacheKey, result);
-    return result;
+function fbsOrderKey(order: FbsOrder) {
+  return order.orderUid || String(order.id);
+}
+
+async function loadFbsOrders(token: string, forceRefresh = false) {
+  if (!forceRefresh && fbsOrderCache && fbsOrderCache.expiresAt > Date.now()) return fbsOrderCache.value;
+  return dedupe(forceRefresh ? "fbs-orders-all-manual" : "fbs-orders-all", async () => {
+    const cacheKey = "fbs-orders-all-v2";
+    const slotCached = await readEdgeCache<FbsOrderSnapshot>(cacheKey);
+    const stableCached = await readStableEdgeCache<FbsOrderSnapshot>(cacheKey);
+    const fallback = fbsOrderCache?.value ?? slotCached ?? stableCached;
+    if (!forceRefresh && slotCached) {
+      fbsOrderCache = { value: slotCached, expiresAt: cacheExpiry() };
+      await writeStableEdgeCache(cacheKey, slotCached);
+      return slotCached;
+    }
+    if (forceRefresh) {
+      const recentCached = await readRecentEdgeCache<FbsOrderSnapshot>(cacheKey);
+      if (recentCached) {
+        fbsOrderCache = { value: recentCached, expiresAt: cacheExpiry() };
+        return recentCached;
+      }
+    }
+
+    const end = new Date();
+    end.setUTCHours(23, 59, 59, 999);
+    const start = fallback
+      ? new Date(Math.max(new Date(`${ALL_HISTORY_START}T00:00:00Z`).getTime(), end.getTime() - (HISTORY_REFRESH_DAYS - 1) * DAY_MS))
+      : new Date(`${ALL_HISTORY_START}T00:00:00Z`);
+    start.setUTCHours(0, 0, 0, 0);
+
+    try {
+      const refreshedOrders = await fetchFbsOrders(token, start, end);
+      const byOrder = new Map<string, FbsOrder>();
+      for (const order of fallback?.orders ?? []) {
+        if (new Date(order.createdAt || 0).getTime() < start.getTime()) byOrder.set(fbsOrderKey(order), order);
+      }
+      for (const order of refreshedOrders) byOrder.set(fbsOrderKey(order), order);
+      const result = { available: true, orders: [...byOrder.values()] };
+      fbsOrderCache = { value: result, expiresAt: cacheExpiry() };
+      await Promise.all([writeEdgeCache(cacheKey, result), writeStableEdgeCache(cacheKey, result), writeRecentEdgeCache(cacheKey, result)]);
+      return result;
+    } catch (error) {
+      if (fallback) {
+        fbsOrderCache = { value: fallback, expiresAt: cacheExpiry() };
+        await writeEdgeCache(cacheKey, fallback);
+        return fallback;
+      }
+      throw error;
+    }
   });
 }
 
@@ -485,81 +617,111 @@ function resolveSellerWarehouseName(warehouse: SellerWarehouse & { officeName?: 
 async function loadBalance(token: string, forceRefresh = false) {
   if (!forceRefresh && balanceCache && balanceCache.expiresAt > Date.now()) return balanceCache.value;
   return dedupe(forceRefresh ? "balance-manual" : "balance", async () => {
-    const cached = forceRefresh ? null : await readEdgeCache<{ current?: number; for_withdraw?: number }>("balance");
-    if (cached) {
+    const cached = await readEdgeCache<{ current?: number; for_withdraw?: number }>("balance");
+    const fallback = balanceCache?.value ?? cached;
+    if (!forceRefresh && cached) {
       balanceCache = { value: cached, expiresAt: cacheExpiry() };
       return cached;
     }
-    const balance = await wbRequest<{ current?: number; for_withdraw?: number }>(
-      "https://finance-api.wildberries.ru/api/v1/account/balance",
-      token,
-    );
-    balanceCache = { value: balance, expiresAt: cacheExpiry() };
-    await writeEdgeCache("balance", balance);
-    return balance;
+    try {
+      const balance = await wbRequest<{ current?: number; for_withdraw?: number }>(
+        "https://finance-api.wildberries.ru/api/v1/account/balance",
+        token,
+      );
+      balanceCache = { value: balance, expiresAt: cacheExpiry() };
+      await writeEdgeCache("balance", balance);
+      return balance;
+    } catch (error) {
+      if (fallback) {
+        balanceCache = { value: fallback, expiresAt: cacheExpiry() };
+        await writeEdgeCache("balance", fallback);
+        return fallback;
+      }
+      throw error;
+    }
   });
 }
 
 async function loadCards(token: string, forceRefresh = false) {
   if (!forceRefresh && cardsCache && cardsCache.expiresAt > Date.now()) return cardsCache.value;
   return dedupe(forceRefresh ? "cards-manual" : "cards", async () => {
-    const cached = forceRefresh ? null : await readEdgeCache<WbCard[]>("cards");
-    if (cached) {
+    const cached = await readEdgeCache<WbCard[]>("cards");
+    const fallback = cardsCache?.value ?? cached;
+    if (!forceRefresh && cached) {
       cardsCache = { value: cached, expiresAt: cacheExpiry() };
       return cached;
     }
 
-    const cards: WbCard[] = [];
-    let cursor: { updatedAt?: string; nmID?: number } = {};
-    for (let page = 0; page < 50; page += 1) {
-      const response = await wbRequest<{ cards?: WbCard[]; cursor?: { updatedAt?: string; nmID?: number; total?: number } }>(
-        "https://content-api.wildberries.ru/content/v2/get/cards/list",
-        token,
-        {
-          method: "POST",
-          body: JSON.stringify({
-            settings: {
-              sort: { ascending: true },
-              cursor: { limit: 100, ...cursor },
-              filter: { withPhoto: -1 },
-            },
-          }),
-        },
-      );
-      const batch = response.cards ?? [];
-      cards.push(...batch);
-      if (batch.length < 100 || !response.cursor?.updatedAt || !response.cursor?.nmID) break;
-      cursor = { updatedAt: response.cursor.updatedAt, nmID: response.cursor.nmID };
+    try {
+      const cards: WbCard[] = [];
+      let cursor: { updatedAt?: string; nmID?: number } = {};
+      for (let page = 0; page < 50; page += 1) {
+        const response = await wbRequest<{ cards?: WbCard[]; cursor?: { updatedAt?: string; nmID?: number; total?: number } }>(
+          "https://content-api.wildberries.ru/content/v2/get/cards/list",
+          token,
+          {
+            method: "POST",
+            body: JSON.stringify({
+              settings: {
+                sort: { ascending: true },
+                cursor: { limit: 100, ...cursor },
+                filter: { withPhoto: -1 },
+              },
+            }),
+          },
+        );
+        const batch = response.cards ?? [];
+        cards.push(...batch);
+        if (batch.length < 100 || !response.cursor?.updatedAt || !response.cursor?.nmID) break;
+        cursor = { updatedAt: response.cursor.updatedAt, nmID: response.cursor.nmID };
+      }
+      cardsCache = { value: cards, expiresAt: cacheExpiry() };
+      await writeEdgeCache("cards", cards);
+      return cards;
+    } catch (error) {
+      if (fallback) {
+        cardsCache = { value: fallback, expiresAt: cacheExpiry() };
+        await writeEdgeCache("cards", fallback);
+        return fallback;
+      }
+      throw error;
     }
-    cardsCache = { value: cards, expiresAt: cacheExpiry() };
-    await writeEdgeCache("cards", cards);
-    return cards;
   });
 }
 
 async function loadFeedbacks(token: string, forceRefresh = false) {
   if (!forceRefresh && feedbacksCache && feedbacksCache.expiresAt > Date.now()) return feedbacksCache.value;
   return dedupe(forceRefresh ? "feedbacks-manual" : "feedbacks", async () => {
-    const cached = forceRefresh ? null : await readEdgeCache<WbFeedback[]>("feedbacks");
-    if (cached) {
+    const cached = await readEdgeCache<WbFeedback[]>("feedbacks");
+    const fallback = feedbacksCache?.value ?? cached;
+    if (!forceRefresh && cached) {
       feedbacksCache = { value: cached, expiresAt: cacheExpiry() };
       return cached;
     }
 
-    const base = "https://feedbacks-api.wildberries.ru/api/v1/feedbacks";
-    const [answered, unanswered] = await Promise.all([
-      wbRequest<{ data?: { feedbacks?: WbFeedback[] } }>(`${base}?isAnswered=true&take=5000&skip=0&order=dateDesc`, token),
-      wbRequest<{ data?: { feedbacks?: WbFeedback[] } }>(`${base}?isAnswered=false&take=5000&skip=0&order=dateDesc`, token),
-    ]);
-    const byId = new Map<string, WbFeedback>();
-    for (const feedback of [...(answered.data?.feedbacks ?? []), ...(unanswered.data?.feedbacks ?? [])]) {
-      const key = feedback.id || `${feedback.productDetails?.nmId}-${feedback.createdDate}-${feedback.productValuation}`;
-      byId.set(key, feedback);
+    try {
+      const base = "https://feedbacks-api.wildberries.ru/api/v1/feedbacks";
+      const [answered, unanswered] = await Promise.all([
+        wbRequest<{ data?: { feedbacks?: WbFeedback[] } }>(`${base}?isAnswered=true&take=5000&skip=0&order=dateDesc`, token),
+        wbRequest<{ data?: { feedbacks?: WbFeedback[] } }>(`${base}?isAnswered=false&take=5000&skip=0&order=dateDesc`, token),
+      ]);
+      const byId = new Map<string, WbFeedback>();
+      for (const feedback of [...(answered.data?.feedbacks ?? []), ...(unanswered.data?.feedbacks ?? [])]) {
+        const key = feedback.id || `${feedback.productDetails?.nmId}-${feedback.createdDate}-${feedback.productValuation}`;
+        byId.set(key, feedback);
+      }
+      const feedbacks = [...byId.values()];
+      feedbacksCache = { value: feedbacks, expiresAt: cacheExpiry() };
+      await writeEdgeCache("feedbacks", feedbacks);
+      return feedbacks;
+    } catch (error) {
+      if (fallback) {
+        feedbacksCache = { value: fallback, expiresAt: cacheExpiry() };
+        await writeEdgeCache("feedbacks", fallback);
+        return fallback;
+      }
+      throw error;
     }
-    const feedbacks = [...byId.values()];
-    feedbacksCache = { value: feedbacks, expiresAt: cacheExpiry() };
-    await writeEdgeCache("feedbacks", feedbacks);
-    return feedbacks;
   });
 }
 
@@ -577,54 +739,85 @@ function signedFinanceValue(value: unknown, returned: boolean) {
   return returned ? -Math.abs(number) : number;
 }
 
+function financeRowKey(row: WbFinanceRow) {
+  return String(row.rrdId || `${row.srid || row.orderUid || ""}|${row.nmId || 0}|${row.rrDate || row.saleDt || row.orderDt || ""}|${row.sellerOperName || row.docTypeName || ""}`);
+}
+
 async function loadFinanceRows(token: string, forceRefresh = false): Promise<FinanceRowsSnapshot> {
   if (!forceRefresh && financeRowsCache && financeRowsCache.expiresAt > Date.now()) return financeRowsCache.value;
   return dedupe(forceRefresh ? "finance-details-all-manual" : "finance-details-all", async () => {
     const cacheKey = "finance-details-all-v4";
-    const cached = forceRefresh ? null : await readEdgeCache<FinanceRowsSnapshot>(cacheKey);
-    if (cached) {
-      financeRowsCache = { value: cached, expiresAt: cacheExpiry() };
-      return cached;
+    const slotCached = await readEdgeCache<FinanceRowsSnapshot>(cacheKey);
+    const stableCached = await readStableEdgeCache<FinanceRowsSnapshot>(cacheKey);
+    const fallback = financeRowsCache?.value ?? slotCached ?? stableCached;
+    if (!forceRefresh && slotCached) {
+      financeRowsCache = { value: slotCached, expiresAt: cacheExpiry() };
+      await writeStableEdgeCache(cacheKey, slotCached);
+      return slotCached;
+    }
+    if (forceRefresh) {
+      const recentCached = await readRecentEdgeCache<FinanceRowsSnapshot>(cacheKey);
+      if (recentCached) {
+        financeRowsCache = { value: recentCached, expiresAt: cacheExpiry() };
+        return recentCached;
+      }
     }
 
     const dateTo = new Date().toISOString().slice(0, 10);
-    const dateFrom = ALL_HISTORY_START;
+    const dateFrom = fallback
+      ? new Date(Math.max(new Date(`${ALL_HISTORY_START}T00:00:00Z`).getTime(), Date.now() - (HISTORY_REFRESH_DAYS - 1) * DAY_MS)).toISOString().slice(0, 10)
+      : ALL_HISTORY_START;
 
-    const response = await fetch("https://finance-api.wildberries.ru/api/finance/v1/sales-reports/detailed", {
-      method: "POST",
-      cache: "no-store",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: "application/json",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ dateFrom, dateTo, limit: 100000, rrdId: 0, period: "daily" }),
-      signal: AbortSignal.timeout(35_000),
-    });
-
-    if (response.status === 204) {
-      const empty = { available: true, rows: [] };
-      financeRowsCache = { value: empty, expiresAt: cacheExpiry() };
-      await writeEdgeCache(cacheKey, empty);
-      return empty;
-    }
-    if (!response.ok) {
-      if (response.status === 429) {
-        const peerValue = await waitForPeerCache<FinanceRowsSnapshot>(cacheKey);
-        if (peerValue) {
-          financeRowsCache = { value: peerValue, expiresAt: cacheExpiry() };
-          return peerValue;
-        }
+    let response: Response;
+    try {
+      response = await fetch("https://finance-api.wildberries.ru/api/finance/v1/sales-reports/detailed", {
+        method: "POST",
+        cache: "no-store",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ dateFrom, dateTo, limit: 100000, rrdId: 0, period: "daily" }),
+        signal: AbortSignal.timeout(25_000),
+      });
+    } catch (error) {
+      if (fallback) {
+        financeRowsCache = { value: fallback, expiresAt: cacheExpiry() };
+        await writeEdgeCache(cacheKey, fallback);
+        return fallback;
       }
-      const error = new Error(`WB finance request failed with status ${response.status}`);
-      Object.assign(error, { status: response.status });
       throw error;
     }
 
-    const rows = await response.json() as WbFinanceRow[];
-    const snapshot = { available: true, rows };
+    if (!response.ok) {
+      if (fallback) {
+        financeRowsCache = { value: fallback, expiresAt: cacheExpiry() };
+        await writeEdgeCache(cacheKey, fallback);
+        return fallback;
+      } else if (response.status === 429) {
+        const peerValue = await waitForPeerCache<FinanceRowsSnapshot>(cacheKey);
+        if (peerValue) return peerValue;
+        const error = new Error("WB finance request failed with status 429");
+        Object.assign(error, { status: 429 });
+        throw error;
+      } else {
+        const error = new Error(`WB finance request failed with status ${response.status}`);
+        Object.assign(error, { status: response.status });
+        throw error;
+      }
+    }
+
+    const refreshedRows = response.status === 204 ? [] : await response.json() as WbFinanceRow[];
+    const byRow = new Map<string, WbFinanceRow>();
+    for (const row of fallback?.rows ?? []) {
+      const rowDate = dayKey(row.rrDate || row.saleDt || row.orderDt);
+      if (rowDate && rowDate < dateFrom) byRow.set(financeRowKey(row), row);
+    }
+    for (const row of refreshedRows) byRow.set(financeRowKey(row), row);
+    const snapshot = { available: true, rows: [...byRow.values()] };
     financeRowsCache = { value: snapshot, expiresAt: cacheExpiry() };
-    await writeEdgeCache(cacheKey, snapshot);
+    await Promise.all([writeEdgeCache(cacheKey, snapshot), writeStableEdgeCache(cacheKey, snapshot), writeRecentEdgeCache(cacheKey, snapshot)]);
     return snapshot;
   });
 }
@@ -766,6 +959,13 @@ export async function GET(request: Request) {
   const includeOrderDetails = url.searchParams.get("includeOrders") === "true";
   const includeFinanceDetails = url.searchParams.get("includeFinance") === "true";
   const forceRefresh = url.searchParams.get("refresh") === "manual";
+  const view = url.searchParams.get("view") || "overview";
+  const needsStockReport = view === "overview" || view === "products" || view === "stock";
+  const needsBalance = view === "overview" || view === "finance";
+  const needsCards = view !== "finance";
+  const needsFeedbacks = view === "overview" || view === "products";
+  const needsSellerStocks = view === "overview" || view === "products" || view === "stock";
+  const needsSellerWarehouseDirectory = view === "sales";
   if (!DATE_PATTERN.test(from) || !DATE_PATTERN.test(to)) return json({ error: "日期格式无效" }, 400);
   if (requestedWarehouse.length > 160) return json({ error: "仓库名称无效" }, 400);
 
@@ -782,7 +982,9 @@ export async function GET(request: Request) {
   if (toValue > Date.now() + DAY_MS) return json({ error: "不能查询未来日期" }, 400);
 
   try {
-    const cardsPromise = loadCards(token, forceRefresh).catch(() => [] as WbCard[]);
+    const cardsPromise = needsCards
+      ? loadCards(token, forceRefresh).catch(() => [] as WbCard[])
+      : Promise.resolve([] as WbCard[]);
     const fbsOrdersPromise = includeOrderDetails
       ? loadFbsOrders(token, forceRefresh).catch(() => ({ available: false, orders: [] } as FbsOrderSnapshot))
       : Promise.resolve({ available: false, orders: [] } as FbsOrderSnapshot);
@@ -792,11 +994,15 @@ export async function GET(request: Request) {
       : Promise.resolve({ available: false, rows: [] } as FinanceRowsSnapshot);
     const [statistics, stockResult, balanceResult, cardsResult, feedbacksResult, sellerStockResult, fbsOrderResult, financeRowsResult] = await Promise.all([
       loadStatistics(token, forceRefresh),
-      loadStocks(token, forceRefresh).catch(() => [] as WbStock[]),
-      loadBalance(token, forceRefresh).catch(() => ({} as { current?: number; for_withdraw?: number })),
+      needsStockReport ? loadStocks(token, forceRefresh).catch(() => [] as WbStock[]) : Promise.resolve([] as WbStock[]),
+      needsBalance ? loadBalance(token, forceRefresh).catch(() => ({} as { current?: number; for_withdraw?: number })) : Promise.resolve({} as { current?: number; for_withdraw?: number }),
       cardsPromise,
-      loadFeedbacks(token, forceRefresh).catch(() => [] as WbFeedback[]),
-      cardsPromise.then((cards) => loadSellerStocks(token, cards, forceRefresh)).catch(() => ({ warehouses: [] } as SellerStockSnapshot)),
+      needsFeedbacks ? loadFeedbacks(token, forceRefresh).catch(() => [] as WbFeedback[]) : Promise.resolve([] as WbFeedback[]),
+      needsSellerStocks
+        ? cardsPromise.then((cards) => loadSellerStocks(token, cards, forceRefresh)).catch(() => ({ warehouses: [] } as SellerStockSnapshot))
+        : needsSellerWarehouseDirectory
+          ? loadSellerWarehouseDirectory(token, forceRefresh).catch(() => ({ warehouses: [] } as SellerStockSnapshot))
+          : Promise.resolve({ warehouses: [] } as SellerStockSnapshot),
       fbsOrdersPromise,
       financeRowsPromise,
     ]);

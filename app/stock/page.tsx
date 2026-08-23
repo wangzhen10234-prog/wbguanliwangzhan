@@ -28,7 +28,7 @@ export default function StockPage() {
 
   useEffect(() => {
     const controller = new AbortController();
-    const params = new URLSearchParams({ from, to: today, includeOrders: "true" });
+    const params = new URLSearchParams({ from, to: today, view: "stock" });
     if (warehouse) params.set("warehouse", warehouse);
     if (forceRefreshRef.current) params.set("refresh", "manual");
     forceRefreshRef.current = false;

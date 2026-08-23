@@ -26,7 +26,7 @@ export default function FinancePage() {
 
   useEffect(() => {
     const controller = new AbortController();
-    const params = new URLSearchParams({ from, to: today });
+    const params = new URLSearchParams({ from, to: today, view: "finance" });
     if (forceRefreshRef.current) params.set("refresh", "manual");
     forceRefreshRef.current = false;
     fetch(`/api/wb/dashboard?${params.toString()}`, { signal: controller.signal, cache: "no-store" })

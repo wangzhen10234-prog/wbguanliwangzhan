@@ -179,7 +179,7 @@ export default function SalesPage() {
 
   useEffect(() => {
     const controller = new AbortController();
-    const params = new URLSearchParams({ from: periodStart, to: periodEnd, includeOrders: "true", includeFinance: "true" });
+    const params = new URLSearchParams({ from: periodStart, to: periodEnd, includeOrders: "true", includeFinance: "true", view: "sales" });
     if (warehouse) params.set("warehouse", warehouse);
     if (forceRefreshRef.current) params.set("refresh", "manual");
     forceRefreshRef.current = false;
