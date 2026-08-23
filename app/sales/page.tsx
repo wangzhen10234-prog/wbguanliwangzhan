@@ -27,6 +27,7 @@ type Order = {
   nmId: number;
   article: string;
   createdAt: string;
+  rid?: string;
   warehouseName: string;
   amount: number;
   currency: "CNY";
@@ -53,6 +54,19 @@ type SalesData = {
   warehouses: Array<{ name: string; orders: number; stock: number }>;
   products: Product[];
   orderDetails: Order[];
+  orderSummary: {
+    orders: number;
+    success: number;
+    abnormal: number;
+    pending: number;
+    orderAmount: number;
+    salesAmount: number;
+    abnormalRate: number;
+    todaySigned: number;
+    todaySignedDate: string;
+    todaySignedOrderIds: string[];
+    todaySignedUnmatched: number;
+  };
   dataAvailability: { orderDetails: boolean; financeReport: boolean };
 };
 
@@ -82,7 +96,12 @@ type OrderFinancial = {
 const DAY_MS = 86_400_000;
 const PAGE_SIZE = 20;
 
-function toInputDate(date: Date) { return date.toISOString().slice(0, 10); }
+function beijingDateKey(value: Date | string = new Date()) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (!Number.isFinite(date.getTime())) return "";
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit" }).format(date);
+}
+function toInputDate(date: Date) { return beijingDateKey(date); }
 function shiftDate(dateString: string, days: number) {
   const date = new Date(`${dateString}T12:00:00`);
   date.setDate(date.getDate() + days);
@@ -159,7 +178,7 @@ function supplierStatusLabel(value: string) {
 }
 
 export default function SalesPage() {
-  const today = toInputDate(new Date());
+  const [today, setToday] = useState(() => toInputDate(new Date()));
   const earliest = "2024-01-29";
   const [draftStart, setDraftStart] = useState(earliest);
   const [draftEnd, setDraftEnd] = useState(today);
@@ -174,8 +193,26 @@ export default function SalesPage() {
   const [reloadKey, setReloadKey] = useState(0);
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
+  const [dateFilter, setDateFilter] = useState<"all" | "today-signed">("all");
   const [page, setPage] = useState(1);
   const forceRefreshRef = useRef(false);
+  const todayRef = useRef(today);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      const next = toInputDate(new Date());
+      const previous = todayRef.current;
+      if (next === previous) return;
+      todayRef.current = next;
+      setToday(next);
+      setDraftEnd((value) => value === previous ? next : value);
+      setPeriodEnd((value) => value === previous ? next : value);
+      forceRefreshRef.current = true;
+      setLoading(true);
+      setReloadKey((key) => key + 1);
+    }, 30_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -361,13 +398,15 @@ export default function SalesPage() {
   }, [financialByOrder, orders]);
   const filteredOrders = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase();
+    const todaySignedOrderIds = new Set(data?.orderSummary?.todaySignedOrderIds ?? []);
     return orders.filter((order) => {
       const product = productById.get(order.nmId);
       const matchesStatus = statusFilter === "all" || order.outcome === statusFilter;
+      const matchesTodaySigned = dateFilter !== "today-signed" || todaySignedOrderIds.has(order.id);
       const matchesQuery = !needle || [order.orderNumber, order.article, product?.name || "", order.warehouseName, order.statusLabel].some((value) => value.toLocaleLowerCase().includes(needle));
-      return matchesStatus && matchesQuery;
+      return matchesStatus && matchesTodaySigned && matchesQuery;
     });
-  }, [orders, productById, query, statusFilter]);
+  }, [data?.orderSummary?.todaySignedOrderIds, dateFilter, orders, productById, query, statusFilter]);
   const pageCount = Math.max(1, Math.ceil(filteredOrders.length / PAGE_SIZE));
   const visibleOrders = filteredOrders.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
 
@@ -386,6 +425,17 @@ export default function SalesPage() {
     beginLoad(); setPeriodStart(draftStart); setPeriodEnd(draftEnd); setDateError(""); setReloadKey((key) => key + 1);
   }
   function refresh() { forceRefreshRef.current = true; beginLoad(); setReloadKey((key) => key + 1); }
+  function chooseOrderFilter(filter: "all" | "success" | "abnormal" | "pending" | "today-signed") {
+    setQuery("");
+    setPage(1);
+    if (filter === "today-signed") {
+      setStatusFilter("all");
+      setDateFilter("today-signed");
+      return;
+    }
+    setStatusFilter(filter);
+    setDateFilter("all");
+  }
 
   return (
     <main className="app-shell">
@@ -410,18 +460,19 @@ export default function SalesPage() {
           <p>订单号已使用 WB 卖家后台的数字订单编号，便于直接对标查找。</p>
         </section>
 
-        <section className="product-stat-grid" aria-label="销售状况汇总">
-          <article><span>全部订单</span><strong>{rollup.orders}</strong><small>{periodStart} 至 {periodEnd}</small></article>
-          <article><span>正常签收</span><strong>{rollup.success}</strong><small>买家已正常收货</small></article>
-          <article className={rollup.abnormal ? "attention" : ""}><span>非正常签收</span><strong>{rollup.abnormal}</strong><small>异常率 {rollup.abnormalRate.toFixed(1)}%</small></article>
-          <article><span>待签收/处理中</span><strong>{rollup.pending}</strong><small>仍在运输或待取件</small></article>
+        <section className="product-stat-grid sales-stat-grid" aria-label="销售状况汇总">
+          <button type="button" className={`sales-stat-card ${statusFilter === "all" && dateFilter === "all" ? "active" : ""}`} aria-pressed={statusFilter === "all" && dateFilter === "all"} onClick={() => chooseOrderFilter("all")}><span>全部订单</span><strong>{rollup.orders}</strong><small>{periodStart} 至 {periodEnd}</small></button>
+          <button type="button" className={`sales-stat-card ${statusFilter === "success" && dateFilter === "all" ? "active" : ""}`} aria-pressed={statusFilter === "success" && dateFilter === "all"} onClick={() => chooseOrderFilter("success")}><span>正常签收</span><strong>{rollup.success}</strong><small>买家已正常收货</small></button>
+          <button type="button" className={`sales-stat-card ${rollup.abnormal ? "attention" : ""} ${statusFilter === "abnormal" && dateFilter === "all" ? "active" : ""}`} aria-pressed={statusFilter === "abnormal" && dateFilter === "all"} onClick={() => chooseOrderFilter("abnormal")}><span>非正常签收</span><strong>{rollup.abnormal}</strong><small>异常率 {rollup.abnormalRate.toFixed(1)}%</small></button>
+          <button type="button" className={`sales-stat-card ${statusFilter === "pending" && dateFilter === "all" ? "active" : ""}`} aria-pressed={statusFilter === "pending" && dateFilter === "all"} onClick={() => chooseOrderFilter("pending")}><span>待签收/处理中</span><strong>{rollup.pending}</strong><small>仍在运输或待取件</small></button>
+          <button type="button" className={`sales-stat-card today-signed ${dateFilter === "today-signed" ? "active" : ""}`} aria-pressed={dateFilter === "today-signed"} onClick={() => chooseOrderFilter("today-signed")}><span>今日签收订单</span><strong>{data?.orderSummary?.todaySigned ?? 0}</strong><small>{data?.orderSummary?.todaySignedDate || today} · 北京时间 · WB 销售 API</small></button>
           <article><span>订单金额</span><strong>{formatMoney(rollup.amount)}</strong><small>订单结算币</small></article>
         </section>
 
         <section className="order-detail-panel sales-order-panel">
           <div className="order-detail-toolbar">
             <div><h2>全部订单、签收与利润</h2><p>平台结账为成交金额依次扣除佣金、物流及其他账单费用后的最终实结；商品成本＝拿货成本＋操作费。</p></div>
-            <div className="order-detail-actions"><span className={`finance-source-status ${data?.dataAvailability.financeReport ? "connected" : "waiting"}`}>{data?.dataAvailability.financeReport ? "财务账单已连接" : "财务账单待同步"}</span><div className="order-detail-filters"><label><span>⌕</span><input type="search" value={query} placeholder="搜索订单号、SKU 或仓库" onChange={(event) => { setQuery(event.target.value); setPage(1); }} /></label><select value={statusFilter} onChange={(event) => { setStatusFilter(event.target.value); setPage(1); }}><option value="all">全部订单状态</option><option value="success">正常签收</option><option value="abnormal">非正常签收</option><option value="pending">待签收/处理中</option></select></div></div>
+            <div className="order-detail-actions"><span className={`finance-source-status ${data?.dataAvailability.financeReport ? "connected" : "waiting"}`}>{data?.dataAvailability.financeReport ? "财务账单已连接" : "财务账单待同步"}</span><div className="order-detail-filters"><label><span>⌕</span><input type="search" value={query} placeholder="搜索订单号、SKU 或仓库" onChange={(event) => { setQuery(event.target.value); setPage(1); }} /></label><select value={statusFilter} onChange={(event) => { setStatusFilter(event.target.value); setDateFilter("all"); setPage(1); }}><option value="all">全部订单状态</option><option value="success">正常签收</option><option value="abnormal">非正常签收</option><option value="pending">待签收/处理中</option></select></div></div>
           </div>
           <div className="order-detail-table-wrap">
             <table className="order-detail-table">

@@ -16,6 +16,12 @@ type WbOrder = {
 type WbSale = WbOrder & {
   saleID?: string;
   forPay?: number;
+  // Supplier sales reports expose several order identifiers depending on the report version.
+  // Keep all of them so today's sales can be matched back to the FBS order list.
+  srid?: string;
+  gNumber?: string;
+  orderUid?: string;
+  rid?: string;
 };
 
 type WbStock = {
@@ -208,6 +214,28 @@ function dateValue(value: string) {
 
 function dayKey(value?: string) {
   return typeof value === "string" ? value.slice(0, 10) : "";
+}
+
+function beijingDateKey(value: string | number | Date = new Date()) {
+  if (value === null || value === "") return "";
+  const date = value instanceof Date ? value : new Date(value);
+  if (!Number.isFinite(date.getTime())) return typeof value === "string" ? dayKey(value) : "";
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(date);
+}
+
+function orderIdentity(value: unknown) {
+  return String(value || "").trim().toLocaleLowerCase();
+}
+
+function saleOrderIdentities(sale: WbSale) {
+  return [sale.srid, sale.rid, sale.gNumber, sale.orderUid]
+    .map(orderIdentity)
+    .filter(Boolean);
 }
 
 function amount(row: WbOrder) {
@@ -1246,6 +1274,7 @@ export async function GET(request: Request) {
         return {
           id: String(order.id || order.orderUid || ""),
           orderUid,
+          rid: order.rid || "",
           orderNumber: String(order.id || ""),
           nmId,
           article: order.article || "—",
@@ -1262,6 +1291,32 @@ export async function GET(request: Request) {
       })
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
     const detailedOrders = allDetailedOrders.filter((order) => !requestedWarehouse || order.warehouseName === requestedWarehouse);
+    const orderIdByIdentity = new Map<string, string>();
+    for (const order of detailedOrders) {
+      for (const identity of [order.id, order.orderUid, order.rid].map(orderIdentity).filter(Boolean)) {
+        orderIdByIdentity.set(identity, order.id);
+      }
+    }
+    const todayDate = beijingDateKey();
+    const todaySignedOrderIds = new Set<string>();
+    const todaySignedSaleKeys = new Set<string>();
+    for (const sale of statistics.sales) {
+      if (todayDate < from || todayDate > to || beijingDateKey(sale.date) !== todayDate || isReturn(sale) || !matchesWarehouse(sale)) continue;
+      const identities = saleOrderIdentities(sale);
+      let matched = false;
+      for (const identity of identities) {
+        const orderId = orderIdByIdentity.get(identity);
+        if (!orderId) continue;
+        todaySignedOrderIds.add(orderId);
+        matched = true;
+        break;
+      }
+      if (!matched) {
+        const fallbackKey = identities[0] || `${Number(sale.nmId || 0)}|${sale.warehouseName || ""}|${sale.date || ""}|${sale.saleID || ""}`;
+        todaySignedSaleKeys.add(fallbackKey);
+      }
+    }
+    const todaySignedApiCount = todaySignedOrderIds.size + todaySignedSaleKeys.size;
     const useDetailedMetrics = includeOrderDetails && fbsOrderResult.available;
     const detailedSummary = detailedOrders.reduce((summary, order) => {
       summary.orders += 1;
@@ -1578,6 +1633,10 @@ export async function GET(request: Request) {
       orderSummary: {
         ...detailedSummary,
         abnormalRate: detailedAbnormalRate,
+        todaySigned: todaySignedApiCount,
+        todaySignedDate: todayDate,
+        todaySignedOrderIds: [...todaySignedOrderIds],
+        todaySignedUnmatched: todaySignedSaleKeys.size,
       },
       orderDetails: includeOrderDetails ? detailedOrders : [],
       inventory: {
