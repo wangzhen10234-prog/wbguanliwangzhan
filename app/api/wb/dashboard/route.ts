@@ -1073,14 +1073,14 @@ function normalizedBalanceAmount(value: unknown, currency: string) {
 
 function financeOperationLabel(row: WbFinanceRow, netPayout: number) {
   const raw = `${row.sellerOperName || ""} ${row.docTypeName || ""}`.trim();
-  if (/возврат|return/i.test(raw)) return "退货退款";
-  if (/продаж|sale/i.test(raw)) return "订单销售结算";
-  if (/логист|delivery/i.test(raw)) return "物流费用";
-  if (/штраф|penalt/i.test(raw)) return "平台罚款";
-  if (/хранен|storag/i.test(raw)) return "仓储费用";
-  if (/прием|accept/i.test(raw)) return "入库费用";
-  if (/удерж|deduct/i.test(raw)) return "平台扣款";
-  if (/доплат|additional/i.test(raw)) return "平台补款";
+  if (/退货|退款|возврат|return/i.test(raw)) return "退货退款";
+  if (/销售|售出|продаж|sale/i.test(raw)) return "订单销售结算";
+  if (/物流|配送|логист|delivery/i.test(raw)) return "物流费用";
+  if (/罚款|штраф|penalt/i.test(raw)) return "平台罚款";
+  if (/仓储|保管|хранен|storag/i.test(raw)) return "仓储费用";
+  if (/入库|验收|прием|accept/i.test(raw)) return "入库费用";
+  if (/扣款|扣除|удерж|deduct/i.test(raw)) return "平台扣款";
+  if (/补款|补偿|доплат|additional/i.test(raw)) return "平台补款";
   if (raw) return raw;
   return netPayout < 0 ? "平台扣款" : row.nmId ? "订单结算" : "平台入账";
 }
