@@ -139,6 +139,7 @@ export default function AdvertisingPage() {
   const [draftTo, setDraftTo] = useState(periodTo);
   const [data, setData] = useState<AdvertisingData | null>(null);
   const [products, setProducts] = useState<Product[]>([]);
+  const [productCurrency, setProductCurrency] = useState<string | null>(null);
   const [costRows, setCostRows] = useState<CostRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -168,8 +169,8 @@ export default function AdvertisingPage() {
         return body as AdvertisingData;
       }),
       fetch(`/api/wb/dashboard?${productParams}`, { signal: controller.signal, cache: "no-store", headers: { Accept: "application/json" } })
-        .then(async (response): Promise<{ products?: Product[] }> => response.ok ? await response.json() as { products?: Product[] } : { products: [] })
-        .catch(() => ({ products: [] as Product[] })),
+        .then(async (response): Promise<{ products?: Product[]; currency?: string }> => response.ok ? await response.json() as { products?: Product[]; currency?: string } : { products: [] })
+        .catch(() => ({ products: [] as Product[], currency: undefined })),
       fetch("/api/product-costs", { signal: controller.signal, cache: "no-store", headers: { Accept: "application/json" } })
         .then(async (response): Promise<{ rows?: CostRow[] }> => response.ok ? await response.json() as { rows?: CostRow[] } : { rows: [] })
         .catch(() => ({ rows: [] as CostRow[] })),
@@ -177,6 +178,7 @@ export default function AdvertisingPage() {
       .then(([advertising, productData, costs]) => {
         setData(advertising);
         setProducts(productData.products || []);
+        setProductCurrency(productData.currency || null);
         setCostRows(costs.rows || []);
         setSecondaryWarning(!productData.products?.length || !costs.rows?.length ? "推广活动与统计已连接；部分商品资料或成本暂未读取，相关建议价会明确显示为待补。" : "");
         setError("");
@@ -221,7 +223,8 @@ export default function AdvertisingPage() {
       currentBid: currentBidKopecks > 0 ? currentBidKopecks / 100 : null,
       minimumBid: minimum ? minimum.valueKopecks / 100 : null,
       officialCompetitiveBid,
-      averageProductPriceCny: Number(product?.averagePrice || 0),
+      averageProductPrice: Number(product?.averagePrice || 0),
+      averageProductPriceCurrency: productCurrency,
       stats: advertProduct.stats,
       cost,
     });
@@ -240,7 +243,7 @@ export default function AdvertisingPage() {
       officialTop2Bid: advertProduct.officialRecommendation?.base?.top2?.bidKopecks ? Number(advertProduct.officialRecommendation.base.top2.bidKopecks) / 100 : null,
       evaluation,
     };
-  })), [costByNmId, costBySku, data, productById]);
+  })), [costByNmId, costBySku, data, productById, productCurrency]);
 
   const filteredRows = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase();
@@ -364,7 +367,7 @@ export default function AdvertisingPage() {
         <div className="advertising-section-heading"><div><h2>{selectedRow.product?.sku || `WB ${selectedRow.advertProduct.nmId}`} · 建议价计算依据</h2><p>所有输入值、币种和计算公式均可核对；WB 官方数据与系统推算明确分开。</p></div><button type="button" onClick={() => setSelectedKey(null)}>关闭</button></div>
         <div className="advertising-formula-grid">
           <article><span>API 出价基线</span><b>当前 {money(selectedRow.currentBid, selectedRow.currency)}</b><small>WB 最低 {money(selectedRow.minimumBid, selectedRow.currency)} · 实际 {selectedRow.campaign.paymentType.toUpperCase()} {money(selectedRow.evaluation.actualUnitCost, selectedRow.currency)}</small></article>
-          <article><span>成交价口径</span><b>{money(selectedRow.evaluation.sellingPriceCny, "CNY")}</b><small>{selectedRow.evaluation.priceSource === "attributed-sales" ? "WB 归因销售额 ÷ 归因订单" : selectedRow.evaluation.priceSource === "product-average" ? "商品近 90 天平均成交价" : "价格数据待补"}</small></article>
+          <article><span>成交价口径</span><b>{money(selectedRow.evaluation.sellingPriceCny, "CNY")}</b><small>{selectedRow.evaluation.priceSource === "attributed-sales" ? "WB 归因销售额 ÷ 归因订单" : selectedRow.evaluation.priceSource === "product-average" ? `商品近 90 天均价（${productCurrency || "未知币种"} → CNY）` : "价格数据待补"}</small></article>
           <article><span>固定成本</span><b>{money(selectedRow.evaluation.fixedCostCny, "CNY")}</b><small>拿货 {money(selectedRow.evaluation.productCostCny, "CNY")} + 操作 {money(selectedRow.evaluation.handlingFeeCny, "CNY")} + 物流 {money(selectedRow.evaluation.lastMileFeeCny, "CNY")}</small></article>
           <article><span>非广告比例费用</span><b>{percent(selectedRow.evaluation.nonAdvertisingRate)}</b><small>佣金 {percent(selectedRow.cost?.commissionRate)} + 活动折扣 {percent(selectedRow.cost?.activityDiscountRate)} + 退损 {percent(selectedRow.cost?.returnLossRate)}</small></article>
           <article><span>单件广告前利润</span><b>{money(selectedRow.evaluation.preAdProfitPerOrderCurrency, selectedRow.currency)}</b><small>成交价 − 固定成本 − 非广告比例费用；此处不重复计广告费</small></article>

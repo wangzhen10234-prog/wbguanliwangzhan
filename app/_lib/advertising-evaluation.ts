@@ -17,7 +17,8 @@ export type AdvertisingEvaluationInput = {
   currentBid: number | null;
   minimumBid: number | null;
   officialCompetitiveBid: number | null;
-  averageProductPriceCny: number;
+  averageProductPrice: number;
+  averageProductPriceCurrency: string | null;
   stats: {
     views: number;
     clicks: number;
@@ -55,9 +56,18 @@ export function evaluateAdvertisingBid(input: AdvertisingEvaluationInput) {
   const attributedPriceCny = attributedPriceCurrency !== null && currencyPerCny
     ? attributedPriceCurrency / currencyPerCny
     : null;
+  const averageProductPrice = Number(input.averageProductPrice || 0);
+  const averageProductCurrency = input.averageProductPriceCurrency?.toUpperCase() || null;
+  const averageProductPriceCny = averageProductPrice > 0
+    ? averageProductCurrency === "CNY"
+      ? averageProductPrice
+      : averageProductCurrency === "RUB" && exchangeRate > 0
+        ? averageProductPrice / exchangeRate
+        : null
+    : null;
   const sellingPriceCny = attributedPriceCny && attributedPriceCny > 0
     ? attributedPriceCny
-    : Number(input.averageProductPriceCny || 0) > 0 ? Number(input.averageProductPriceCny) : null;
+    : averageProductPriceCny;
   const priceSource = attributedPriceCny && attributedPriceCny > 0 ? "attributed-sales" as const : sellingPriceCny ? "product-average" as const : "missing" as const;
   const proportionalCostCny = sellingPriceCny !== null && nonAdvertisingRate !== null
     ? sellingPriceCny * nonAdvertisingRate / 100

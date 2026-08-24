@@ -22,7 +22,8 @@ test("derives a transparent CPC ceiling from actual attributed sales and product
     currentBid: 0.5,
     minimumBid: 0.22,
     officialCompetitiveBid: null,
-    averageProductPriceCny: 62,
+    averageProductPrice: 62,
+    averageProductPriceCurrency: "CNY",
     stats: { views: 514, clicks: 17, spend: 16.32, orders: 3, sales: 184 },
     cost: wz310b,
   });
@@ -46,7 +47,8 @@ test("does not invent a recommendation when the WB minimum exceeds the safety ce
     currentBid: 1,
     minimumBid: 1,
     officialCompetitiveBid: null,
-    averageProductPriceCny: 62,
+    averageProductPrice: 62,
+    averageProductPriceCurrency: "CNY",
     stats: { views: 514, clicks: 17, spend: 10, orders: 3, sales: 184 },
     cost: wz310b,
   });
@@ -63,7 +65,8 @@ test("keeps RUB bid calculations in RUB only when an exchange rate is present", 
     currentBid: 10,
     minimumBid: 5,
     officialCompetitiveBid: null,
-    averageProductPriceCny: 62,
+    averageProductPrice: 62,
+    averageProductPriceCurrency: "CNY",
     stats: { views: 500, clicks: 20, spend: 120, orders: 2, sales: 1240 },
     cost: { ...wz310b, exchangeRate: 10 },
   });
@@ -79,7 +82,8 @@ test("uses cost per thousand impressions for CPM campaigns", () => {
     currentBid: 32,
     minimumBid: 20,
     officialCompetitiveBid: 30,
-    averageProductPriceCny: 62,
+    averageProductPrice: 62,
+    averageProductPriceCurrency: "CNY",
     stats: { views: 2_000, clicks: 40, spend: 50, orders: 8, sales: 496 },
     cost: wz310b,
   });
@@ -87,4 +91,21 @@ test("uses cost per thousand impressions for CPM campaigns", () => {
   assert.equal(result.statsReady, true);
   assert.equal(result.actualUnitCost, 25);
   assert.ok(Math.abs(result.breakEvenBid - result.preAdProfitPerOrderCurrency * 4) < 0.0001);
+});
+
+test("converts the dashboard RUB fallback price before using it in CNY profit", () => {
+  const result = evaluateAdvertisingBid({
+    paymentType: "cpc",
+    currency: "CNY",
+    currentBid: 0.5,
+    minimumBid: 0.22,
+    officialCompetitiveBid: null,
+    averageProductPrice: 620,
+    averageProductPriceCurrency: "RUB",
+    stats: { views: 100, clicks: 10, spend: 5, orders: 0, sales: 0 },
+    cost: { ...wz310b, exchangeRate: 10 },
+  });
+
+  assert.equal(result.priceSource, "product-average");
+  assert.equal(result.sellingPriceCny, 62);
 });
