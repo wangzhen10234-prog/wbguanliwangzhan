@@ -80,6 +80,13 @@ type Evaluation = {
   reductionRate: number | null;
   costReady: boolean;
   promoPriceCny: number | null;
+  productCostCny: number | null;
+  handlingFeeCny: number | null;
+  lastMileFeeCny: number | null;
+  commissionFeeCny: number | null;
+  adFeeCny: number | null;
+  activityDiscountFeeCny: number | null;
+  returnLossFeeCny: number | null;
   fixedCostCny: number | null;
   totalCostCny: number | null;
   variableRate: number | null;
@@ -261,6 +268,13 @@ export default function PromotionsPage() {
           reductionRate,
           costReady: calculated.ready,
           promoPriceCny: calculated.promoPriceCny,
+          productCostCny: cost ? calculated.productCostCny : null,
+          handlingFeeCny: calculated.handlingFeeCny,
+          lastMileFeeCny: cost ? calculated.lastMileFeeCny : null,
+          commissionFeeCny: calculated.commissionFeeCny,
+          adFeeCny: calculated.adFeeCny,
+          activityDiscountFeeCny: calculated.activityDiscountFeeCny,
+          returnLossFeeCny: calculated.returnLossFeeCny,
           fixedCostCny: calculated.fixedCostCny,
           totalCostCny: calculated.totalCostCny,
           variableRate: calculated.variableRate,
@@ -394,8 +408,8 @@ export default function PromotionsPage() {
                     <td><b className={(row.reductionRate ?? 0) >= 20 ? "value-bad" : ""}>{percent(row.reductionRate)}</b><small>当前价 → 计划价</small></td>
                     <td><b>{percent(row.promoProduct.planDiscount)}</b><small>当前 {percent(row.promoProduct.discount)}</small></td>
                     <td><b>{boost === null ? "未量化" : `+${boost.boost}%${boost.current ? "" : " 起"}`}</b><small>{boost === null ? "平台未给出档位" : boost.current ? `当前参与率 ${percent(row.promotion.participationPercentage)}` : `参与率达到 ${percent(boost.participationRate)}`}</small></td>
-                    <td><b>{money(row.totalCostCny, "CNY")}</b><small>{row.variableRate === null ? "产品详情待补" : `固定 ${money(row.fixedCostCny, "CNY")} + 比例费 ${percent(row.variableRate)}`}</small></td>
-                    <td><b>{money(row.breakEvenPriceCny, "CNY")}</b><small>低于此价预计亏损</small></td>
+                    <td className="promotion-formula-cell"><b>{money(row.totalCostCny, "CNY")}</b>{row.cost ? <div className="promotion-cost-breakdown"><small>拿货价 {money(row.productCostCny)} + 操作费 {money(row.handlingFeeCny)} + 物流费 {money(row.lastMileFeeCny)}</small><small>平台佣金 {money(row.commissionFeeCny)} + 广告费 {money(row.adFeeCny)} + 活动折扣费 {money(row.activityDiscountFeeCny)} + 退损费 {money(row.returnLossFeeCny)}</small></div> : <small>产品详情待补</small>}</td>
+                    <td className="promotion-formula-cell"><b>{money(row.breakEvenPriceCny, "CNY")}</b>{row.cost && row.variableRate !== null ? <div className="promotion-cost-breakdown"><small>固定成本：拿货 {money(row.productCostCny)} + 操作 {money(row.handlingFeeCny)} + 物流 {money(row.lastMileFeeCny)}</small><small>比例费率：佣金 {percent(row.cost.commissionRate)} + 广告 {percent(row.cost.adRate)} + 活动折扣 {percent(row.cost.activityDiscountRate)} + 退损 {percent(row.cost.returnLossRate)}</small><small className="promotion-formula-expression">{money(row.fixedCostCny)} ÷ (1 − {percent(row.variableRate)})</small></div> : <small>产品详情待补</small>}</td>
                     <td><b className={row.decision === "profit" ? "value-good" : row.decision === "loss" ? "value-bad" : ""}>{row.profitCny === null ? "待补成本" : `${row.profitCny >= 0 ? "+" : "−"}${money(Math.abs(row.profitCny), "CNY")}`}</b><small>活动价 − 预计总成本</small></td>
                     <td><b className={row.decision === "profit" ? "value-good" : row.decision === "loss" ? "value-bad" : ""}>{percent(row.profitRate)}</b><small>按活动成交价计算</small></td>
                     <td><span className={`promotion-decision ${row.decision}`}>{row.decision === "profit" ? "可盈利参与" : row.decision === "loss" ? "参与将亏损" : "成本待补全"}</span></td>

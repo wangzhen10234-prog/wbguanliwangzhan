@@ -21,10 +21,18 @@ test("keeps WB CNY promotion prices in CNY and evaluates wz310B as profitable", 
   assert.equal(result.sourceCurrency, "CNY");
   assert.equal(result.promoPriceCny, 62);
   assert.equal(result.variableRate, 34);
+  assert.equal(result.productCostCny, 21.5);
+  assert.equal(result.handlingFeeCny, 5);
   assert.ok(Math.abs(result.fixedCostCny - 35.776) < 0.0001);
+  assert.ok(Math.abs(result.commissionFeeCny - 11.78) < 0.0001);
+  assert.equal(result.adFeeCny, 0);
+  assert.ok(Math.abs(result.activityDiscountFeeCny - 3.1) < 0.0001);
+  assert.ok(Math.abs(result.returnLossFeeCny - 6.2) < 0.0001);
   assert.ok(Math.abs(result.totalCostCny - 56.856) < 0.0001);
+  assert.ok(Math.abs(result.breakEvenPriceCny - 35.776 / (1 - 0.34)) < 0.0001);
   assert.ok(Math.abs(result.profitCny - 5.144) < 0.0001);
   assert.ok(result.profitCny > 0);
+  assert.ok(result.promoPriceCny > result.breakEvenPriceCny);
 });
 
 test("converts WB RUB promotion prices only when the API currency is RUB", () => {
