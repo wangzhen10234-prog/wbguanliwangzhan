@@ -31,6 +31,7 @@ test("server-renders the WB Insight dashboard", async () => {
   assert.match(html, /href="\/advertising"[^>]*>.*推广/s);
   assert.match(html, /平台活动评估/);
   assert.match(html, /08:00 · 14:00 · 19:00 · 23:00/);
+  assert.match(html, /class="sidebar-scroll-area"/);
   const navigation = html.match(/<nav[^>]*aria-label="主导航"[^>]*>(.*?)<\/nav>/s)?.[1] ?? "";
   const expectedOrder = ["经营总览", "销售状况", "综合商品分析", "产品详情", "库存监控", "退货", "回款与余额", "平台活动评估", "推广"];
   let previousIndex = -1;

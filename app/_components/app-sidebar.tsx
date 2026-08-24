@@ -41,10 +41,12 @@ export function AppSidebar({ active, syncedAt, nextSyncAt, loading = false, erro
   return (
     <aside className="sidebar">
       <div className="brand"><span className="brand-mark">W</span><div><strong>WB Insight</strong><small>俄罗斯店铺分析</small></div></div>
-      <nav aria-label="主导航">
-        {navigation.map((item) => <a key={item.section} className={`nav-item ${active === item.section ? "active" : ""}`} href={item.href}><span className={`nav-icon ${item.section}`} aria-hidden="true">{item.icon}</span>{item.label}</a>)}
-      </nav>
-      {children}
+      <div className="sidebar-scroll-area">
+        <nav aria-label="主导航">
+          {navigation.map((item) => <a key={item.section} className={`nav-item ${active === item.section ? "active" : ""}`} href={item.href}><span className={`nav-icon ${item.section}`} aria-hidden="true">{item.icon}</span>{item.label}</a>)}
+        </nav>
+        {children}
+      </div>
       <div className="sidebar-foot">
         <div className="sidebar-schedule"><b>北京时间自动同步</b><span>08:00 · 14:00 · 19:00 · 23:00</span><small>下次：{timeLabel(nextSyncAt)}</small></div>
         <div className={`sync-status ${error ? "error" : "connected"}`}><span className="status-dot" /><div><b>{error ? "WB API 同步异常" : "WB API 已安全连接"}</b><small>{error ? "可点击下方手动重试" : `最近读取 ${timeLabel(syncedAt)}`}</small></div></div>
