@@ -27,8 +27,26 @@ test("server-renders the WB Insight dashboard", async () => {
   assert.match(html, /综合商品分析/);
   assert.match(html, /产品详情/);
   assert.match(html, /库存监控/);
+  assert.match(html, /href="\/advertising"[^>]*>.*推广/s);
   assert.match(html, /平台活动评估/);
   assert.match(html, /08:00 · 14:00 · 19:00 · 23:00/);
+  assert.doesNotMatch(html, /codex-preview|SkeletonPreview|Your site is taking shape/);
+});
+
+test("server-renders the WB advertising workbench", async () => {
+  const response = await render("/advertising");
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
+
+  const html = await response.text();
+  assert.match(html, /推广数据全部来自 WB Promotion API/);
+  assert.match(html, /当前推广活动/);
+  assert.match(html, /当前出价/);
+  assert.match(html, /WB 最低出价/);
+  assert.match(html, /WB 官方推荐/);
+  assert.match(html, /系统建议价/);
+  assert.match(html, /商品推广与出价明细/);
+  assert.match(html, /广告后净利润/);
   assert.doesNotMatch(html, /codex-preview|SkeletonPreview|Your site is taking shape/);
 });
 

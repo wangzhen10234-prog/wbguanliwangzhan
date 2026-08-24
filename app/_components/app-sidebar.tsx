@@ -3,7 +3,7 @@
 
 import type { ReactNode } from "react";
 
-type Section = "overview" | "sales" | "products" | "details" | "stock" | "finance" | "promotions";
+type Section = "overview" | "sales" | "products" | "details" | "stock" | "finance" | "advertising" | "promotions";
 
 type AppSidebarProps = {
   active: Section;
@@ -37,6 +37,7 @@ export function AppSidebar({ active, syncedAt, nextSyncAt, loading = false, erro
         <a className={`nav-item ${active === "details" ? "active" : ""}`} href="/details"><span>▤</span>产品详情</a>
         <a className={`nav-item ${active === "stock" ? "active" : ""}`} href="/stock"><span>□</span>库存监控</a>
         <a className={`nav-item ${active === "finance" ? "active" : ""}`} href="/finance"><span>₽</span>回款与余额</a>
+        <a className={`nav-item ${active === "advertising" ? "active" : ""}`} href="/advertising"><span>◎</span>推广</a>
         <a className={`nav-item ${active === "promotions" ? "active" : ""}`} href="/promotions"><span>%</span>平台活动评估</a>
       </nav>
       {children}
