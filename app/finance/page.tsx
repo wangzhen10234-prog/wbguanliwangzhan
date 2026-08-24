@@ -23,6 +23,8 @@ type FinanceMovement = {
   additionalPayment: number;
   netChange: number;
   currency: string;
+  balanceBefore: number | null;
+  balanceAfter: number | null;
   feeBreakdown: { logistics: number; acquiring: number; penalty: number; deduction: number; storage: number; acceptance: number };
 };
 
@@ -34,6 +36,7 @@ type FinanceData = {
   accountBalance: { available: boolean; source: string; currency: string; current: number | null; forWithdraw: number | null; rawCurrent: number | null; rawForWithdraw: number | null; unitScale: number; fetchedAt: string | null };
   settlement: { available: boolean; source: string; currency: string; fetchedAt: string | null; rowsCount: number; unallocatedExpenses: number };
   financeMovementSummary: { entries: number; creditEntries: number; debitEntries: number; matchedOrderEntries: number; credits: number; debits: number; netChange: number; currency: string };
+  financeBalanceTrace: { available: boolean; mode: string; source: string; anchorBalance: number | null; anchorAt: string | null; calculatedOpeningBalance: number | null; includesWithdrawalsOrUnpublishedChanges: boolean };
   financeMovements: FinanceMovement[];
   trend: Array<{ date: string; sales: number; orders: number }>;
 };
@@ -147,12 +150,31 @@ export default function FinancePage() {
         </section>
 
         {showMovements && <section ref={movementPanelRef} className="finance-movement-panel">
-          <div className="finance-movement-heading"><div><span>WB OFFICIAL FINANCE LEDGER</span><h2>账户资金结算明细</h2><p>每一行对应 WB 正式财务报告的一行；净变动＝佣金后结算－平台费用＋补款。</p></div><div className="finance-movement-source"><b>{settlement?.available ? "财务 API 已连接" : "财务 API 暂不可用"}</b><small>{settlement?.source}<br />更新于 {timestamp(settlement?.fetchedAt)}</small></div></div>
+          <div className="finance-movement-heading"><div><span>WB OFFICIAL FINANCE LEDGER</span><h2>账户资金结算明细</h2><p>每一行对应 WB 正式财务报告的一行；末列以当前余额为锚点，按 WB 行号倒推账单余额轨迹。</p></div><div className="finance-movement-source"><b>{settlement?.available ? "财务 API 已连接" : "财务 API 暂不可用"}</b><small>{settlement?.source}<br />更新于 {timestamp(settlement?.fetchedAt)}</small></div></div>
           <div className="finance-movement-summary"><div><span>入账合计</span><b className="movement-credit">+{money(movementSummary?.credits ?? 0, settlementCurrency)}</b><small>{movementSummary?.creditEntries ?? 0} 条</small></div><div><span>扣款合计</span><b className="movement-debit">−{money(movementSummary?.debits ?? 0, settlementCurrency)}</b><small>{movementSummary?.debitEntries ?? 0} 条</small></div><div><span>本期净变动</span><b className={(movementSummary?.netChange ?? 0) >= 0 ? "movement-credit" : "movement-debit"}>{money(movementSummary?.netChange ?? 0, settlementCurrency)}</b><small>{movementSummary?.entries ?? 0} 条 WB 明细</small></div></div>
           <div className="finance-movement-toolbar"><label><span>⌕</span><input type="search" value={movementQuery} placeholder="搜索订单号、SKU、类型或 WB 行号" onChange={(event) => { setMovementQuery(event.target.value); setMovementPage(1); }} /></label><select value={movementFilter} onChange={(event) => { setMovementFilter(event.target.value as "all" | "credit" | "debit"); setMovementPage(1); }}><option value="all">全部资金变动</option><option value="credit">只看入账</option><option value="debit">只看扣款</option></select><button type="button" onClick={() => setShowMovements(false)}>收起明细</button></div>
-          <div className="finance-movement-table-wrap"><table className="finance-movement-table"><thead><tr><th>结算日期</th><th>变动类型</th><th>订单 / 关联号</th><th>SKU</th><th>成交与佣金后结算</th><th>平台费用</th><th>补款</th><th>本笔净变动</th><th>WB 报告行号</th></tr></thead><tbody>{visibleMovements.map((movement) => <tr key={movement.id}><td><b>{movement.date || "—"}</b></td><td><span className={`movement-kind ${movement.direction}`}>{movement.operation}</span><small>{movement.rawOperation || "WB 财务结算"}</small></td><td><b title={movement.orderNumber || movement.orderUid || movement.srid}>{movement.orderNumber ? `订单 ${movement.orderNumber}` : movement.orderUid ? compact(movement.orderUid) : movement.srid ? compact(movement.srid) : "平台级费用"}</b><small title={movement.orderUid || movement.srid}>{movement.orderUid ? `UID ${compact(movement.orderUid, 8, 6)}` : movement.srid ? `SRID ${compact(movement.srid, 8, 6)}` : "未关联具体订单"}</small></td><td><b>{movement.sellerSku || (movement.nmId ? String(movement.nmId) : "—")}</b><small>{movement.nmId ? `WB ${movement.nmId}` : "平台级"}</small></td><td><b>{money(movement.transactionAmount, movement.currency)}</b><small>佣金后 {money(movement.settlementAmount, movement.currency)}</small></td><td><b className={movement.platformFees > 0 ? "movement-debit" : ""}>{movement.platformFees > 0 ? `−${money(movement.platformFees, movement.currency)}` : money(0, movement.currency)}</b><small>{feeBreakdown(movement)}</small></td><td><b className={movement.additionalPayment > 0 ? "movement-credit" : movement.additionalPayment < 0 ? "movement-debit" : ""}>{money(movement.additionalPayment, movement.currency)}</b></td><td><b className={movement.netChange >= 0 ? "movement-credit" : "movement-debit"}>{movement.netChange > 0 ? "+" : ""}{money(movement.netChange, movement.currency)}</b></td><td><b>{movement.reportRowId || "—"}</b><small>{movement.reportId ? `报告 ${movement.reportId}` : "WB 唯一行号"}</small></td></tr>)}{!loading && visibleMovements.length === 0 && <tr className="empty-row"><td colSpan={9}>{settlement?.available ? "没有符合当前筛选条件的财务明细" : "WB 正式财务结算明细暂时无法读取，请稍后手动同步"}</td></tr>}</tbody></table></div>
+          <div className="finance-movement-table-wrap">
+            <table className="finance-movement-table">
+              <thead><tr><th>结算日期</th><th>变动类型</th><th>订单 / 关联号</th><th>SKU</th><th>成交与佣金后结算</th><th>平台费用</th><th>补款</th><th>本笔净变动</th><th>WB 报告行号</th><th>账单余额轨迹<small>由当前余额倒推</small></th></tr></thead>
+              <tbody>
+                {visibleMovements.map((movement) => <tr key={movement.id}>
+                  <td><b>{movement.date || "—"}</b></td>
+                  <td><span className={`movement-kind ${movement.direction}`}>{movement.operation}</span><small>{movement.rawOperation || "WB 财务结算"}</small></td>
+                  <td><b title={movement.orderNumber || movement.orderUid || movement.srid}>{movement.orderNumber ? `订单 ${movement.orderNumber}` : movement.orderUid ? compact(movement.orderUid) : movement.srid ? compact(movement.srid) : "平台级费用"}</b><small title={movement.orderUid || movement.srid}>{movement.orderUid ? `UID ${compact(movement.orderUid, 8, 6)}` : movement.srid ? `SRID ${compact(movement.srid, 8, 6)}` : "未关联具体订单"}</small></td>
+                  <td><b>{movement.sellerSku || (movement.nmId ? String(movement.nmId) : "—")}</b><small>{movement.nmId ? `WB ${movement.nmId}` : "平台级"}</small></td>
+                  <td><b>{money(movement.transactionAmount, movement.currency)}</b><small>佣金后 {money(movement.settlementAmount, movement.currency)}</small></td>
+                  <td><b className={movement.platformFees > 0 ? "movement-debit" : ""}>{movement.platformFees > 0 ? `−${money(movement.platformFees, movement.currency)}` : money(0, movement.currency)}</b><small>{feeBreakdown(movement)}</small></td>
+                  <td><b className={movement.additionalPayment > 0 ? "movement-credit" : movement.additionalPayment < 0 ? "movement-debit" : ""}>{money(movement.additionalPayment, movement.currency)}</b></td>
+                  <td><b className={movement.netChange >= 0 ? "movement-credit" : "movement-debit"}>{movement.netChange > 0 ? "+" : ""}{money(movement.netChange, movement.currency)}</b></td>
+                  <td><b>{movement.reportRowId || "—"}</b><small>{movement.reportId ? `报告 ${movement.reportId}` : "WB 唯一行号"}</small></td>
+                  <td className="movement-balance-trace">{movement.balanceBefore !== null && movement.balanceAfter !== null ? <><b>{money(movement.balanceBefore, movement.currency)} → {money(movement.balanceAfter, movement.currency)}</b><small>账单推算 · 本笔 {movement.netChange >= 0 ? "增加" : "减少"} {money(Math.abs(movement.netChange), movement.currency)}</small></> : <><b>—</b><small>仅支持截至今日的余额轨迹</small></>}</td>
+                </tr>)}
+                {!loading && visibleMovements.length === 0 && <tr className="empty-row"><td colSpan={10}>{settlement?.available ? "没有符合当前筛选条件的财务明细" : "WB 正式财务结算明细暂时无法读取，请稍后手动同步"}</td></tr>}
+              </tbody>
+            </table>
+          </div>
           <footer className="product-table-footer"><span>共 {filteredMovements.length} 条 · 第 {Math.min(movementPage, movementPageCount)} / {movementPageCount} 页</span><div><button onClick={() => setMovementPage((value) => Math.max(1, value - 1))} disabled={movementPage <= 1}>← 上一页</button><button onClick={() => setMovementPage((value) => Math.min(movementPageCount, value + 1))} disabled={movementPage >= movementPageCount}>下一页 →</button></div></footer>
-          <p className="finance-ledger-note">准确性说明：订单结算、退货、物流、罚款、仓储等均按 WB 正式财务报告逐行展示并用 WB 行号去重。账户当前余额与可提现余额直接读取余额接口；提现处理等未提供逐笔公开 API 的动作不会伪造为订单明细。</p>
+          <p className="finance-ledger-note">准确性说明：每笔净变动来自 WB 正式财务报告并按 WB 行号去重；余额轨迹以实时当前余额为锚点，按结算行号倒推。WB 未提供每笔历史余额快照及完整提现流水 API，因此该列标记为“账单推算”，不会冒充平台原始余额流水。</p>
         </section>}
 
         <section className="product-table-panel">

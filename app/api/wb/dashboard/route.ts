@@ -1071,6 +1071,10 @@ function normalizedBalanceAmount(value: unknown, currency: string) {
   return currency === "CNY" ? amount / 100 : amount;
 }
 
+function roundedMoney(value: number) {
+  return Number(value.toFixed(2));
+}
+
 function financeOperationLabel(row: WbFinanceRow, netPayout: number) {
   const raw = `${row.sellerOperName || ""} ${row.docTypeName || ""}`.trim();
   if (/退货|退款|возврат|return/i.test(raw)) return "退货退款";
@@ -1704,6 +1708,15 @@ export async function GET(request: Request) {
     const balanceCurrency = financeCurrency(balanceResult.currency || movementCurrency);
     const balanceCurrent = normalizedBalanceAmount(balanceResult.current, balanceCurrency);
     const balanceAvailable = normalizedBalanceAmount(balanceResult.for_withdraw, balanceCurrency);
+    const balanceTraceAvailable = balanceCurrent !== null && financeDetailsResult.available && to === beijingDateKey();
+    let balanceCursor = balanceCurrent;
+    const financeMovementsWithBalance = financeMovements.map((movement) => {
+      if (!balanceTraceAvailable || balanceCursor === null) return { ...movement, balanceBefore: null, balanceAfter: null };
+      const balanceAfter = roundedMoney(balanceCursor);
+      const balanceBefore = roundedMoney(balanceAfter - movement.netChange);
+      balanceCursor = balanceBefore;
+      return { ...movement, balanceBefore, balanceAfter };
+    });
     return json({
       source: "wildberries",
       syncedAt: new Date().toISOString(),
@@ -1761,7 +1774,16 @@ export async function GET(request: Request) {
         unallocatedExpenses: financeDetailsResult.unallocatedExpenses,
       },
       financeMovementSummary,
-      financeMovements,
+      financeBalanceTrace: {
+        available: balanceTraceAvailable,
+        mode: "derived_from_current_balance",
+        source: "WB 当前余额快照＋WB 正式财务结算明细",
+        anchorBalance: balanceCurrent,
+        anchorAt: balanceResult.fetchedAt || null,
+        calculatedOpeningBalance: balanceTraceAvailable ? balanceCursor : null,
+        includesWithdrawalsOrUnpublishedChanges: false,
+      },
+      financeMovements: financeMovementsWithBalance,
       orderSummary: {
         ...detailedSummary,
         abnormalRate: detailedAbnormalRate,
