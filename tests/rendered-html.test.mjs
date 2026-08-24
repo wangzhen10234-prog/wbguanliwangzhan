@@ -24,12 +24,29 @@ test("server-renders the WB Insight dashboard", async () => {
   assert.match(html, /经营总览/);
   assert.match(html, /销售趋势/);
   assert.match(html, /销售状况/);
+  assert.match(html, /href="\/returns"[^>]*>.*退货/s);
   assert.match(html, /综合商品分析/);
   assert.match(html, /产品详情/);
   assert.match(html, /库存监控/);
   assert.match(html, /href="\/advertising"[^>]*>.*推广/s);
   assert.match(html, /平台活动评估/);
   assert.match(html, /08:00 · 14:00 · 19:00 · 23:00/);
+  assert.doesNotMatch(html, /codex-preview|SkeletonPreview|Your site is taking shape/);
+});
+
+test("server-renders the WB returns and logistics workbench", async () => {
+  const response = await render("/returns");
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
+
+  const html = await response.text();
+  assert.match(html, /退货订单与物流均来自 WB 官方 API/);
+  assert.match(html, /买家退货申请/);
+  assert.match(html, /退货订单与物流明细/);
+  assert.match(html, /运输至取货点/);
+  assert.match(html, /已到达，可取回/);
+  assert.match(html, /查看物流/);
+  assert.match(html, /不会补造物流节点/);
   assert.doesNotMatch(html, /codex-preview|SkeletonPreview|Your site is taking shape/);
 });
 
