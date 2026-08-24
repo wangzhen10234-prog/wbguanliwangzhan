@@ -87,6 +87,8 @@ type WbFeedback = {
 
 type WbFinanceRow = {
   rrdId?: number;
+  reportId?: number;
+  shkId?: number;
   nmId?: number;
   orderUid?: string;
   srid?: string;
@@ -113,6 +115,13 @@ type WbFinanceRow = {
   additionalPayment?: string | number;
 };
 
+type WbBalance = {
+  currency?: string;
+  current?: number;
+  for_withdraw?: number;
+  fetchedAt?: string;
+};
+
 type FinanceProduct = {
   nmId: number;
   sellerSku: string;
@@ -131,7 +140,7 @@ type FinanceSnapshot = {
   unallocatedExpenses: number;
 };
 
-type FinanceRowsSnapshot = { available: boolean; rows: WbFinanceRow[] };
+type FinanceRowsSnapshot = { available: boolean; rows: WbFinanceRow[]; fetchedAt?: string };
 
 type OrderFinance = {
   matched: boolean;
@@ -158,7 +167,7 @@ let stockCache: CacheEntry<WbStock[]> | null = null;
 let sellerStockCache: CacheEntry<SellerStockSnapshot> | null = null;
 let sellerWarehouseDirectoryCache: CacheEntry<SellerStockSnapshot> | null = null;
 let fbsOrderCache: CacheEntry<FbsOrderSnapshot> | null = null;
-let balanceCache: CacheEntry<{ current?: number; for_withdraw?: number }> | null = null;
+let balanceCache: CacheEntry<WbBalance> | null = null;
 let cardsCache: CacheEntry<WbCard[]> | null = null;
 let feedbacksCache: CacheEntry<WbFeedback[]> | null = null;
 let financeRowsCache: CacheEntry<FinanceRowsSnapshot> | null = null;
@@ -785,32 +794,34 @@ function resolveSellerWarehouseName(warehouse: SellerWarehouse & { officeName?: 
 async function loadBalance(token: string, forceRefresh = false) {
   if (!forceRefresh && balanceCache && balanceCache.expiresAt > Date.now()) return balanceCache.value;
   return dedupe(forceRefresh ? "balance-manual" : "balance", async () => {
-    const cached = await readEdgeCache<{ current?: number; for_withdraw?: number }>("balance");
-    const durableRecord = await readDurableRecord<{ current?: number; for_withdraw?: number }>("balance");
+    const cacheKey = "balance-v2";
+    const cached = await readEdgeCache<WbBalance>(cacheKey);
+    const durableRecord = await readDurableRecord<WbBalance>(cacheKey);
     const durable = durableRecord?.value ?? null;
     const fallback = balanceCache?.value ?? cached ?? durable;
     if (!forceRefresh && cached) {
       balanceCache = { value: cached, expiresAt: cacheExpiry() };
-      await writeDurableSnapshot("balance", cached);
+      await writeDurableSnapshot(cacheKey, cached);
       return cached;
     }
     if (durable && durableRecordIsFresh(durableRecord, forceRefresh)) {
       balanceCache = { value: durable, expiresAt: cacheExpiry() };
-      await writeEdgeCache("balance", durable);
+      await writeEdgeCache(cacheKey, durable);
       return durable;
     }
     try {
-      const balance = await wbRequest<{ current?: number; for_withdraw?: number }>(
+      const response = await wbRequest<WbBalance>(
         "https://finance-api.wildberries.ru/api/v1/account/balance",
         token,
       );
+      const balance = { ...response, fetchedAt: new Date().toISOString() };
       balanceCache = { value: balance, expiresAt: cacheExpiry() };
-      await Promise.all([writeEdgeCache("balance", balance), writeDurableSnapshot("balance", balance, forceRefresh)]);
+      await Promise.all([writeEdgeCache(cacheKey, balance), writeDurableSnapshot(cacheKey, balance, forceRefresh)]);
       return balance;
     } catch (error) {
       if (fallback) {
         balanceCache = { value: fallback, expiresAt: cacheExpiry() };
-        await writeEdgeCache("balance", fallback);
+        await writeEdgeCache(cacheKey, fallback);
         return fallback;
       }
       throw error;
@@ -938,7 +949,7 @@ function financeRowKey(row: WbFinanceRow) {
 async function loadFinanceRows(token: string, forceRefresh = false): Promise<FinanceRowsSnapshot> {
   if (!forceRefresh && financeRowsCache && financeRowsCache.expiresAt > Date.now()) return financeRowsCache.value;
   return dedupe(forceRefresh ? "finance-details-all-manual" : "finance-details-all", async () => {
-    const cacheKey = "finance-details-all-v4";
+    const cacheKey = "finance-details-all-v5";
     const slotCached = await readEdgeCache<FinanceRowsSnapshot>(cacheKey);
     const stableCached = await readStableEdgeCache<FinanceRowsSnapshot>(cacheKey);
     const durableRecord = await readDurableRecord<FinanceRowsSnapshot>(cacheKey);
@@ -1022,7 +1033,7 @@ async function loadFinanceRows(token: string, forceRefresh = false): Promise<Fin
         if (rowDate && rowDate < dateFrom) byRow.set(financeRowKey(row), row);
       }
       for (const row of refreshedRows) byRow.set(financeRowKey(row), row);
-      const snapshot = { available: true, rows: [...byRow.values()] };
+      const snapshot = { available: true, rows: [...byRow.values()], fetchedAt: new Date().toISOString() };
       financeRowsCache = { value: snapshot, expiresAt: cacheExpiry() };
       await Promise.all([writeEdgeCache(cacheKey, snapshot), writeStableEdgeCache(cacheKey, snapshot), writeRecentEdgeCache(cacheKey, snapshot), writeDurableSnapshot(cacheKey, snapshot, forceRefresh)]);
       return snapshot;
@@ -1045,6 +1056,33 @@ function financeRowValues(row: WbFinanceRow) {
   const wbExpenses = logisticsFee + acquiringFee + penaltyFee + deductionFee + storageFee + acceptanceFee;
   const additionalPayment = financeNumber(row.additionalPayment);
   return { transactionAmount, forPay, logisticsFee, acquiringFee, penaltyFee, deductionFee, storageFee, acceptanceFee, additionalPayment, wbExpenses, netPayout: forPay - wbExpenses + additionalPayment };
+}
+
+function financeCurrency(value?: string) {
+  const currency = String(value || "").trim().toUpperCase();
+  return /^[A-Z]{3}$/.test(currency) ? currency : "CNY";
+}
+
+function normalizedBalanceAmount(value: unknown, currency: string) {
+  if (value === null || value === undefined || value === "") return null;
+  const amount = Number(value);
+  if (!Number.isFinite(amount)) return null;
+  // WB's China seller balance widget returns CNY in fen, while the seller portal renders yuan.
+  return currency === "CNY" ? amount / 100 : amount;
+}
+
+function financeOperationLabel(row: WbFinanceRow, netPayout: number) {
+  const raw = `${row.sellerOperName || ""} ${row.docTypeName || ""}`.trim();
+  if (/возврат|return/i.test(raw)) return "退货退款";
+  if (/продаж|sale/i.test(raw)) return "订单销售结算";
+  if (/логист|delivery/i.test(raw)) return "物流费用";
+  if (/штраф|penalt/i.test(raw)) return "平台罚款";
+  if (/хранен|storag/i.test(raw)) return "仓储费用";
+  if (/прием|accept/i.test(raw)) return "入库费用";
+  if (/удерж|deduct/i.test(raw)) return "平台扣款";
+  if (/доплат|additional/i.test(raw)) return "平台补款";
+  if (raw) return raw;
+  return netPayout < 0 ? "平台扣款" : row.nmId ? "订单结算" : "平台入账";
 }
 
 function financeIdentity(value?: string) {
@@ -1205,7 +1243,7 @@ export async function GET(request: Request) {
     const [statistics, stockResult, balanceResult, cardsResult, feedbacksResult, sellerStockResult, fbsOrderResult, financeRowsResult] = await Promise.all([
       loadStatistics(token, forceRefresh),
       needsStockReport ? loadStocks(token, forceRefresh).catch(() => [] as WbStock[]) : Promise.resolve([] as WbStock[]),
-      needsBalance ? loadBalance(token, forceRefresh).catch(() => ({} as { current?: number; for_withdraw?: number })) : Promise.resolve({} as { current?: number; for_withdraw?: number }),
+      needsBalance ? loadBalance(token, forceRefresh).catch(() => ({} as WbBalance)) : Promise.resolve({} as WbBalance),
       cardsPromise,
       needsFeedbacks ? loadFeedbacks(token, forceRefresh).catch(() => [] as WbFeedback[]) : Promise.resolve([] as WbFeedback[]),
       needsSellerStocks
@@ -1304,6 +1342,73 @@ export async function GET(request: Request) {
         orderByIdentity.set(identity, order);
       }
     }
+    const orderNumberByFinanceKey = new Map<string, string>();
+    for (const order of allDetailedOrders) {
+      const nmId = Number(order.nmId || 0);
+      const orderUid = String(order.orderUid || "").trim();
+      const rid = financeIdentity(order.rid);
+      if (orderUid) orderNumberByFinanceKey.set(`order|${orderUid}|${nmId}`, order.orderNumber);
+      if (rid) orderNumberByFinanceKey.set(`rid|${rid}|${nmId}`, order.orderNumber);
+    }
+    const financeMovements = view === "finance"
+      ? financeRowsResult.rows
+          .filter((row) => {
+            const date = dayKey(row.rrDate || row.saleDt || row.orderDt);
+            return date >= from && date <= to;
+          })
+          .map((row) => {
+            const values = financeRowValues(row);
+            const nmId = Number(row.nmId || 0);
+            const orderUid = String(row.orderUid || "").trim();
+            const rid = financeIdentity(row.srid);
+            const orderNumber = (orderUid && orderNumberByFinanceKey.get(`order|${orderUid}|${nmId}`))
+              || (rid && orderNumberByFinanceKey.get(`rid|${rid}|${nmId}`))
+              || "";
+            return {
+              id: financeRowKey(row),
+              reportRowId: row.rrdId ? String(row.rrdId) : "",
+              reportId: row.reportId ? String(row.reportId) : "",
+              date: dayKey(row.rrDate || row.saleDt || row.orderDt),
+              operation: financeOperationLabel(row, values.netPayout),
+              rawOperation: row.sellerOperName || row.docTypeName || "",
+              direction: values.netPayout > 0 ? "credit" : values.netPayout < 0 ? "debit" : "neutral",
+              orderNumber,
+              orderUid,
+              srid: row.srid || "",
+              nmId,
+              sellerSku: row.vendorCode || "",
+              title: row.title || "",
+              transactionAmount: values.transactionAmount,
+              settlementAmount: values.forPay,
+              platformFees: values.wbExpenses,
+              additionalPayment: values.additionalPayment,
+              netChange: values.netPayout,
+              currency: financeCurrency(row.currency || balanceResult.currency),
+              feeBreakdown: {
+                logistics: values.logisticsFee,
+                acquiring: values.acquiringFee,
+                penalty: values.penaltyFee,
+                deduction: values.deductionFee,
+                storage: values.storageFee,
+                acceptance: values.acceptanceFee,
+              },
+            };
+          })
+          .sort((a, b) => b.date.localeCompare(a.date) || b.reportRowId.localeCompare(a.reportRowId, "en", { numeric: true }))
+      : [];
+    const movementCurrency = financeCurrency(financeMovements.find((row) => row.currency)?.currency || balanceResult.currency);
+    const financeMovementSummary = financeMovements.reduce((summary, row) => {
+      summary.netChange += row.netChange;
+      if (row.netChange > 0) {
+        summary.credits += row.netChange;
+        summary.creditEntries += 1;
+      } else if (row.netChange < 0) {
+        summary.debits += Math.abs(row.netChange);
+        summary.debitEntries += 1;
+      }
+      if (row.orderNumber) summary.matchedOrderEntries += 1;
+      return summary;
+    }, { entries: financeMovements.length, creditEntries: 0, debitEntries: 0, matchedOrderEntries: 0, credits: 0, debits: 0, netChange: 0, currency: movementCurrency });
     const todayDate = beijingDateKey();
     const todaySignedOrderIds = new Set<string>();
     const todaySignedSaleKeys = new Set<string>();
@@ -1596,6 +1701,9 @@ export async function GET(request: Request) {
 
     const schedule = syncSchedule();
     const financePayoutAmount = financeDetailsResult.products.reduce((sum, item) => sum + item.netPayout, 0);
+    const balanceCurrency = financeCurrency(balanceResult.currency || movementCurrency);
+    const balanceCurrent = normalizedBalanceAmount(balanceResult.current, balanceCurrency);
+    const balanceAvailable = normalizedBalanceAmount(balanceResult.for_withdraw, balanceCurrency);
     return json({
       source: "wildberries",
       syncedAt: new Date().toISOString(),
@@ -1611,6 +1719,7 @@ export async function GET(request: Request) {
       selectedWarehouse: requestedWarehouse || null,
       warehouses,
       dataAvailability: {
+        balance: balanceCurrent !== null && balanceAvailable !== null,
         productCards: cardsResult.length > 0,
         feedbacks: feedbacksResult.length > 0,
         inventory: stockResult.length > 0 || sellerStockResult.warehouses.length > 0,
@@ -1621,21 +1730,38 @@ export async function GET(request: Request) {
         salesAmount: useDetailedMetrics && days > 90 ? detailedSummary.salesAmount : salesAmount,
         ordersCount: useDetailedMetrics ? detailedSummary.orders : activeOrders.length,
         cancelledOrders: useDetailedMetrics ? detailedSummary.abnormal : cancelledOrders,
-        payoutAmount: financeDetailsResult.available ? financePayoutAmount : payoutAmount,
+        payoutAmount: financeDetailsResult.available
+          ? (view === "finance" ? financeMovementSummary.netChange : financePayoutAmount)
+          : (view === "finance" ? null : payoutAmount),
         returnsCount: useDetailedMetrics ? detailedSummary.abnormal : returns.length + cancelledOrders,
         returnRate: useDetailedMetrics ? detailedAbnormalRate : ((completedSales.length + returns.length + cancelledOrders) ? ((returns.length + cancelledOrders) / (completedSales.length + returns.length + cancelledOrders)) * 100 : returnRate),
-        balanceCurrent: Number(balanceResult.current || 0),
-        balanceAvailable: Number(balanceResult.for_withdraw || 0),
+        balanceCurrent,
+        balanceAvailable,
+      },
+      accountBalance: {
+        available: balanceCurrent !== null && balanceAvailable !== null,
+        source: "WB /api/v1/account/balance",
+        currency: balanceCurrency,
+        current: balanceCurrent,
+        forWithdraw: balanceAvailable,
+        rawCurrent: balanceResult.current ?? null,
+        rawForWithdraw: balanceResult.for_withdraw ?? null,
+        unitScale: balanceCurrency === "CNY" ? 100 : 1,
+        fetchedAt: balanceResult.fetchedAt || null,
       },
       trend: [...trendMap.values()],
       categories,
       products,
       settlement: {
         available: financeDetailsResult.available,
-        source: financeDetailsResult.available ? "WB 销售实现报告（正式结算）" : "WB 销售接口（预估）",
+        source: financeDetailsResult.available ? "WB /api/finance/v1/sales-reports/detailed" : "WB 正式财务结算明细暂不可用",
+        currency: movementCurrency,
+        fetchedAt: financeRowsResult.fetchedAt || null,
         rowsCount: financeDetailsResult.rowsCount,
         unallocatedExpenses: financeDetailsResult.unallocatedExpenses,
       },
+      financeMovementSummary,
+      financeMovements,
       orderSummary: {
         ...detailedSummary,
         abnormalRate: detailedAbnormalRate,
@@ -1644,7 +1770,7 @@ export async function GET(request: Request) {
         todaySignedOrderIds: [...todaySignedOrderIds],
         todaySignedUnmatched: todaySignedSaleKeys.size,
       },
-      orderDetails: includeOrderDetails ? detailedOrders : [],
+      orderDetails: includeOrderDetails && view !== "finance" ? detailedOrders : [],
       inventory: {
         available: stockResult.length > 0 || sellerStockResult.warehouses.length > 0,
         totalQuantity: [...stockByProduct.values()].reduce((sum, value) => sum + value, 0),
