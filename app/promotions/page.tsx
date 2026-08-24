@@ -90,6 +90,7 @@ type Evaluation = {
 };
 
 type ParticipationFilter = "all" | "in-action" | "scheduled" | "available";
+type SummaryView = "promotions" | "products" | "participating" | "profit" | "loss" | "missing";
 
 const DAY_MS = 86_400_000;
 
@@ -159,8 +160,10 @@ export default function PromotionsPage() {
   const [selectedPromotion, setSelectedPromotion] = useState("all");
   const [decisionFilter, setDecisionFilter] = useState("all");
   const [participationFilter, setParticipationFilter] = useState<ParticipationFilter>("all");
+  const [activeSummary, setActiveSummary] = useState<SummaryView | null>(null);
   const [query, setQuery] = useState("");
   const forceRefreshRef = useRef(false);
+  const calendarRef = useRef<HTMLElement | null>(null);
   const tableRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
@@ -303,12 +306,14 @@ export default function PromotionsPage() {
     });
   }, [decisionFilter, evaluations, participationFilter, query, selectedPromotion]);
 
-  function showParticipatingProducts() {
-    setParticipationFilter((value) => value === "in-action" ? "all" : "in-action");
+  function showSummary(view: SummaryView) {
+    setActiveSummary(view);
     setSelectedPromotion("all");
-    setDecisionFilter("all");
+    setParticipationFilter(view === "participating" ? "in-action" : "all");
+    setDecisionFilter(view === "profit" ? "profit" : view === "loss" ? "loss" : view === "missing" ? "missing" : "all");
     setQuery("");
-    window.requestAnimationFrame(() => tableRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
+    const target = view === "promotions" ? calendarRef : tableRef;
+    window.requestAnimationFrame(() => target.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
   }
 
   function refresh() {
@@ -331,17 +336,17 @@ export default function PromotionsPage() {
         </section>
 
         <section className="promotion-summary-grid" aria-label="活动评估汇总">
-          <article><span>可评估活动</span><strong>{summary.promotions}</strong><small>未来 90 天 WB 可参与活动</small></article>
-          <article><span>适配商品</span><strong>{summary.products}</strong><small>已取得活动计划价</small></article>
-          <button type="button" className={`participating ${participationFilter === "in-action" ? "active" : ""}`} aria-pressed={participationFilter === "in-action"} onClick={showParticipatingProducts}><span>当前正在参与活动的商品</span><strong>{summary.participatingProducts}</strong><small>{summary.participatingRows} 条活动商品明细 · 点击查看</small></button>
-          <article className="good"><span>预计可盈利</span><strong>{summary.profitable}</strong><small>按单件活动价测算</small></article>
-          <article className={summary.loss ? "bad" : ""}><span>预计会亏损</span><strong>{summary.loss}</strong><small>不建议直接降至活动价</small></article>
-          <article className={summary.missing ? "attention" : ""}><span>成本待补全</span><strong>{summary.missing}</strong><small>需先完善产品详情数据</small></article>
+          <button type="button" className={activeSummary === "promotions" ? "active" : ""} aria-pressed={activeSummary === "promotions"} onClick={() => showSummary("promotions")}><span>可评估活动</span><strong>{summary.promotions}</strong><small>未来 90 天活动 · 点击查看</small></button>
+          <button type="button" className={activeSummary === "products" ? "active" : ""} aria-pressed={activeSummary === "products"} onClick={() => showSummary("products")}><span>适配商品</span><strong>{summary.products}</strong><small>{evaluations.length} 条活动商品明细 · 点击查看</small></button>
+          <button type="button" className={`participating ${activeSummary === "participating" ? "active" : ""}`} aria-pressed={activeSummary === "participating"} onClick={() => showSummary("participating")}><span>当前正在参与活动的商品</span><strong>{summary.participatingProducts}</strong><small>{summary.participatingRows} 条活动商品明细 · 点击查看</small></button>
+          <button type="button" className={`good ${activeSummary === "profit" ? "active" : ""}`} aria-pressed={activeSummary === "profit"} onClick={() => showSummary("profit")}><span>预计可盈利</span><strong>{summary.profitable}</strong><small>点击查看可盈利商品明细</small></button>
+          <button type="button" className={`${summary.loss ? "bad" : ""} ${activeSummary === "loss" ? "active" : ""}`} aria-pressed={activeSummary === "loss"} onClick={() => showSummary("loss")}><span>预计会亏损</span><strong>{summary.loss}</strong><small>点击查看预计亏损商品</small></button>
+          <button type="button" className={`${summary.missing ? "attention" : ""} ${activeSummary === "missing" ? "active" : ""}`} aria-pressed={activeSummary === "missing"} onClick={() => showSummary("missing")}><span>成本待补全</span><strong>{summary.missing}</strong><small>点击查看待补成本商品</small></button>
         </section>
 
         {error && <section className="promotion-error" role="alert"><strong>活动评估暂不可用</strong><span>{error}</span><button type="button" onClick={refresh}>重新读取</button></section>}
 
-        <section className="promotion-calendar-panel">
+        <section className="promotion-calendar-panel" ref={calendarRef}>
           <div className="promotion-section-heading"><div><h2>促销活动日历</h2><p>降价比例按每个 SKU 的当前价与计划价计算；“加成”是 WB 公布的排名权益，不等同于实际访客增长。</p></div><span>{loading ? "同步中…" : `${promotionData?.promotions.length ?? 0} 个活动`}</span></div>
           <div className="promotion-card-grid">
             {(promotionData?.promotions ?? []).map((promotion) => {
@@ -351,7 +356,7 @@ export default function PromotionsPage() {
               const minReduction = reductionRates.length ? Math.min(...reductionRates) : null;
               const maxReduction = reductionRates.length ? Math.max(...reductionRates) : null;
               const boost = boostReference(promotion);
-              return <button type="button" key={promotion.id} className={`promotion-card ${selectedPromotion === String(promotion.id) ? "active" : ""}`} onClick={() => { setSelectedPromotion((value) => value === String(promotion.id) ? "all" : String(promotion.id)); setParticipationFilter("all"); }}>
+              return <button type="button" key={promotion.id} className={`promotion-card ${selectedPromotion === String(promotion.id) ? "active" : ""}`} onClick={() => { setActiveSummary(null); setSelectedPromotion((value) => value === String(promotion.id) ? "all" : String(promotion.id)); setParticipationFilter("all"); setDecisionFilter("all"); setQuery(""); window.requestAnimationFrame(() => tableRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })); }}>
                 <div className="promotion-card-head"><span className={`promotion-state ${state.key}`}>{state.label}</span><small>{promotion.type === "auto" ? "自动活动" : "常规活动"}</small></div>
                 <strong title={promotion.name}>{promotion.name}</strong>
                 <p>{dateTime(promotion.startDateTime)} — {dateTime(promotion.endDateTime)}</p>
@@ -369,15 +374,15 @@ export default function PromotionsPage() {
           <div className="promotion-table-toolbar">
             <div><h2>商品活动盈亏明细</h2><p>活动价是 WB 要求的计划售价；安全底价使用产品详情中的完整成本与费率反推。</p></div>
             <div className="promotion-filters">
-              <input aria-label="搜索 SKU、商品或活动" type="search" value={query} placeholder="搜索 SKU、商品或活动" onChange={(event) => setQuery(event.target.value)} />
-              <select aria-label="选择活动" value={selectedPromotion} onChange={(event) => setSelectedPromotion(event.target.value)}><option value="all">全部活动</option>{(promotionData?.promotions ?? []).map((promotion) => <option key={promotion.id} value={promotion.id}>{promotion.name}</option>)}</select>
-              <select aria-label="选择活动参与状态" value={participationFilter} onChange={(event) => setParticipationFilter(event.target.value as ParticipationFilter)}><option value="all">全部参与状态</option><option value="in-action">当前正在参与</option><option value="scheduled">已报名待开始</option><option value="available">可参与未加入</option></select>
-              <select aria-label="选择评估结果" value={decisionFilter} onChange={(event) => setDecisionFilter(event.target.value)}><option value="all">全部评估结果</option><option value="profit">可盈利参与</option><option value="loss">参与将亏损</option><option value="missing">成本待补全</option></select>
+              <input aria-label="搜索 SKU、商品或活动" type="search" value={query} placeholder="搜索 SKU、商品或活动" onChange={(event) => { setActiveSummary(null); setQuery(event.target.value); }} />
+              <select aria-label="选择活动" value={selectedPromotion} onChange={(event) => { setActiveSummary(null); setSelectedPromotion(event.target.value); }}><option value="all">全部活动</option>{(promotionData?.promotions ?? []).map((promotion) => <option key={promotion.id} value={promotion.id}>{promotion.name}</option>)}</select>
+              <select aria-label="选择活动参与状态" value={participationFilter} onChange={(event) => { setActiveSummary(null); setParticipationFilter(event.target.value as ParticipationFilter); }}><option value="all">全部参与状态</option><option value="in-action">当前正在参与</option><option value="scheduled">已报名待开始</option><option value="available">可参与未加入</option></select>
+              <select aria-label="选择评估结果" value={decisionFilter} onChange={(event) => { setActiveSummary(null); setDecisionFilter(event.target.value); }}><option value="all">全部评估结果</option><option value="profit">可盈利参与</option><option value="loss">参与将亏损</option><option value="missing">成本待补全</option></select>
             </div>
           </div>
           <div className="promotion-table-wrap">
             <table className="promotion-table">
-              <thead><tr><th>商品</th><th>活动</th><th>当前售价</th><th>活动计划价</th><th>降价比例</th><th>活动总折扣</th><th>排名/流量加成</th><th>活动价预计总成本</th><th>安全底价</th><th>预计盈亏</th><th>评估结果</th></tr></thead>
+              <thead><tr><th>商品</th><th>活动</th><th>当前售价</th><th>活动计划价</th><th>降价比例</th><th>活动总折扣</th><th>排名/流量加成</th><th>活动价预计总成本</th><th>安全底价</th><th>预计盈亏金额</th><th>预计利润率</th><th>评估结果</th></tr></thead>
               <tbody>
                 {filtered.map((row) => {
                   const boost = boostReference(row.promotion);
@@ -391,11 +396,12 @@ export default function PromotionsPage() {
                     <td><b>{boost === null ? "未量化" : `+${boost.boost}%${boost.current ? "" : " 起"}`}</b><small>{boost === null ? "平台未给出档位" : boost.current ? `当前参与率 ${percent(row.promotion.participationPercentage)}` : `参与率达到 ${percent(boost.participationRate)}`}</small></td>
                     <td><b>{money(row.totalCostCny, "CNY")}</b><small>{row.variableRate === null ? "产品详情待补" : `固定 ${money(row.fixedCostCny, "CNY")} + 比例费 ${percent(row.variableRate)}`}</small></td>
                     <td><b>{money(row.breakEvenPriceCny, "CNY")}</b><small>低于此价预计亏损</small></td>
-                    <td><b className={row.decision === "profit" ? "value-good" : row.decision === "loss" ? "value-bad" : ""}>{row.profitCny === null ? "待补成本" : `${row.profitCny >= 0 ? "+" : "−"}${money(Math.abs(row.profitCny), "CNY")}`}</b><small>{row.profitRate === null ? "无法计算利润率" : `利润率 ${percent(row.profitRate)}`}</small></td>
+                    <td><b className={row.decision === "profit" ? "value-good" : row.decision === "loss" ? "value-bad" : ""}>{row.profitCny === null ? "待补成本" : `${row.profitCny >= 0 ? "+" : "−"}${money(Math.abs(row.profitCny), "CNY")}`}</b><small>活动价 − 预计总成本</small></td>
+                    <td><b className={row.decision === "profit" ? "value-good" : row.decision === "loss" ? "value-bad" : ""}>{percent(row.profitRate)}</b><small>按活动成交价计算</small></td>
                     <td><span className={`promotion-decision ${row.decision}`}>{row.decision === "profit" ? "可盈利参与" : row.decision === "loss" ? "参与将亏损" : "成本待补全"}</span></td>
                   </tr>;
                 })}
-                {!loading && filtered.length === 0 && <tr className="empty-row"><td colSpan={11}>{error ? "促销数据暂时无法读取" : "没有符合当前筛选条件的商品"}</td></tr>}
+                {!loading && filtered.length === 0 && <tr className="empty-row"><td colSpan={12}>{error ? "促销数据暂时无法读取" : "没有符合当前筛选条件的商品"}</td></tr>}
               </tbody>
             </table>
           </div>
