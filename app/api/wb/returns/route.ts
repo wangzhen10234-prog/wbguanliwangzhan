@@ -136,18 +136,24 @@ function syncSchedule(now = Date.now()) {
 }
 
 async function wbRequest<T>(url: string, token: string) {
-  const response = await fetch(url, {
-    headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
-    cache: "no-store",
-    signal: AbortSignal.timeout(25_000),
-  });
-  if (response.status === 204) return null as T;
-  if (!response.ok) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const response = await fetch(url, {
+      headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+      cache: "no-store",
+      signal: AbortSignal.timeout(25_000),
+    });
+    if (response.status === 204) return null as T;
+    if (response.ok) return response.json() as Promise<T>;
+    if (response.status === 429 && attempt < 2) {
+      const retrySeconds = Math.max(1, Math.min(30, number(response.headers.get("X-RateLimit-Retry") || response.headers.get("Retry-After") || 10)));
+      await new Promise((resolve) => setTimeout(resolve, retrySeconds * 1_000 + 500));
+      continue;
+    }
     const error = new Error(`WB returns request failed: ${response.status}`) as WorkerError;
     error.status = response.status;
     throw error;
   }
-  return response.json() as Promise<T>;
+  throw new Error("WB returns request retry exhausted");
 }
 
 async function readSnapshot(cacheKey: string) {
@@ -193,14 +199,19 @@ async function loadClaims(token: string, isArchive: boolean) {
 async function fetchReturnsSnapshot(token: string, window: { from: string; to: string; maxDays: number }) {
   const warnings: string[] = [];
   const chunks = dateChunks(window.from, window.to);
-  const [reports, activeClaimsResult, archivedClaimsResult] = await Promise.all([
-    Promise.all(chunks.map(async (chunk) => {
+  const reportsPromise = (async () => {
+    const reports: GoodsReturnRow[][] = [];
+    for (const chunk of chunks) {
       const url = new URL("https://seller-analytics-api.wildberries.ru/api/v1/analytics/goods-return");
       url.searchParams.set("dateFrom", chunk.from);
       url.searchParams.set("dateTo", chunk.to);
       const response = await wbRequest<{ report?: GoodsReturnRow[] }>(url.toString(), token);
-      return response?.report || [];
-    })),
+      reports.push(response?.report || []);
+    }
+    return reports;
+  })();
+  const [reports, activeClaimsResult, archivedClaimsResult] = await Promise.all([
+    reportsPromise,
     loadClaims(token, false).catch((error) => ({ error: error as WorkerError, claims: [] as ReturnClaim[], total: 0 })),
     loadClaims(token, true).catch((error) => ({ error: error as WorkerError, claims: [] as ReturnClaim[], total: 0 })),
   ]);
