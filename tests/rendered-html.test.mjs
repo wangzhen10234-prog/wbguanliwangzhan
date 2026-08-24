@@ -42,6 +42,7 @@ test("server-renders the promotion evaluation workbench", async () => {
   assert.match(html, /促销活动日历/);
   assert.match(html, /当前正在参与活动的商品/);
   assert.match(html, /当前正在参与/);
+  assert.match(html, /已报名待开始/);
   assert.match(html, /商品活动盈亏明细/);
   assert.match(html, /排名\/流量加成/);
   assert.doesNotMatch(html, /codex-preview|SkeletonPreview|Your site is taking shape/);

@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AppSidebar } from "../_components/app-sidebar";
 import { normalizeProductSku, productCostSourceKey } from "../_lib/product-cost-aliases";
+import { calculatePromotionProfit } from "../_lib/promotion-evaluation";
 
 type PromotionProduct = {
   nmId: number;
@@ -71,12 +72,16 @@ type Evaluation = {
   product: Product | null;
   promoProduct: PromotionProduct;
   cost: CostRow | null;
-  currentPriceRub: number;
-  promoPriceRub: number;
+  sourceCurrency: "RUB" | "CNY";
+  currentPrice: number;
+  promoPrice: number;
+  activityPlanPrice: number;
+  usesLowestActivePrice: boolean;
   reductionRate: number | null;
   costReady: boolean;
   promoPriceCny: number | null;
   fixedCostCny: number | null;
+  totalCostCny: number | null;
   variableRate: number | null;
   breakEvenPriceCny: number | null;
   profitCny: number | null;
@@ -84,7 +89,7 @@ type Evaluation = {
   decision: "profit" | "loss" | "missing";
 };
 
-type ParticipationFilter = "all" | "in-action" | "available";
+type ParticipationFilter = "all" | "in-action" | "scheduled" | "available";
 
 const DAY_MS = 86_400_000;
 
@@ -214,45 +219,52 @@ export default function PromotionsPage() {
 
   const evaluations = useMemo(() => {
     const rows: Evaluation[] = [];
+    const lowestActivePrice = new Map<string, number>();
+    for (const promotion of promotionData?.promotions ?? []) {
+      if (promotionState(promotion).key !== "active") continue;
+      for (const promoProduct of promotion.products) {
+        const price = Number(promoProduct.planPrice || 0);
+        if (!promoProduct.inAction || price <= 0) continue;
+        const currency = promoProduct.currencyCode.toUpperCase() === "CNY" ? "CNY" : "RUB";
+        const key = `${promoProduct.nmId}:${currency}`;
+        lowestActivePrice.set(key, Math.min(lowestActivePrice.get(key) ?? price, price));
+      }
+    }
     for (const promotion of promotionData?.promotions ?? []) {
       for (const promoProduct of promotion.products) {
         const product = productById.get(promoProduct.nmId) ?? null;
         const cost = costByNmId.get(promoProduct.nmId)
           ?? (product ? costBySku.get(productCostSourceKey(product.sku)) ?? null : null);
-        const exchangeRate = Number(cost?.exchangeRate || 0);
-        const productCost = cost
-          ? cost.productCostRub > 0 && exchangeRate > 0 ? cost.productCostRub / exchangeRate : Number(cost.productCostCny || 0)
-          : 0;
-        const lastMile = cost ? (cost.lengthCm * cost.widthCm * cost.heightCm / 1000) * 2 + 6 : 0;
-        // The WB plan price already includes the required promotional discount.
-        // Do not subtract the registered activity-discount reserve a second time.
-        const variableRate = cost ? cost.commissionRate + cost.adRate + cost.returnLossRate : 0;
-        const currentPriceRub = Number(promoProduct.price || product?.averagePrice || 0);
-        const promoPriceRub = Number(promoProduct.planPrice || 0);
-        const reductionRate = currentPriceRub > 0 && promoPriceRub > 0 ? Math.max(0, (currentPriceRub - promoPriceRub) / currentPriceRub * 100) : null;
-        const promoPriceCny = promoPriceRub > 0 && exchangeRate > 0 ? promoPriceRub / exchangeRate : null;
-        const fixedCostCny = cost ? productCost + Number(cost.handlingFeeCny || 0) + lastMile : null;
-        const costReady = Boolean(cost && productCost > 0 && exchangeRate > 0 && promoPriceCny !== null && variableRate < 100);
-        const breakEvenPriceCny = costReady && fixedCostCny !== null ? fixedCostCny / (1 - variableRate / 100) : null;
-        const profitCny = costReady && promoPriceCny !== null && fixedCostCny !== null ? promoPriceCny * (1 - variableRate / 100) - fixedCostCny : null;
-        const profitRate = profitCny !== null && promoPriceCny ? profitCny / promoPriceCny * 100 : null;
+        const currentPrice = Number(promoProduct.price || product?.averagePrice || 0);
+        const activityPlanPrice = Number(promoProduct.planPrice || 0);
+        const sourceCurrency = promoProduct.currencyCode.toUpperCase() === "CNY" ? "CNY" : "RUB";
+        const isCurrentlyParticipating = promoProduct.inAction && promotionState(promotion).key === "active";
+        const promoPrice = isCurrentlyParticipating
+          ? lowestActivePrice.get(`${promoProduct.nmId}:${sourceCurrency}`) ?? activityPlanPrice
+          : activityPlanPrice;
+        const reductionRate = currentPrice > 0 && promoPrice > 0 ? Math.max(0, (currentPrice - promoPrice) / currentPrice * 100) : null;
+        const calculated = calculatePromotionProfit(promoProduct.currencyCode, promoPrice, cost);
         rows.push({
           key: `${promotion.id}-${promoProduct.nmId}`,
           promotion,
           product,
           promoProduct,
           cost,
-          currentPriceRub,
-          promoPriceRub,
+          sourceCurrency: calculated.sourceCurrency,
+          currentPrice,
+          promoPrice,
+          activityPlanPrice,
+          usesLowestActivePrice: isCurrentlyParticipating && promoPrice < activityPlanPrice,
           reductionRate,
-          costReady,
-          promoPriceCny,
-          fixedCostCny,
-          variableRate: cost ? variableRate : null,
-          breakEvenPriceCny,
-          profitCny,
-          profitRate,
-          decision: !costReady ? "missing" : (profitCny ?? 0) >= 0 ? "profit" : "loss",
+          costReady: calculated.ready,
+          promoPriceCny: calculated.promoPriceCny,
+          fixedCostCny: calculated.fixedCostCny,
+          totalCostCny: calculated.totalCostCny,
+          variableRate: calculated.variableRate,
+          breakEvenPriceCny: calculated.breakEvenPriceCny,
+          profitCny: calculated.profitCny,
+          profitRate: calculated.profitRate,
+          decision: !calculated.ready ? "missing" : (calculated.profitCny ?? 0) >= 0 ? "profit" : "loss",
         });
       }
     }
@@ -268,8 +280,8 @@ export default function PromotionsPage() {
   const summary = useMemo(() => ({
     promotions: promotionData?.promotions.length ?? 0,
     products: new Set(evaluations.map((row) => row.promoProduct.nmId)).size,
-    participatingProducts: new Set(evaluations.filter((row) => row.promoProduct.inAction).map((row) => row.promoProduct.nmId)).size,
-    participatingRows: evaluations.filter((row) => row.promoProduct.inAction).length,
+    participatingProducts: new Set(evaluations.filter((row) => row.promoProduct.inAction && promotionState(row.promotion).key === "active").map((row) => row.promoProduct.nmId)).size,
+    participatingRows: evaluations.filter((row) => row.promoProduct.inAction && promotionState(row.promotion).key === "active").length,
     profitable: evaluations.filter((row) => row.decision === "profit").length,
     loss: evaluations.filter((row) => row.decision === "loss").length,
     missing: evaluations.filter((row) => row.decision === "missing").length,
@@ -280,8 +292,11 @@ export default function PromotionsPage() {
     return evaluations.filter((row) => {
       const matchesPromotion = selectedPromotion === "all" || String(row.promotion.id) === selectedPromotion;
       const matchesDecision = decisionFilter === "all" || row.decision === decisionFilter;
+      const state = promotionState(row.promotion).key;
       const matchesParticipation = participationFilter === "all"
-        || (participationFilter === "in-action" ? row.promoProduct.inAction : !row.promoProduct.inAction);
+        || (participationFilter === "in-action" && row.promoProduct.inAction && state === "active")
+        || (participationFilter === "scheduled" && row.promoProduct.inAction && state === "upcoming")
+        || (participationFilter === "available" && !row.promoProduct.inAction);
       const matchesQuery = !needle || [row.product?.sku || "", row.product?.name || "", String(row.promoProduct.nmId), row.promotion.name]
         .some((value) => normalizeProductSku(value).includes(needle));
       return matchesPromotion && matchesDecision && matchesParticipation && matchesQuery;
@@ -311,7 +326,7 @@ export default function PromotionsPage() {
 
         <section className="promotion-notice">
           <span className="promotion-notice-icon">%</span>
-          <div><strong>按 WB 活动计划价逐品测算</strong><p>预计利润已计入产品本金、操作费、尾程物流、佣金、广告和退损预留；活动降价已经包含在 WB 计划价中，不会重复扣减。</p></div>
+          <div><strong>按 WB 活动计划价逐品测算</strong><p>预计利润已计入产品本金、操作费、尾程物流、佣金、广告、折扣费预留和退损预留；多个活动同时生效时按最低活动价测算，不会把降价额重复计入成本。</p></div>
           <small>{promotionData ? `${dateTime(promotionData.window.from)} — ${dateTime(promotionData.window.to)}` : "正在读取活动日历"}</small>
         </section>
 
@@ -356,25 +371,25 @@ export default function PromotionsPage() {
             <div className="promotion-filters">
               <input aria-label="搜索 SKU、商品或活动" type="search" value={query} placeholder="搜索 SKU、商品或活动" onChange={(event) => setQuery(event.target.value)} />
               <select aria-label="选择活动" value={selectedPromotion} onChange={(event) => setSelectedPromotion(event.target.value)}><option value="all">全部活动</option>{(promotionData?.promotions ?? []).map((promotion) => <option key={promotion.id} value={promotion.id}>{promotion.name}</option>)}</select>
-              <select aria-label="选择活动参与状态" value={participationFilter} onChange={(event) => setParticipationFilter(event.target.value as ParticipationFilter)}><option value="all">全部参与状态</option><option value="in-action">当前正在参与</option><option value="available">可参与未加入</option></select>
+              <select aria-label="选择活动参与状态" value={participationFilter} onChange={(event) => setParticipationFilter(event.target.value as ParticipationFilter)}><option value="all">全部参与状态</option><option value="in-action">当前正在参与</option><option value="scheduled">已报名待开始</option><option value="available">可参与未加入</option></select>
               <select aria-label="选择评估结果" value={decisionFilter} onChange={(event) => setDecisionFilter(event.target.value)}><option value="all">全部评估结果</option><option value="profit">可盈利参与</option><option value="loss">参与将亏损</option><option value="missing">成本待补全</option></select>
             </div>
           </div>
           <div className="promotion-table-wrap">
             <table className="promotion-table">
-              <thead><tr><th>商品</th><th>活动</th><th>当前售价</th><th>活动计划价</th><th>降价比例</th><th>活动总折扣</th><th>排名/流量加成</th><th>完整成本</th><th>安全底价</th><th>预计盈亏</th><th>评估结果</th></tr></thead>
+              <thead><tr><th>商品</th><th>活动</th><th>当前售价</th><th>活动计划价</th><th>降价比例</th><th>活动总折扣</th><th>排名/流量加成</th><th>活动价预计总成本</th><th>安全底价</th><th>预计盈亏</th><th>评估结果</th></tr></thead>
               <tbody>
                 {filtered.map((row) => {
                   const boost = boostReference(row.promotion);
                   return <tr key={row.key}>
                     <td><div className="promotion-product-cell"><ProductPhoto product={row.product} /><div><b>{row.product?.sku || `WB ${row.promoProduct.nmId}`}</b><small>{row.product?.name || `nmId ${row.promoProduct.nmId}`}</small></div></div></td>
-                    <td><b title={row.promotion.name}>{row.promotion.name}</b><small>{row.promoProduct.inAction ? "已参加" : "可参加"}</small></td>
-                    <td><b>{money(row.currentPriceRub, "RUB")}</b><small>WB 活动接口当前价</small></td>
-                    <td><b>{money(row.promoPriceRub, "RUB")}</b><small>{money(row.promoPriceCny, "CNY")}</small></td>
+                    <td><b title={row.promotion.name}>{row.promotion.name}</b><small>{row.promoProduct.inAction ? promotionState(row.promotion).key === "upcoming" ? "已报名 · 待开始" : "已参加" : "可参加"}</small></td>
+                    <td><b>{money(row.currentPrice, row.sourceCurrency)}</b><small>WB 接口币种 {row.sourceCurrency}</small></td>
+                    <td><b>{money(row.promoPrice, row.sourceCurrency)}</b><small>{row.usesLowestActivePrice ? `该活动计划 ${money(row.activityPlanPrice, row.sourceCurrency)} · 同期取最低价` : row.sourceCurrency === "CNY" ? "活动成交价" : `折合 ${money(row.promoPriceCny, "CNY")}`}</small></td>
                     <td><b className={(row.reductionRate ?? 0) >= 20 ? "value-bad" : ""}>{percent(row.reductionRate)}</b><small>当前价 → 计划价</small></td>
                     <td><b>{percent(row.promoProduct.planDiscount)}</b><small>当前 {percent(row.promoProduct.discount)}</small></td>
                     <td><b>{boost === null ? "未量化" : `+${boost.boost}%${boost.current ? "" : " 起"}`}</b><small>{boost === null ? "平台未给出档位" : boost.current ? `当前参与率 ${percent(row.promotion.participationPercentage)}` : `参与率达到 ${percent(boost.participationRate)}`}</small></td>
-                    <td><b>{money(row.fixedCostCny, "CNY")}</b><small>{row.variableRate === null ? "产品详情待补" : `另计比例费 ${percent(row.variableRate)}`}</small></td>
+                    <td><b>{money(row.totalCostCny, "CNY")}</b><small>{row.variableRate === null ? "产品详情待补" : `固定 ${money(row.fixedCostCny, "CNY")} + 比例费 ${percent(row.variableRate)}`}</small></td>
                     <td><b>{money(row.breakEvenPriceCny, "CNY")}</b><small>低于此价预计亏损</small></td>
                     <td><b className={row.decision === "profit" ? "value-good" : row.decision === "loss" ? "value-bad" : ""}>{row.profitCny === null ? "待补成本" : `${row.profitCny >= 0 ? "+" : "−"}${money(Math.abs(row.profitCny), "CNY")}`}</b><small>{row.profitRate === null ? "无法计算利润率" : `利润率 ${percent(row.profitRate)}`}</small></td>
                     <td><span className={`promotion-decision ${row.decision}`}>{row.decision === "profit" ? "可盈利参与" : row.decision === "loss" ? "参与将亏损" : "成本待补全"}</span></td>
