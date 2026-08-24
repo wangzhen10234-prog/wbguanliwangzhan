@@ -31,6 +31,14 @@ test("server-renders the WB Insight dashboard", async () => {
   assert.match(html, /href="\/advertising"[^>]*>.*推广/s);
   assert.match(html, /平台活动评估/);
   assert.match(html, /08:00 · 14:00 · 19:00 · 23:00/);
+  const navigation = html.match(/<nav[^>]*aria-label="主导航"[^>]*>(.*?)<\/nav>/s)?.[1] ?? "";
+  const expectedOrder = ["经营总览", "销售状况", "综合商品分析", "产品详情", "库存监控", "退货", "回款与余额", "平台活动评估", "推广"];
+  let previousIndex = -1;
+  for (const label of expectedOrder) {
+    const currentIndex = navigation.indexOf(label);
+    assert.ok(currentIndex > previousIndex, `${label} should appear in the requested sidebar order`);
+    previousIndex = currentIndex;
+  }
   assert.doesNotMatch(html, /codex-preview|SkeletonPreview|Your site is taking shape/);
 });
 
@@ -45,7 +53,9 @@ test("server-renders the WB returns and logistics workbench", async () => {
   assert.match(html, /退货订单与物流明细/);
   assert.match(html, /运输至取货点/);
   assert.match(html, /已到达，可取回/);
-  assert.match(html, /查看物流/);
+  assert.match(html, /退货时间/);
+  assert.match(html, /查看详情/);
+  assert.doesNotMatch(html, />目的取货点<\/th>/);
   assert.match(html, /不会补造物流节点/);
   assert.doesNotMatch(html, /codex-preview|SkeletonPreview|Your site is taking shape/);
 });

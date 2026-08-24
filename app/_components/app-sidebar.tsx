@@ -1,5 +1,4 @@
 "use client";
-/* eslint-disable @next/next/no-html-link-for-pages -- Native navigation is required because the deployed vinext router intercepts Link clicks without completing navigation. */
 
 import type { ReactNode } from "react";
 
@@ -27,19 +26,23 @@ function timeLabel(value?: string) {
 }
 
 export function AppSidebar({ active, syncedAt, nextSyncAt, loading = false, error = "", onRefresh, children }: AppSidebarProps) {
+  const navigation: Array<{ section: Section; href: string; label: string; icon: string }> = [
+    { section: "overview", href: "/", label: "经营总览", icon: "▦" },
+    { section: "sales", href: "/sales", label: "销售状况", icon: "↗" },
+    { section: "products", href: "/products", label: "综合商品分析", icon: "◇" },
+    { section: "details", href: "/details", label: "产品详情", icon: "▤" },
+    { section: "stock", href: "/stock", label: "库存监控", icon: "▥" },
+    { section: "returns", href: "/returns", label: "退货", icon: "↩" },
+    { section: "finance", href: "/finance", label: "回款与余额", icon: "₽" },
+    { section: "promotions", href: "/promotions", label: "平台活动评估", icon: "%" },
+    { section: "advertising", href: "/advertising", label: "推广", icon: "◉" },
+  ];
+
   return (
     <aside className="sidebar">
       <div className="brand"><span className="brand-mark">W</span><div><strong>WB Insight</strong><small>俄罗斯店铺分析</small></div></div>
       <nav aria-label="主导航">
-        <a className={`nav-item ${active === "overview" ? "active" : ""}`} href="/"><span>▦</span>经营总览</a>
-        <a className={`nav-item ${active === "sales" ? "active" : ""}`} href="/sales"><span>↗</span>销售状况</a>
-        <a className={`nav-item ${active === "returns" ? "active" : ""}`} href="/returns"><span>↩</span>退货</a>
-        <a className={`nav-item ${active === "products" ? "active" : ""}`} href="/products"><span>◇</span>综合商品分析</a>
-        <a className={`nav-item ${active === "details" ? "active" : ""}`} href="/details"><span>▤</span>产品详情</a>
-        <a className={`nav-item ${active === "stock" ? "active" : ""}`} href="/stock"><span>□</span>库存监控</a>
-        <a className={`nav-item ${active === "finance" ? "active" : ""}`} href="/finance"><span>₽</span>回款与余额</a>
-        <a className={`nav-item ${active === "advertising" ? "active" : ""}`} href="/advertising"><span>◎</span>推广</a>
-        <a className={`nav-item ${active === "promotions" ? "active" : ""}`} href="/promotions"><span>%</span>平台活动评估</a>
+        {navigation.map((item) => <a key={item.section} className={`nav-item ${active === item.section ? "active" : ""}`} href={item.href}><span className={`nav-icon ${item.section}`} aria-hidden="true">{item.icon}</span>{item.label}</a>)}
       </nav>
       {children}
       <div className="sidebar-foot">

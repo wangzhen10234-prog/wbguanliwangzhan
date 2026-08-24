@@ -83,6 +83,12 @@ function dateTime(value?: string, dateOnly = false) {
   }).format(date);
 }
 
+function returnEvent(row: Pick<ReturnRow, "completedAt" | "readyToReturnAt">) {
+  if (row.completedAt) return { value: row.completedAt, label: "退货完成时间" };
+  if (row.readyToReturnAt) return { value: row.readyToReturnAt, label: "到达取货点时间" };
+  return { value: "", label: "WB 暂未返回时间" };
+}
+
 export default function ReturnsPage() {
   const today = beijingDateKey();
   const [periodFrom, setPeriodFrom] = useState(shiftDate(today, -179));
@@ -217,29 +223,29 @@ export default function ReturnsPage() {
       </section>
 
       <section className="returns-table-panel">
-        <div className="returns-table-toolbar"><div><h2>退货订单与物流明细</h2><p>点击“查看物流”可核对平台状态、目的网点和全部官方时间字段。</p></div><div className="returns-filters"><input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索订单号、SKU、商品、原因或地址" aria-label="搜索退货订单" /><select value={stageFilter} onChange={(event) => chooseStage(event.target.value)} aria-label="退货物流状态"><option value="all">全部物流状态</option><option value="active">物流处理中</option><option value="transit">运输至取货点</option><option value="ready">已到达，可取回</option><option value="completed">退货已完成</option><option value="unknown">状态待确认</option></select></div></div>
-        <div className="returns-table-wrap"><table className="returns-table"><thead><tr><th>商品</th><th>订单号</th><th>下单日期</th><th>退货类型</th><th>退货原因</th><th>物流状态</th><th>目的取货点</th><th>可取回时间</th><th>完成时间</th><th>超期时间</th><th>物流标识</th><th>追踪</th></tr></thead><tbody>
-          {filteredReturns.map((row) => { const product = productById.get(row.nmId); return <tr key={row.id}>
-            <td><div className="returns-product-cell">{product?.image ? <span className="returns-product-photo" style={{ backgroundImage: `url(${product.image})` }} /> : <span className="returns-product-photo placeholder">W</span>}<div><b>{product?.sku || `WB ${row.nmId}`}</b><small title={product?.name || row.subjectName}>{product?.name || row.subjectName}</small><em>WB {row.nmId} · {row.brand}</em></div></div></td>
-            <td><b>{row.orderId || "—"}</b><small>srid {row.srid || "—"}</small></td>
-            <td><b>{dateTime(row.orderDate, true)}</b><small>原订单日期</small></td>
-            <td><b title={row.returnType}>{row.returnType}</b><small>WB returnType</small></td>
-            <td><b title={row.reason}>{row.reason}</b><small>WB reason</small></td>
-            <td><span className={`returns-stage ${row.trackingStage}`}>{row.statusLabel}</span><small>{row.rawStatus} · {row.isStatusActive ? "处理中" : "已结束"}</small></td>
-            <td><b title={row.destinationAddress}>{row.destinationAddress}</b><small>网点 {row.destinationOfficeId || "—"}</small></td>
-            <td><b>{dateTime(row.readyToReturnAt)}</b></td>
-            <td><b>{dateTime(row.completedAt)}</b></td>
-            <td><b>{dateTime(row.expiredAt)}</b></td>
-            <td><b>SHK {row.shkId || "—"}</b><small>贴纸 {row.stickerId} · 条码 {row.barcode}</small></td>
-            <td><button type="button" onClick={() => setSelectedId(row.id)}>查看物流</button></td>
-          </tr>; })}
-          {!loading && filteredReturns.length === 0 && <tr className="empty-row"><td colSpan={12}>没有符合当前筛选条件的退货订单</td></tr>}
+        <div className="returns-table-toolbar"><div><h2>退货订单与物流明细</h2><p>主表保留核心状态；点击“查看详情”核对取货点、全部官方时间与物流标识。</p></div><div className="returns-filters"><input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索订单号、SKU、商品、原因或地址" aria-label="搜索退货订单" /><select value={stageFilter} onChange={(event) => chooseStage(event.target.value)} aria-label="退货物流状态"><option value="all">全部物流状态</option><option value="active">物流处理中</option><option value="transit">运输至取货点</option><option value="ready">已到达，可取回</option><option value="completed">退货已完成</option><option value="unknown">状态待确认</option></select></div></div>
+        <div className="returns-table-wrap"><table className="returns-table"><thead><tr><th>商品</th><th>订单号</th><th>下单日期</th><th>退货类型</th><th>退货时间</th><th>退货原因</th><th>物流状态</th><th>详情</th></tr></thead><tbody>
+          {filteredReturns.map((row) => {
+            const product = productById.get(row.nmId);
+            const event = returnEvent(row);
+            return <tr key={row.id}>
+              <td><div className="returns-product-cell">{product?.image ? <span className="returns-product-photo" style={{ backgroundImage: `url(${product.image})` }} /> : <span className="returns-product-photo placeholder">W</span>}<div><b>{product?.sku || `WB ${row.nmId}`}</b><small title={product?.name || row.subjectName}>{product?.name || row.subjectName}</small><em>WB {row.nmId} · {row.brand}</em></div></div></td>
+              <td><b>{row.orderId || "—"}</b><small>srid {row.srid || "—"}</small></td>
+              <td><b>{dateTime(row.orderDate, true)}</b><small>原订单日期</small></td>
+              <td className="returns-type-cell"><b title={row.returnType}>{row.returnType}</b><small>WB returnType</small></td>
+              <td><b>{dateTime(event.value)}</b><small>{event.label}</small></td>
+              <td className="returns-reason-cell"><b title={row.reason}>{row.reason}</b><small>WB reason</small></td>
+              <td><span className={`returns-stage ${row.trackingStage}`}>{row.statusLabel}</span><small>{row.rawStatus} · {row.isStatusActive ? "处理中" : "已结束"}</small></td>
+              <td className="returns-detail-cell"><button type="button" onClick={() => setSelectedId(row.id)}>查看详情</button></td>
+            </tr>;
+          })}
+          {!loading && filteredReturns.length === 0 && <tr className="empty-row"><td colSpan={8}>没有符合当前筛选条件的退货订单</td></tr>}
         </tbody></table></div>
         <footer className="returns-table-footer"><span>共 {filteredReturns.length} 条退货记录</span><span>WB 当前只开放状态与关键时间，不提供逐站扫描轨迹；系统不会补造物流节点。</span></footer>
       </section>
 
-      {selectedReturn && <section className="returns-tracking-panel">
-        <div className="returns-section-heading"><div><h2>订单 {selectedReturn.orderId} · 退货物流追踪</h2><p>{selectedReturn.subjectName} · WB {selectedReturn.nmId}</p></div><button type="button" onClick={() => setSelectedId(null)}>关闭</button></div>
+      {selectedReturn && <div className="returns-detail-backdrop"><button type="button" className="returns-detail-scrim" aria-label="关闭退货详情" onClick={() => setSelectedId(null)} /><section className="returns-tracking-panel returns-detail-drawer" role="dialog" aria-modal="true" aria-label={`订单 ${selectedReturn.orderId} 退货详情`}>
+        <div className="returns-section-heading"><div><h2>订单 {selectedReturn.orderId} · 退货详情</h2><p>{selectedReturn.subjectName} · WB {selectedReturn.nmId}</p></div><button type="button" onClick={() => setSelectedId(null)}>关闭</button></div>
         <div className="returns-tracking-body">
           <article className="returns-current-status"><span>WB 当前物流状态</span><b className={`returns-stage ${selectedReturn.trackingStage}`}>{selectedReturn.statusLabel}</b><small>{selectedReturn.rawStatus} · 最近同步 {dateTime(data?.syncedAt)}</small></article>
           <div className="returns-timeline">
@@ -248,9 +254,18 @@ export default function ReturnsPage() {
             <article className={selectedReturn.readyToReturnAt ? "done" : "waiting"}><i>3</i><div><b>可取回时间</b><span>{dateTime(selectedReturn.readyToReturnAt)}</span></div></article>
             <article className={selectedReturn.completedAt ? "done" : "waiting"}><i>4</i><div><b>退货完成</b><span>{dateTime(selectedReturn.completedAt)}</span></div></article>
           </div>
-          <div className="returns-tracking-facts"><article><span>退货类型</span><b>{selectedReturn.returnType}</b></article><article><span>退货原因</span><b>{selectedReturn.reason}</b></article><article><span>取货网点</span><b>{selectedReturn.destinationAddress}</b><small>ID {selectedReturn.destinationOfficeId || "—"}</small></article><article><span>物流标识</span><b>SHK {selectedReturn.shkId}</b><small>贴纸 {selectedReturn.stickerId} · srid {selectedReturn.srid}</small></article></div>
+          <div className="returns-tracking-facts">
+            <article><span>退货类型</span><b>{selectedReturn.returnType}</b></article>
+            <article><span>退货原因</span><b>{selectedReturn.reason}</b></article>
+            <article><span>目的取货点</span><b>{selectedReturn.destinationAddress}</b><small>ID {selectedReturn.destinationOfficeId || "—"}</small></article>
+            <article><span>退货时间</span><b>{dateTime(returnEvent(selectedReturn).value)}</b><small>{returnEvent(selectedReturn).label}</small></article>
+            <article><span>可取回时间</span><b>{dateTime(selectedReturn.readyToReturnAt)}</b></article>
+            <article><span>完成时间</span><b>{dateTime(selectedReturn.completedAt)}</b></article>
+            <article><span>超期时间</span><b>{dateTime(selectedReturn.expiredAt)}</b></article>
+            <article><span>物流标识</span><b>SHK {selectedReturn.shkId || "—"}</b><small>贴纸 {selectedReturn.stickerId} · 条码 {selectedReturn.barcode} · srid {selectedReturn.srid || "—"}</small></article>
+          </div>
         </div>
-      </section>}
+      </section></div>}
     </section>
   </main>;
 }
