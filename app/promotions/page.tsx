@@ -84,6 +84,8 @@ type Evaluation = {
   decision: "profit" | "loss" | "missing";
 };
 
+type ParticipationFilter = "all" | "in-action" | "available";
+
 const DAY_MS = 86_400_000;
 
 function beijingDateKey(value: Date | string = new Date()) {
@@ -151,8 +153,10 @@ export default function PromotionsPage() {
   const [reloadKey, setReloadKey] = useState(0);
   const [selectedPromotion, setSelectedPromotion] = useState("all");
   const [decisionFilter, setDecisionFilter] = useState("all");
+  const [participationFilter, setParticipationFilter] = useState<ParticipationFilter>("all");
   const [query, setQuery] = useState("");
   const forceRefreshRef = useRef(false);
+  const tableRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -264,6 +268,8 @@ export default function PromotionsPage() {
   const summary = useMemo(() => ({
     promotions: promotionData?.promotions.length ?? 0,
     products: new Set(evaluations.map((row) => row.promoProduct.nmId)).size,
+    participatingProducts: new Set(evaluations.filter((row) => row.promoProduct.inAction).map((row) => row.promoProduct.nmId)).size,
+    participatingRows: evaluations.filter((row) => row.promoProduct.inAction).length,
     profitable: evaluations.filter((row) => row.decision === "profit").length,
     loss: evaluations.filter((row) => row.decision === "loss").length,
     missing: evaluations.filter((row) => row.decision === "missing").length,
@@ -274,11 +280,21 @@ export default function PromotionsPage() {
     return evaluations.filter((row) => {
       const matchesPromotion = selectedPromotion === "all" || String(row.promotion.id) === selectedPromotion;
       const matchesDecision = decisionFilter === "all" || row.decision === decisionFilter;
+      const matchesParticipation = participationFilter === "all"
+        || (participationFilter === "in-action" ? row.promoProduct.inAction : !row.promoProduct.inAction);
       const matchesQuery = !needle || [row.product?.sku || "", row.product?.name || "", String(row.promoProduct.nmId), row.promotion.name]
         .some((value) => normalizeProductSku(value).includes(needle));
-      return matchesPromotion && matchesDecision && matchesQuery;
+      return matchesPromotion && matchesDecision && matchesParticipation && matchesQuery;
     });
-  }, [decisionFilter, evaluations, query, selectedPromotion]);
+  }, [decisionFilter, evaluations, participationFilter, query, selectedPromotion]);
+
+  function showParticipatingProducts() {
+    setParticipationFilter((value) => value === "in-action" ? "all" : "in-action");
+    setSelectedPromotion("all");
+    setDecisionFilter("all");
+    setQuery("");
+    window.requestAnimationFrame(() => tableRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
+  }
 
   function refresh() {
     forceRefreshRef.current = true;
@@ -302,6 +318,7 @@ export default function PromotionsPage() {
         <section className="promotion-summary-grid" aria-label="活动评估汇总">
           <article><span>可评估活动</span><strong>{summary.promotions}</strong><small>未来 90 天 WB 可参与活动</small></article>
           <article><span>适配商品</span><strong>{summary.products}</strong><small>已取得活动计划价</small></article>
+          <button type="button" className={`participating ${participationFilter === "in-action" ? "active" : ""}`} aria-pressed={participationFilter === "in-action"} onClick={showParticipatingProducts}><span>当前正在参与活动的商品</span><strong>{summary.participatingProducts}</strong><small>{summary.participatingRows} 条活动商品明细 · 点击查看</small></button>
           <article className="good"><span>预计可盈利</span><strong>{summary.profitable}</strong><small>按单件活动价测算</small></article>
           <article className={summary.loss ? "bad" : ""}><span>预计会亏损</span><strong>{summary.loss}</strong><small>不建议直接降至活动价</small></article>
           <article className={summary.missing ? "attention" : ""}><span>成本待补全</span><strong>{summary.missing}</strong><small>需先完善产品详情数据</small></article>
@@ -319,7 +336,7 @@ export default function PromotionsPage() {
               const minReduction = reductionRates.length ? Math.min(...reductionRates) : null;
               const maxReduction = reductionRates.length ? Math.max(...reductionRates) : null;
               const boost = boostReference(promotion);
-              return <button type="button" key={promotion.id} className={`promotion-card ${selectedPromotion === String(promotion.id) ? "active" : ""}`} onClick={() => setSelectedPromotion((value) => value === String(promotion.id) ? "all" : String(promotion.id))}>
+              return <button type="button" key={promotion.id} className={`promotion-card ${selectedPromotion === String(promotion.id) ? "active" : ""}`} onClick={() => { setSelectedPromotion((value) => value === String(promotion.id) ? "all" : String(promotion.id)); setParticipationFilter("all"); }}>
                 <div className="promotion-card-head"><span className={`promotion-state ${state.key}`}>{state.label}</span><small>{promotion.type === "auto" ? "自动活动" : "常规活动"}</small></div>
                 <strong title={promotion.name}>{promotion.name}</strong>
                 <p>{dateTime(promotion.startDateTime)} — {dateTime(promotion.endDateTime)}</p>
@@ -333,12 +350,13 @@ export default function PromotionsPage() {
           {promotionData?.truncated && <p className="promotion-truncated">当前活动较多，先展示开始时间最近的 30 个活动，避免触发 WB 接口频率限制。</p>}
         </section>
 
-        <section className="promotion-table-panel">
+        <section className="promotion-table-panel" ref={tableRef}>
           <div className="promotion-table-toolbar">
             <div><h2>商品活动盈亏明细</h2><p>活动价是 WB 要求的计划售价；安全底价使用产品详情中的完整成本与费率反推。</p></div>
             <div className="promotion-filters">
               <input aria-label="搜索 SKU、商品或活动" type="search" value={query} placeholder="搜索 SKU、商品或活动" onChange={(event) => setQuery(event.target.value)} />
               <select aria-label="选择活动" value={selectedPromotion} onChange={(event) => setSelectedPromotion(event.target.value)}><option value="all">全部活动</option>{(promotionData?.promotions ?? []).map((promotion) => <option key={promotion.id} value={promotion.id}>{promotion.name}</option>)}</select>
+              <select aria-label="选择活动参与状态" value={participationFilter} onChange={(event) => setParticipationFilter(event.target.value as ParticipationFilter)}><option value="all">全部参与状态</option><option value="in-action">当前正在参与</option><option value="available">可参与未加入</option></select>
               <select aria-label="选择评估结果" value={decisionFilter} onChange={(event) => setDecisionFilter(event.target.value)}><option value="all">全部评估结果</option><option value="profit">可盈利参与</option><option value="loss">参与将亏损</option><option value="missing">成本待补全</option></select>
             </div>
           </div>

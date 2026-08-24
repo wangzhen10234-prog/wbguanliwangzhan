@@ -82,7 +82,7 @@ const MAX_PROMOTIONS_WITH_PRODUCTS = 30;
 const PRODUCT_REQUEST_BATCH = 4;
 const PRODUCT_FIRST_PAUSE_MS = 725;
 const PRODUCT_BATCH_PAUSE_MS = 3_200;
-const SNAPSHOT_KEY = "promotion-calendar-v1";
+const SNAPSHOT_KEY = "promotion-calendar-v2";
 
 let memoryCache: CacheEntry | null = null;
 let pendingLoad: Promise<PromotionSnapshot> | null = null;
@@ -219,21 +219,32 @@ async function fetchPromotionSnapshot(token: string) {
     const detail = detailById.get(integer(promotion.id)) ?? promotion;
     return text(detail.type || promotion.type, "regular") !== "auto";
   });
-  for (let offset = 0; offset < regularPromotions.length; offset += PRODUCT_REQUEST_BATCH) {
+  const productRequests = regularPromotions.flatMap((promotion) => {
+    const promotionId = integer(promotion.id);
+    const detail = detailById.get(promotionId) ?? promotion;
+    return [
+      { promotionId, inAction: false },
+      ...(integer(detail.inPromoActionTotal) > 0 ? [{ promotionId, inAction: true }] : []),
+    ];
+  });
+  for (let offset = 0; offset < productRequests.length; offset += PRODUCT_REQUEST_BATCH) {
     await new Promise((resolve) => setTimeout(resolve, offset > 0 ? PRODUCT_BATCH_PAUSE_MS : PRODUCT_FIRST_PAUSE_MS));
-    const batch = regularPromotions.slice(offset, offset + PRODUCT_REQUEST_BATCH);
-    const results = await Promise.all(batch.map(async (promotion) => {
-      const promotionId = integer(promotion.id);
+    const batch = productRequests.slice(offset, offset + PRODUCT_REQUEST_BATCH);
+    const results = await Promise.all(batch.map(async ({ promotionId, inAction }) => {
       try {
-        return { promotionId, products: await loadProducts(promotionId, false, token), available: true };
+        return { promotionId, inAction, products: await loadProducts(promotionId, inAction, token), available: true };
       } catch (error) {
-        if (Number((error as WorkerError).status || 0) === 422) return { promotionId, products: [], available: false };
+        if (Number((error as WorkerError).status || 0) === 422) return { promotionId, inAction, products: [], available: false };
         throw error;
       }
     }));
     for (const result of results) {
-      productsByPromotion.set(result.promotionId, result.products);
-      if (!result.available) productDataUnavailable.add(result.promotionId);
+      const merged = new Map((productsByPromotion.get(result.promotionId) ?? []).map((product) => [product.nmId, product]));
+      for (const product of result.products) {
+        if (product.inAction || !merged.has(product.nmId)) merged.set(product.nmId, product);
+      }
+      productsByPromotion.set(result.promotionId, [...merged.values()]);
+      if (!result.available && !result.inAction) productDataUnavailable.add(result.promotionId);
     }
   }
 
