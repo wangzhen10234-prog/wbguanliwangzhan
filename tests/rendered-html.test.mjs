@@ -50,6 +50,15 @@ test("server-renders the WB advertising workbench", async () => {
   assert.doesNotMatch(html, /codex-preview|SkeletonPreview|Your site is taking shape/);
 });
 
+test("server-renders the completed-today sales label", async () => {
+  const response = await render("/sales");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /今日已完结订单/);
+  assert.match(html, /正常完结/);
+  assert.doesNotMatch(html, /今日活跃订单/);
+});
+
 test("server-renders the promotion evaluation workbench", async () => {
   const response = await render("/promotions");
   assert.equal(response.status, 200);
