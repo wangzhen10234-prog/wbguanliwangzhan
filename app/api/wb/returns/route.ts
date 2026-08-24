@@ -49,6 +49,10 @@ type ReturnsSnapshot = {
   dataAvailability: { logisticsReport: boolean; buyerClaims: boolean };
   warnings: string[];
 };
+type ReturnReportChunkSnapshot = {
+  rows: GoodsReturnRow[];
+  syncedAt: string;
+};
 type CacheEntry = { value: ReturnsSnapshot; expiresAt: number };
 
 const JSON_HEADERS = {
@@ -179,6 +183,29 @@ async function writeSnapshot(cacheKey: string, value: ReturnsSnapshot) {
   }
 }
 
+async function readReportChunk(cacheKey: string) {
+  try {
+    const row = await env.DB.prepare("SELECT payload, sync_slot AS syncSlot FROM wb_sync_snapshots WHERE cache_key = ?")
+      .bind(cacheKey)
+      .first<{ payload: string; syncSlot: string }>();
+    return row?.payload ? { value: JSON.parse(row.payload) as ReturnReportChunkSnapshot, syncSlot: row.syncSlot || "" } : null;
+  } catch {
+    return null;
+  }
+}
+
+async function writeReportChunk(cacheKey: string, value: ReturnReportChunkSnapshot, syncSlot: string) {
+  try {
+    await env.DB.prepare(`
+      INSERT INTO wb_sync_snapshots (cache_key, payload, sync_slot, manual_bucket, updated_at)
+      VALUES (?, ?, ?, 0, CURRENT_TIMESTAMP)
+      ON CONFLICT(cache_key) DO UPDATE SET payload = excluded.payload, sync_slot = excluded.sync_slot, updated_at = CURRENT_TIMESTAMP
+    `).bind(cacheKey, JSON.stringify(value), syncSlot).run();
+  } catch {
+    // A successful WB response can still be used for this request when D1 is temporarily unavailable.
+  }
+}
+
 async function loadClaims(token: string, isArchive: boolean) {
   const claims: ReturnClaim[] = [];
   let total = 0;
@@ -196,18 +223,35 @@ async function loadClaims(token: string, isArchive: boolean) {
   return { claims, total };
 }
 
-async function fetchReturnsSnapshot(token: string, window: { from: string; to: string; maxDays: number }) {
+async function fetchReturnsSnapshot(token: string, window: { from: string; to: string; maxDays: number }, forceRefresh = false) {
   const warnings: string[] = [];
   const chunks = dateChunks(window.from, window.to);
   const reportsPromise = (async () => {
     const reports: GoodsReturnRow[][] = [];
+    const schedule = syncSchedule();
+    let usedStaleChunk = false;
     for (const chunk of chunks) {
+      const chunkKey = `wb-returns-report:${SNAPSHOT_VERSION}:${chunk.from}:${chunk.to}`;
+      const persisted = await readReportChunk(chunkKey);
+      if (persisted && persisted.syncSlot === schedule.slot && !forceRefresh) {
+        reports.push(persisted.value.rows);
+        continue;
+      }
       const url = new URL("https://seller-analytics-api.wildberries.ru/api/v1/analytics/goods-return");
       url.searchParams.set("dateFrom", chunk.from);
       url.searchParams.set("dateTo", chunk.to);
-      const response = await wbRequest<{ report?: GoodsReturnRow[] }>(url.toString(), token);
-      reports.push(response?.report || []);
+      try {
+        const response = await wbRequest<{ report?: GoodsReturnRow[] }>(url.toString(), token);
+        const rows = response?.report || [];
+        reports.push(rows);
+        await writeReportChunk(chunkKey, { rows, syncedAt: new Date().toISOString() }, schedule.slot);
+      } catch (error) {
+        if (!persisted) throw error;
+        reports.push(persisted.value.rows);
+        usedStaleChunk = true;
+      }
     }
+    if (usedStaleChunk) warnings.push("WB 本次限流，部分历史区间沿用上次成功同步数据；系统未用不完整结果覆盖缓存。");
     return reports;
   })();
   const [reports, activeClaimsResult, archivedClaimsResult] = await Promise.all([
@@ -318,7 +362,7 @@ async function loadReturns(token: string, window: { from: string; to: string; ma
   }
   const pending = pendingLoads.get(cacheKey);
   if (pending) return pending;
-  const load = fetchReturnsSnapshot(token, window)
+  const load = fetchReturnsSnapshot(token, window, forceRefresh)
     .then(async (snapshot) => {
       memoryCache.set(cacheKey, { value: snapshot, expiresAt: syncSchedule().nextAt });
       await writeSnapshot(cacheKey, snapshot);
