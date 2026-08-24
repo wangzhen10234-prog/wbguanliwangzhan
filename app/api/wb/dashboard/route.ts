@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 
 type WbOrder = {
   date?: string;
+  cancelDate?: string;
   nmId?: number;
   warehouseName?: string;
   supplierArticle?: string;
@@ -11,17 +12,15 @@ type WbOrder = {
   finishedPrice?: number;
   priceWithDisc?: number;
   isCancel?: boolean;
+  srid?: string;
+  gNumber?: string;
+  orderUid?: string;
+  rid?: string;
 };
 
 type WbSale = WbOrder & {
   saleID?: string;
   forPay?: number;
-  // Supplier sales reports expose several order identifiers depending on the report version.
-  // Keep all of them so today's sales can be matched back to the FBS order list.
-  srid?: string;
-  gNumber?: string;
-  orderUid?: string;
-  rid?: string;
 };
 
 type WbStock = {
@@ -237,7 +236,7 @@ function beijingDateKey(value: string | number | Date = new Date()) {
   }).format(date);
 }
 
-function wbSaleBeijingDateKey(value?: string) {
+function wbStatisticsBeijingDateKey(value?: string) {
   if (!value) return "";
   // WB statistics timestamps omit the offset and use Moscow time (UTC+3).
   const normalized = /(?:z|[+-]\d{2}:?\d{2})$/i.test(value) ? value : `${value}+03:00`;
@@ -248,8 +247,8 @@ function orderIdentity(value: unknown) {
   return String(value || "").trim().toLocaleLowerCase();
 }
 
-function saleOrderIdentities(sale: WbSale) {
-  return [sale.srid, sale.rid, sale.gNumber, sale.orderUid]
+function statisticsOrderIdentities(row: WbOrder) {
+  return [row.srid, row.rid, row.gNumber, row.orderUid]
     .map(orderIdentity)
     .filter(Boolean);
 }
@@ -1414,11 +1413,13 @@ export async function GET(request: Request) {
       return summary;
     }, { entries: financeMovements.length, creditEntries: 0, debitEntries: 0, matchedOrderEntries: 0, credits: 0, debits: 0, netChange: 0, currency: movementCurrency });
     const todayDate = beijingDateKey();
-    const todaySignedOrderIds = new Set<string>();
-    const todaySignedSaleKeys = new Set<string>();
-    for (const sale of statistics.sales) {
-      if (todayDate < from || todayDate > to || wbSaleBeijingDateKey(sale.date) !== todayDate || isReturn(sale)) continue;
-      const identities = saleOrderIdentities(sale);
+    const todayActiveSuccessOrderIds = new Set<string>();
+    const todayActiveAbnormalOrderIds = new Set<string>();
+    const todayActiveUnmatchedSuccessKeys = new Set<string>();
+    const todayActiveUnmatchedAbnormalKeys = new Set<string>();
+    const recordTodayActive = (row: WbOrder, eventDate: string | undefined, outcome: "success" | "abnormal", eventKey: string) => {
+      if (todayDate < from || todayDate > to || wbStatisticsBeijingDateKey(eventDate) !== todayDate) return;
+      const identities = statisticsOrderIdentities(row);
       let matchedOrder: (typeof allDetailedOrders)[number] | undefined;
       for (const identity of identities) {
         matchedOrder = orderByIdentity.get(identity);
@@ -1426,12 +1427,36 @@ export async function GET(request: Request) {
         break;
       }
       if (matchedOrder) {
-        if (!requestedWarehouse || matchedOrder.warehouseName === requestedWarehouse) todaySignedOrderIds.add(matchedOrder.id);
-      } else if (matchesWarehouse(sale)) {
-        const fallbackKey = identities[0] || `${Number(sale.nmId || 0)}|${sale.warehouseName || ""}|${sale.date || ""}|${sale.saleID || ""}`;
-        todaySignedSaleKeys.add(fallbackKey);
+        if (requestedWarehouse && matchedOrder.warehouseName !== requestedWarehouse) return;
+        // The statistics event is the authoritative outcome for today's activity.
+        // This also keeps the clicked list consistent if the FBS status cache lags behind.
+        matchedOrder.outcome = outcome;
+        if (outcome === "abnormal") {
+          todayActiveAbnormalOrderIds.add(matchedOrder.id);
+          todayActiveSuccessOrderIds.delete(matchedOrder.id);
+        } else if (!todayActiveAbnormalOrderIds.has(matchedOrder.id)) {
+          todayActiveSuccessOrderIds.add(matchedOrder.id);
+        }
+        return;
       }
+      if (!matchesWarehouse(row)) return;
+      const fallbackKey = identities[0] || `${Number(row.nmId || 0)}|${row.warehouseName || ""}|${eventDate || ""}|${eventKey}`;
+      if (outcome === "abnormal") {
+        todayActiveUnmatchedAbnormalKeys.add(fallbackKey);
+        todayActiveUnmatchedSuccessKeys.delete(fallbackKey);
+      } else if (!todayActiveUnmatchedAbnormalKeys.has(fallbackKey)) {
+        todayActiveUnmatchedSuccessKeys.add(fallbackKey);
+      }
+    };
+    for (const sale of statistics.sales) {
+      recordTodayActive(sale, sale.date, isReturn(sale) ? "abnormal" : "success", sale.saleID || "sale");
     }
+    for (const order of statistics.orders) {
+      if (!order.isCancel) continue;
+      recordTodayActive(order, order.cancelDate, "abnormal", "cancel");
+    }
+    const todayActiveOrderIds = [...todayActiveSuccessOrderIds, ...todayActiveAbnormalOrderIds];
+    const todayActiveUnmatched = todayActiveUnmatchedSuccessKeys.size + todayActiveUnmatchedAbnormalKeys.size;
     const useDetailedMetrics = includeOrderDetails && fbsOrderResult.available;
     const detailedSummary = detailedOrders.reduce((summary, order) => {
       summary.orders += 1;
@@ -1787,10 +1812,12 @@ export async function GET(request: Request) {
       orderSummary: {
         ...detailedSummary,
         abnormalRate: detailedAbnormalRate,
-        todaySigned: todaySignedOrderIds.size,
-        todaySignedDate: todayDate,
-        todaySignedOrderIds: [...todaySignedOrderIds],
-        todaySignedUnmatched: todaySignedSaleKeys.size,
+        todayActive: todayActiveOrderIds.length,
+        todayActiveSuccess: todayActiveSuccessOrderIds.size,
+        todayActiveAbnormal: todayActiveAbnormalOrderIds.size,
+        todayActiveDate: todayDate,
+        todayActiveOrderIds,
+        todayActiveUnmatched,
       },
       orderDetails: includeOrderDetails && view !== "finance" ? detailedOrders : [],
       inventory: {

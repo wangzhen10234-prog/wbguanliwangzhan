@@ -62,10 +62,12 @@ type SalesData = {
     orderAmount: number;
     salesAmount: number;
     abnormalRate: number;
-    todaySigned: number;
-    todaySignedDate: string;
-    todaySignedOrderIds: string[];
-    todaySignedUnmatched: number;
+    todayActive: number;
+    todayActiveSuccess: number;
+    todayActiveAbnormal: number;
+    todayActiveDate: string;
+    todayActiveOrderIds: string[];
+    todayActiveUnmatched: number;
   };
   dataAvailability: { orderDetails: boolean; financeReport: boolean };
 };
@@ -193,7 +195,7 @@ export default function SalesPage() {
   const [reloadKey, setReloadKey] = useState(0);
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
-  const [dateFilter, setDateFilter] = useState<"all" | "today-signed">("all");
+  const [dateFilter, setDateFilter] = useState<"all" | "today-active">("all");
   const [page, setPage] = useState(1);
   const forceRefreshRef = useRef(false);
   const todayRef = useRef(today);
@@ -398,15 +400,15 @@ export default function SalesPage() {
   }, [financialByOrder, orders]);
   const filteredOrders = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase();
-    const todaySignedOrderIds = new Set(data?.orderSummary?.todaySignedOrderIds ?? []);
+    const todayActiveOrderIds = new Set(data?.orderSummary?.todayActiveOrderIds ?? []);
     return orders.filter((order) => {
       const product = productById.get(order.nmId);
       const matchesStatus = statusFilter === "all" || order.outcome === statusFilter;
-      const matchesTodaySigned = dateFilter !== "today-signed" || todaySignedOrderIds.has(order.id);
+      const matchesTodayActive = dateFilter !== "today-active" || todayActiveOrderIds.has(order.id);
       const matchesQuery = !needle || [order.orderNumber, order.article, product?.name || "", order.warehouseName, order.statusLabel].some((value) => value.toLocaleLowerCase().includes(needle));
-      return matchesStatus && matchesTodaySigned && matchesQuery;
+      return matchesStatus && matchesTodayActive && matchesQuery;
     });
-  }, [data?.orderSummary?.todaySignedOrderIds, dateFilter, orders, productById, query, statusFilter]);
+  }, [data?.orderSummary?.todayActiveOrderIds, dateFilter, orders, productById, query, statusFilter]);
   const pageCount = Math.max(1, Math.ceil(filteredOrders.length / PAGE_SIZE));
   const visibleOrders = filteredOrders.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
 
@@ -425,12 +427,12 @@ export default function SalesPage() {
     beginLoad(); setPeriodStart(draftStart); setPeriodEnd(draftEnd); setDateError(""); setReloadKey((key) => key + 1);
   }
   function refresh() { forceRefreshRef.current = true; beginLoad(); setReloadKey((key) => key + 1); }
-  function chooseOrderFilter(filter: "all" | "success" | "abnormal" | "pending" | "today-signed") {
+  function chooseOrderFilter(filter: "all" | "success" | "abnormal" | "pending" | "today-active") {
     setQuery("");
     setPage(1);
-    if (filter === "today-signed") {
+    if (filter === "today-active") {
       setStatusFilter("all");
-      setDateFilter("today-signed");
+      setDateFilter("today-active");
       return;
     }
     setStatusFilter(filter);
@@ -465,7 +467,7 @@ export default function SalesPage() {
           <button type="button" className={`sales-stat-card ${statusFilter === "success" && dateFilter === "all" ? "active" : ""}`} aria-pressed={statusFilter === "success" && dateFilter === "all"} onClick={() => chooseOrderFilter("success")}><span>正常签收</span><strong>{rollup.success}</strong><small>买家已正常收货</small></button>
           <button type="button" className={`sales-stat-card ${rollup.abnormal ? "attention" : ""} ${statusFilter === "abnormal" && dateFilter === "all" ? "active" : ""}`} aria-pressed={statusFilter === "abnormal" && dateFilter === "all"} onClick={() => chooseOrderFilter("abnormal")}><span>非正常签收</span><strong>{rollup.abnormal}</strong><small>异常率 {rollup.abnormalRate.toFixed(1)}%</small></button>
           <button type="button" className={`sales-stat-card ${statusFilter === "pending" && dateFilter === "all" ? "active" : ""}`} aria-pressed={statusFilter === "pending" && dateFilter === "all"} onClick={() => chooseOrderFilter("pending")}><span>待签收/处理中</span><strong>{rollup.pending}</strong><small>仍在运输或待取件</small></button>
-          <button type="button" className={`sales-stat-card today-signed ${dateFilter === "today-signed" ? "active" : ""}`} aria-pressed={dateFilter === "today-signed"} onClick={() => chooseOrderFilter("today-signed")}><span>今日签收订单</span><strong>{data?.orderSummary?.todaySigned ?? 0}</strong><small>{data?.orderSummary?.todaySignedUnmatched ? `另有 ${data.orderSummary.todaySignedUnmatched} 笔待关联` : `${data?.orderSummary?.todaySignedDate || today} · 北京时间 · WB API`}</small></button>
+          <button type="button" className={`sales-stat-card today-active ${dateFilter === "today-active" ? "active" : ""}`} aria-pressed={dateFilter === "today-active"} title={`${data?.orderSummary?.todayActiveDate || today} · 北京时间 · WB API`} onClick={() => chooseOrderFilter("today-active")}><span>今日活跃订单</span><strong>{data?.orderSummary?.todayActive ?? 0}</strong><small>正常 {data?.orderSummary?.todayActiveSuccess ?? 0} · 非正常 {data?.orderSummary?.todayActiveAbnormal ?? 0}{data?.orderSummary?.todayActiveUnmatched ? ` · 待关联 ${data.orderSummary.todayActiveUnmatched}` : ""}</small></button>
           <article><span>订单金额</span><strong>{formatMoney(rollup.amount)}</strong><small>订单结算币</small></article>
         </section>
 
