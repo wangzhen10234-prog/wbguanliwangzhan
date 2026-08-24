@@ -220,7 +220,9 @@ export default function PromotionsPage() {
           ? cost.productCostRub > 0 && exchangeRate > 0 ? cost.productCostRub / exchangeRate : Number(cost.productCostCny || 0)
           : 0;
         const lastMile = cost ? (cost.lengthCm * cost.widthCm * cost.heightCm / 1000) * 2 + 6 : 0;
-        const variableRate = cost ? cost.commissionRate + cost.adRate + cost.activityDiscountRate + cost.returnLossRate : 0;
+        // The WB plan price already includes the required promotional discount.
+        // Do not subtract the registered activity-discount reserve a second time.
+        const variableRate = cost ? cost.commissionRate + cost.adRate + cost.returnLossRate : 0;
         const currentPriceRub = Number(promoProduct.price || product?.averagePrice || 0);
         const promoPriceRub = Number(promoProduct.planPrice || 0);
         const reductionRate = currentPriceRub > 0 && promoPriceRub > 0 ? Math.max(0, (currentPriceRub - promoPriceRub) / currentPriceRub * 100) : null;
@@ -293,7 +295,7 @@ export default function PromotionsPage() {
 
         <section className="promotion-notice">
           <span className="promotion-notice-icon">%</span>
-          <div><strong>按 WB 活动计划价逐品测算</strong><p>预计利润已计入产品本金、操作费、尾程物流、佣金、广告、折扣和退损预留；活动折扣与排名加成直接取自 WB 官方接口。</p></div>
+          <div><strong>按 WB 活动计划价逐品测算</strong><p>预计利润已计入产品本金、操作费、尾程物流、佣金、广告和退损预留；活动降价已经包含在 WB 计划价中，不会重复扣减。</p></div>
           <small>{promotionData ? `${dateTime(promotionData.window.from)} — ${dateTime(promotionData.window.to)}` : "正在读取活动日历"}</small>
         </section>
 
