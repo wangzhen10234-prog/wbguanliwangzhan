@@ -104,7 +104,8 @@ export default function ReturnsPage() {
   useEffect(() => {
     const controller = new AbortController();
     const returnParams = new URLSearchParams({ from: periodFrom, to: periodTo });
-    const productParams = new URLSearchParams({ from: periodFrom, to: periodTo, view: "products" });
+    const productTo = beijingDateKey();
+    const productParams = new URLSearchParams({ from: shiftDate(productTo, -89), to: productTo, view: "products" });
     if (forceRefreshRef.current) {
       returnParams.set("refresh", "manual");
       productParams.set("refresh", "manual");
