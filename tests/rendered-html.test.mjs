@@ -33,7 +33,7 @@ test("server-renders the WB Insight dashboard", async () => {
   assert.match(html, /08:00 · 14:00 · 19:00 · 23:00/);
   assert.match(html, /class="sidebar-scroll-area"/);
   const navigation = html.match(/<nav[^>]*aria-label="主导航"[^>]*>(.*?)<\/nav>/s)?.[1] ?? "";
-  const expectedOrder = ["经营总览", "销售状况", "综合商品分析", "产品详情", "库存监控", "退货", "回款与余额", "平台活动评估", "推广"];
+  const expectedOrder = ["经营总览", "商品优化诊断", "销售状况", "综合商品分析", "产品详情", "库存监控", "退货", "回款与余额", "平台活动评估", "推广"];
   let previousIndex = -1;
   for (const label of expectedOrder) {
     const currentIndex = navigation.indexOf(label);
@@ -41,6 +41,17 @@ test("server-renders the WB Insight dashboard", async () => {
     previousIndex = currentIndex;
   }
   assert.doesNotMatch(html, /codex-preview|SkeletonPreview|Your site is taking shape/);
+});
+
+test("server-renders the product optimization audit in the second sidebar position", async () => {
+  const response = await render("/audit");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /商品优化诊断/);
+  assert.match(html, /所有经营数字来自 WB API/);
+  assert.match(html, /商品诊断与优化清单/);
+  assert.match(html, /图片审美不伪造机器结论/);
+  assert.match(html, /查看完整诊断/);
 });
 
 test("server-renders the WB returns and logistics workbench", async () => {
@@ -84,6 +95,7 @@ test("server-renders the completed-today sales label", async () => {
   const html = await response.text();
   assert.match(html, /今日已完结订单/);
   assert.match(html, /正常完结/);
+  assert.match(html, /完结日期 · 北京时间/);
   assert.doesNotMatch(html, /今日活跃订单/);
 });
 

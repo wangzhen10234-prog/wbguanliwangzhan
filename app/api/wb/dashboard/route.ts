@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { buildOrderCompletionIndex, completionForOrder } from "../../../_lib/order-completion";
 
 type WbOrder = {
   date?: string;
@@ -1308,9 +1309,11 @@ export async function GET(request: Request) {
       const key = `${String(order.orderUid || "").trim()}|${Number(order.nmId || 0)}`;
       if (order.orderUid) orderProductCounts.set(key, (orderProductCounts.get(key) ?? 0) + 1);
     }
+    const completionIndex = buildOrderCompletionIndex(statistics.sales, statistics.orders);
     const allDetailedOrders = periodFbsOrders
       .map((order) => {
         const outcome = orderOutcome(order);
+        const completion = completionForOrder(order, outcome, completionIndex);
         const nmId = Number(order.nmId || 0);
         const orderUid = String(order.orderUid || "").trim();
         const rid = financeIdentity(order.rid);
@@ -1334,6 +1337,8 @@ export async function GET(request: Request) {
           wbStatus: order.wbStatus || "",
           outcome,
           statusLabel: orderStatusLabel(order),
+          completionAt: completion?.at || null,
+          completionSource: completion?.source || null,
           settlement,
         };
       })

@@ -2,7 +2,7 @@
 
 import type { ReactNode } from "react";
 
-type Section = "overview" | "sales" | "returns" | "products" | "details" | "stock" | "finance" | "advertising" | "promotions";
+type Section = "overview" | "audit" | "sales" | "returns" | "products" | "details" | "stock" | "finance" | "advertising" | "promotions";
 
 type AppSidebarProps = {
   active: Section;
@@ -28,6 +28,7 @@ function timeLabel(value?: string) {
 export function AppSidebar({ active, syncedAt, nextSyncAt, loading = false, error = "", onRefresh, children }: AppSidebarProps) {
   const navigation: Array<{ section: Section; href: string; label: string; icon: string }> = [
     { section: "overview", href: "/", label: "经营总览", icon: "▦" },
+    { section: "audit", href: "/audit", label: "商品优化诊断", icon: "✦" },
     { section: "sales", href: "/sales", label: "销售状况", icon: "↗" },
     { section: "products", href: "/products", label: "综合商品分析", icon: "◇" },
     { section: "details", href: "/details", label: "产品详情", icon: "▤" },
