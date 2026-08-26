@@ -62,7 +62,7 @@ type ProductData = {
 type SortKey = "sales" | "orders" | "netUnits" | "returnRate" | "periodAverageRating" | "periodPositiveRate" | "stock" | "stockCoverDays";
 
 const DAY_MS = 86_400_000;
-const PAGE_SIZE = 20;
+const PAGE_SIZE = 100;
 const issueStatuses = new Set(["缺货", "高退货", "低评分", "滞销"]);
 
 function toInputDate(date: Date) {
