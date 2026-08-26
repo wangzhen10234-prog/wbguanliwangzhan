@@ -18,6 +18,7 @@ type Metrics = {
   cr: number;
   cpo: number;
   roas: number;
+  averagePosition?: number | null;
 };
 type OfficialRecommendation = {
   base?: {
@@ -54,6 +55,7 @@ type AdvertisingCampaign = {
   timestamps: { created: string; started: string; updated: string; deleted: string };
   currency: string | null;
   stats: Metrics | null;
+  daily: Array<Metrics & { date: string }>;
   products: AdvertisingProduct[];
 };
 type AdvertisingData = {
@@ -131,6 +133,100 @@ function decisionLabel(decision: ReturnType<typeof evaluateAdvertisingBid>["deci
   return ({ missing: "成本待补", learning: "样本积累中", unviable: "最低价过高", loss: "广告后亏损", high: "出价偏高", efficient: "出价可控" } as const)[decision];
 }
 
+function dateTime(value?: string) {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return value;
+  return new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false,
+  }).format(date);
+}
+
+function CampaignStatisticsDialog({
+  campaign,
+  products,
+  currency,
+  periodFrom,
+  periodTo,
+  onClose,
+}: {
+  campaign: AdvertisingCampaign;
+  products: Map<number, Product>;
+  currency: string | null;
+  periodFrom: string;
+  periodTo: string;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    const close = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    document.addEventListener("keydown", close);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      document.removeEventListener("keydown", close);
+    };
+  }, [onClose]);
+
+  const stats = campaign.stats;
+  const cartRate = stats?.clicks ? stats.addToCart / stats.clicks * 100 : 0;
+  const orderRate = stats?.addToCart ? stats.orders / stats.addToCart * 100 : 0;
+  const buyoutRate = stats?.orders ? stats.buyouts / stats.orders * 100 : 0;
+  const maxDailySpend = Math.max(1, ...campaign.daily.map((day) => day.spend));
+
+  return <div className="advertising-dialog-backdrop">
+    <section className="advertising-dialog" role="dialog" aria-modal="true" aria-labelledby="advertising-dialog-title">
+      <header className="advertising-dialog-header">
+        <div><span className={`advertising-status ${statusTone(campaign.status)}`}>{campaign.statusLabel}</span><p>{campaign.paymentType.toUpperCase()} · {placementLabel(campaign)} · WB 活动 ID {campaign.id}</p><h2 id="advertising-dialog-title">{campaign.name}</h2><small>统计周期 {periodFrom} 至 {periodTo} · 最近更新 {dateTime(campaign.timestamps.updated)}</small></div>
+        <button type="button" onClick={onClose} aria-label="关闭活动统计">×</button>
+      </header>
+
+      {!stats ? <div className="advertising-dialog-empty"><strong>WB 暂未返回该活动的统计数据</strong><span>官方完整统计接口仅支持已结束、投放中和已暂停活动（状态 7、9、11）；待启动活动没有可展示的统计。</span></div> : <>
+        <section className="advertising-dialog-metrics" aria-label="活动官方统计">
+          <article><span>展现次数</span><b>{integer(stats.views)}</b><small>WB views</small></article>
+          <article><span>点击次数</span><b>{integer(stats.clicks)}</b><small>CTR {percent(stats.ctr, 2)}</small></article>
+          <article><span>加入购物车</span><b>{integer(stats.addToCart)}</b><small>点击→加购 {percent(cartRate, 2)}</small></article>
+          <article><span>归因订单</span><b>{integer(stats.orders)}</b><small>加购→下单 {percent(orderRate, 2)}</small></article>
+          <article><span>广告花费</span><b>{money(stats.spend, campaign.currency || currency)}</b><small>CPC {money(stats.cpc, campaign.currency || currency)}</small></article>
+          <article><span>归因销售额</span><b>{money(stats.sales, campaign.currency || currency)}</b><small>ROAS {stats.roas.toFixed(2)}</small></article>
+          <article><span>买断件数</span><b>{integer(stats.buyouts)}</b><small>订单→买断 {percent(buyoutRate, 2)}</small></article>
+          <article><span>每单广告成本</span><b>{money(stats.cpo, campaign.currency || currency)}</b><small>花费 ÷ 归因订单</small></article>
+          <article><span>平均推广排名</span><b>{stats.averagePosition ? stats.averagePosition.toFixed(1) : "—"}</b><small>{stats.averagePosition ? "WB boosterStats 日均" : "WB 本周期未返回"}</small></article>
+        </section>
+
+        <section className="advertising-funnel-panel">
+          <div className="advertising-dialog-section-title"><div><h3>活动转化漏斗</h3><p>所有数量直接读取 WB；右侧比例只使用同一活动、同一周期的相邻层级计算。</p></div></div>
+          <div className="advertising-funnel-flow">
+            <article><span>展现</span><b>{integer(stats.views)}</b></article><i>CTR {percent(stats.ctr, 2)}</i>
+            <article><span>点击</span><b>{integer(stats.clicks)}</b></article><i>加购率 {percent(cartRate, 2)}</i>
+            <article><span>加购</span><b>{integer(stats.addToCart)}</b></article><i>下单率 {percent(orderRate, 2)}</i>
+            <article><span>订单</span><b>{integer(stats.orders)}</b></article>
+          </div>
+        </section>
+
+        <section className="advertising-dialog-daily">
+          <div className="advertising-dialog-section-title"><div><h3>每日统计</h3><p>只展示 WB 返回的日期，不为无数据日期补 0。</p></div><span>{campaign.daily.length} 天</span></div>
+          <div className="advertising-dialog-daily-grid">
+            {campaign.daily.map((day) => <article key={day.date}><header><b>{day.date}</b><span>{money(day.spend, campaign.currency || currency)}</span></header><div><i style={{ width: `${Math.max(3, day.spend / maxDailySpend * 100)}%` }} /></div><footer><span>展现 <b>{integer(day.views)}</b></span><span>点击 <b>{integer(day.clicks)}</b></span><span>加购 <b>{integer(day.addToCart)}</b></span><span>订单 <b>{integer(day.orders)}</b></span><span>销售 <b>{money(day.sales, campaign.currency || currency)}</b></span><span>ROAS <b>{day.roas.toFixed(2)}</b></span></footer></article>)}
+            {!campaign.daily.length && <div className="advertising-dialog-inline-empty">WB 本周期未返回按日统计</div>}
+          </div>
+        </section>
+
+        <section className="advertising-dialog-products">
+          <div className="advertising-dialog-section-title"><div><h3>活动商品统计</h3><p>多商品活动只显示 WB 已返回的单品拆分，绝不把活动总数复制到每个商品。</p></div><span>{campaign.products.length} 个商品</span></div>
+          <div className="advertising-dialog-table-wrap"><table><thead><tr><th>商品</th><th>平均排名</th><th>花费</th><th>归因销售额</th><th>展现</th><th>点击</th><th>加购</th><th>订单</th><th>CTR</th><th>转化率</th><th>ROAS</th></tr></thead><tbody>
+            {campaign.products.map((advertProduct) => { const product = products.get(advertProduct.nmId); const productStats = advertProduct.stats; return <tr key={advertProduct.nmId}>
+              <td><div className="advertising-dialog-product">{product?.image ? <span style={{ backgroundImage: `url(${product.image})` }} /> : <span className="placeholder">W</span>}<div><b>{product?.sku || `WB ${advertProduct.nmId}`}</b><small>{product?.name || advertProduct.subjectName || `nmId ${advertProduct.nmId}`}</small><em>WB {advertProduct.nmId}</em></div></div></td>
+              <td>{productStats?.averagePosition ? productStats.averagePosition.toFixed(1) : "—"}</td><td>{money(productStats?.spend, advertProduct.currency || campaign.currency || currency)}</td><td>{money(productStats?.sales, advertProduct.currency || campaign.currency || currency)}</td><td>{productStats ? integer(productStats.views) : "—"}</td><td>{productStats ? integer(productStats.clicks) : "—"}</td><td>{productStats ? integer(productStats.addToCart) : "—"}</td><td>{productStats ? integer(productStats.orders) : "—"}</td><td>{productStats ? percent(productStats.ctr, 2) : "—"}</td><td>{productStats ? percent(productStats.cr, 2) : "—"}</td><td>{productStats ? productStats.roas.toFixed(2) : "—"}</td>
+            </tr>; })}
+          </tbody></table></div>
+        </section>
+      </>}
+      <footer className="advertising-dialog-source"><b>数据来源：WB Promotion API /adv/v3/fullstats</b><span>WB 官方说明推广数据约每 3 分钟同步；本页面不修改活动，也不推测缺失统计。</span></footer>
+    </section>
+  </div>;
+}
+
 export default function AdvertisingPage() {
   const today = beijingDateKey();
   const [periodFrom, setPeriodFrom] = useState(shiftDate(today, -6));
@@ -151,6 +247,7 @@ export default function AdvertisingPage() {
   const [campaignFilter, setCampaignFilter] = useState("all");
   const [decisionFilter, setDecisionFilter] = useState("all");
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [selectedCampaignId, setSelectedCampaignId] = useState<number | null>(null);
   const forceRefreshRef = useRef(false);
 
   useEffect(() => {
@@ -260,6 +357,7 @@ export default function AdvertisingPage() {
   }, [campaignFilter, decisionFilter, paymentFilter, query, rows, statusFilter]);
 
   const currentCampaigns = useMemo(() => (data?.campaigns || []).filter((campaign) => CURRENT_STATUSES.has(campaign.status)), [data]);
+  const selectedCampaign = useMemo(() => selectedCampaignId ? (data?.campaigns || []).find((campaign) => campaign.id === selectedCampaignId) || null : null, [data?.campaigns, selectedCampaignId]);
   const selectedRow = useMemo(() => selectedKey ? rows.find((row) => row.key === selectedKey) || null : null, [rows, selectedKey]);
   const maxDailySpend = Math.max(1, ...(data?.daily || []).map((day) => day.spend));
 
@@ -315,10 +413,10 @@ export default function AdvertisingPage() {
       <section className="advertising-campaign-panel">
         <div className="advertising-section-heading"><div><h2>当前推广活动</h2><p>展示投放中、待启动和已暂停活动；暂停状态完全以 WB API 返回为准。</p></div><span>{currentCampaigns.length} 个当前活动</span></div>
         <div className="advertising-campaign-grid">
-          {currentCampaigns.map((campaign) => <button type="button" key={campaign.id} className={campaignFilter === String(campaign.id) ? "active" : ""} onClick={() => { setCampaignFilter((value) => value === String(campaign.id) ? "all" : String(campaign.id)); setStatusFilter("all"); }}>
+          {currentCampaigns.map((campaign) => <button type="button" key={campaign.id} className={campaignFilter === String(campaign.id) ? "active" : ""} onClick={() => { setCampaignFilter(String(campaign.id)); setStatusFilter("all"); setSelectedCampaignId(campaign.id); }}>
             <header><span className={`advertising-status ${statusTone(campaign.status)}`}>{campaign.statusLabel}</span><small>{campaign.paymentType.toUpperCase()} · {placementLabel(campaign)}</small></header>
             <strong>{campaign.name}</strong><p>ID {campaign.id} · {campaign.products.length} 个商品</p>
-            <footer><span>花费 <b>{money(campaign.stats?.spend, campaign.currency || data?.accountCurrency)}</b></span><span>订单 <b>{integer(campaign.stats?.orders)}</b></span><span>ROAS <b>{campaign.stats?.roas?.toFixed(2) || "0.00"}</b></span></footer>
+            <footer><span>花费 <b>{money(campaign.stats?.spend, campaign.currency || data?.accountCurrency)}</b></span><span>订单 <b>{integer(campaign.stats?.orders)}</b></span><span>ROAS <b>{campaign.stats?.roas?.toFixed(2) || "0.00"}</b></span></footer><em className="advertising-campaign-open">查看 WB 完整统计 →</em>
           </button>)}
           {!loading && currentCampaigns.length === 0 && <div className="advertising-empty"><strong>WB 当前没有投放中或暂停的活动</strong><span>历史活动仍可在下方筛选查看。</span></div>}
         </div>
@@ -342,7 +440,7 @@ export default function AdvertisingPage() {
         <div className="advertising-table-wrap"><table className="advertising-table"><thead><tr><th>商品</th><th>活动与状态</th><th>计费/位置</th><th>当前出价</th><th>WB 最低出价</th><th>WB 官方推荐</th><th>系统建议价</th><th>展现/点击</th><th>CTR/实际单价</th><th>订单/转化率</th><th>花费/CPO</th><th>归因销售/ROAS</th><th>单件广告前利润</th><th>保本出价</th><th>广告后净利润</th><th>评估</th></tr></thead><tbody>
           {filteredRows.map((row) => <tr key={row.key}>
             <td><div className="advertising-product-cell">{row.product?.image ? <span className="advertising-product-photo" style={{ backgroundImage: `url(${row.product.image})` }} /> : <span className="advertising-product-photo placeholder">W</span>}<div><b>{row.product?.sku || `WB ${row.advertProduct.nmId}`}</b><small title={row.product?.name || row.advertProduct.subjectName}>{row.product?.name || row.advertProduct.subjectName || `nmId ${row.advertProduct.nmId}`}</small><em>WB {row.advertProduct.nmId}</em></div></div></td>
-            <td><b title={row.campaign.name}>{row.campaign.name}</b><small><span className={`advertising-status ${statusTone(row.campaign.status)}`}>{row.campaign.statusLabel}</span> · ID {row.campaign.id}</small></td>
+            <td><button type="button" className="advertising-campaign-link" title={row.campaign.name} onClick={() => setSelectedCampaignId(row.campaign.id)}>{row.campaign.name}</button><small><span className={`advertising-status ${statusTone(row.campaign.status)}`}>{row.campaign.statusLabel}</span> · ID {row.campaign.id} · 查看统计</small></td>
             <td><b>{row.campaign.paymentType.toUpperCase()}</b><small>{row.campaign.paymentType === "cpc" ? "按点击计费" : "按千次展示"} · {placementLabel(row.campaign)}</small></td>
             <td><b>{money(row.currentBid, row.currency)}</b><small>搜索 {money(row.advertProduct.currentBidsKopecks.search ? row.advertProduct.currentBidsKopecks.search / 100 : null, row.currency)} · 推荐 {money(row.advertProduct.currentBidsKopecks.recommendation ? row.advertProduct.currentBidsKopecks.recommendation / 100 : null, row.currency)}</small></td>
             <td><b>{money(row.minimumBid, row.currency)}</b><small>{row.advertProduct.minimumBids.length ? row.advertProduct.minimumBids.map((bid) => `${bid.type} ${money(bid.valueKopecks / 100, bid.currency || row.currency)}`).join(" · ") : "WB 暂未返回最低价"}</small></td>
@@ -377,5 +475,6 @@ export default function AdvertisingPage() {
         </div>
       </section>}
     </section>
+    {selectedCampaign && <CampaignStatisticsDialog campaign={selectedCampaign} products={productById} currency={selectedCampaign.currency || data?.accountCurrency || null} periodFrom={periodFrom} periodTo={periodTo} onClose={() => setSelectedCampaignId(null)} />}
   </main>;
 }

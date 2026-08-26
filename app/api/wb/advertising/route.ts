@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { averageAdvertisingPosition, campaignDailyStatistics } from "../../../_lib/advertising-statistics";
 
 type WorkerError = Error & { status?: number };
 type CampaignGroup = { type?: number; status?: number; advert_list?: Array<{ advertId?: number; changeTime?: string }> };
@@ -111,7 +112,7 @@ const MAX_DAYS = 31;
 const MAX_CAMPAIGNS = 50;
 const MAX_RECOMMENDATION_CALLS = 5;
 const MANUAL_REFRESH_COOLDOWN_MS = 60_000;
-const SNAPSHOT_VERSION = "advertising-v1";
+const SNAPSHOT_VERSION = "advertising-v2";
 
 const memoryCache = new Map<string, CacheEntry>();
 const pendingLoads = new Map<string, Promise<AdvertisingSnapshot>>();
@@ -284,8 +285,9 @@ function normalizedProductStats(campaign: CampaignInfo, stats: CampaignStat | un
       }
     }
   }
-  if (found) return { scope: "product", values: metricView(aggregate) };
-  if ((campaign.nm_settings || []).length === 1) return { scope: "campaign-single-product", values: metricView(metricTotals(stats)) };
+  const averagePosition = averageAdvertisingPosition(stats.boosterStats, nmId);
+  if (found) return { scope: "product", values: { ...metricView(aggregate), averagePosition } };
+  if ((campaign.nm_settings || []).length === 1) return { scope: "campaign-single-product", values: { ...metricView(metricTotals(stats)), averagePosition } };
   return { scope: "unavailable", values: null };
 }
 
@@ -419,7 +421,8 @@ async function fetchAdvertisingSnapshot(token: string, window: { from: string; t
         deleted: text(campaign.timestamps?.deleted),
       },
       currency: products.find((product) => product.currency)?.currency || accountCurrency,
-      stats: campaignStats ? metricView(metricTotals(campaignStats)) : null,
+      stats: campaignStats ? { ...metricView(metricTotals(campaignStats)), averagePosition: averageAdvertisingPosition(campaignStats.boosterStats) } : null,
+      daily: campaignDailyStatistics(campaignStats?.days),
       products,
     };
   });
