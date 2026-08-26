@@ -1,5 +1,6 @@
 import { env } from "cloudflare:workers";
 import { buildOrderCompletionIndex, completionForOrder } from "../../../_lib/order-completion";
+import { fbsOrderKey } from "../../../_lib/fbs-order-identity";
 
 type WbOrder = {
   date?: string;
@@ -650,7 +651,10 @@ async function fetchFbsOrders(token: string, start: Date, end: Date) {
       });
       const response = await wbRequest<{ next?: number; orders?: FbsOrder[] }>(`${base}/orders?${params}`, token);
       const batch = response.orders ?? [];
-      for (const order of batch) byOrder.set(order.orderUid || String(order.id), order);
+      for (const [index, order] of batch.entries()) {
+        const key = fbsOrderKey(order) || `anonymous:${chunkStart}:${page}:${index}`;
+        byOrder.set(key, order);
+      }
       if (batch.length < 1000 || !response.next || response.next === next) break;
       next = response.next;
     }
@@ -676,14 +680,10 @@ async function fetchFbsOrders(token: string, start: Date, end: Date) {
   return orders;
 }
 
-function fbsOrderKey(order: FbsOrder) {
-  return order.orderUid || String(order.id);
-}
-
 async function loadFbsOrders(token: string, forceRefresh = false) {
   if (!forceRefresh && fbsOrderCache && fbsOrderCache.expiresAt > Date.now()) return fbsOrderCache.value;
   return dedupe(forceRefresh ? "fbs-orders-all-manual" : "fbs-orders-all", async () => {
-    const cacheKey = "fbs-orders-all-v2";
+    const cacheKey = "fbs-orders-all-v3";
     const slotCached = await readEdgeCache<FbsOrderSnapshot>(cacheKey);
     const stableCached = await readStableEdgeCache<FbsOrderSnapshot>(cacheKey);
     const durableRecord = await readDurableRecord<FbsOrderSnapshot>(cacheKey);
