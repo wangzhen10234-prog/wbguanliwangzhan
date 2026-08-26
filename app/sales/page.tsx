@@ -76,7 +76,7 @@ type SalesData = {
 };
 
 const DAY_MS = 86_400_000;
-const PAGE_SIZE = 20;
+const PAGE_SIZE = 100;
 
 function beijingDateKey(value: Date | string = new Date()) {
   const date = value instanceof Date ? value : new Date(value);
