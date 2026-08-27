@@ -1,5 +1,6 @@
 import { env } from "cloudflare:workers";
-import { buildOrderCompletionIndex, completionForOrder } from "../../../_lib/order-completion";
+import { buildOrderCompletionIndex, completionForOrder, normalizeWbStatisticsTime } from "../../../_lib/order-completion";
+import { fbsStatusOutcome, updateFbsCompletionObservations, type FbsCompletionObservation } from "../../../_lib/fbs-completion-observations";
 import { fbsOrderKey } from "../../../_lib/fbs-order-identity";
 import { isUnprocessedClientCancellation, returnRateSummary } from "../../../_lib/sales-financials";
 
@@ -68,6 +69,7 @@ type FbsOrder = {
 type FbsOrderSnapshot = {
   available: boolean;
   orders: FbsOrder[];
+  completionObservations?: Record<string, FbsCompletionObservation>;
 };
 
 type WbCard = {
@@ -729,7 +731,13 @@ async function loadFbsOrders(token: string, forceRefresh = false) {
         if (new Date(order.createdAt || 0).getTime() < start.getTime()) byOrder.set(fbsOrderKey(order), order);
       }
       for (const order of refreshedOrders) byOrder.set(fbsOrderKey(order), order);
-      const result = { available: true, orders: [...byOrder.values()] };
+      const orders = [...byOrder.values()];
+      const completionObservations = updateFbsCompletionObservations(
+        fallback?.orders ?? [],
+        orders,
+        fallback?.completionObservations ?? {},
+      );
+      const result: FbsOrderSnapshot = { available: true, orders, completionObservations };
       fbsOrderCache = { value: result, expiresAt: cacheExpiry() };
       await Promise.all([writeEdgeCache(cacheKey, result), writeStableEdgeCache(cacheKey, result), writeRecentEdgeCache(cacheKey, result), writeDurableSnapshot(cacheKey, result, forceRefresh)]);
       return result;
@@ -746,12 +754,8 @@ async function loadFbsOrders(token: string, forceRefresh = false) {
   });
 }
 
-const abnormalWbStatuses = new Set(["canceled", "canceled_by_client", "declined_by_client", "defect", "canceled_by_missed_call"]);
-
 function orderOutcome(order: Pick<FbsOrder, "supplierStatus" | "wbStatus">) {
-  if (order.wbStatus === "sold") return "success" as const;
-  if (order.supplierStatus === "cancel" || abnormalWbStatuses.has(String(order.wbStatus || ""))) return "abnormal" as const;
-  return "pending" as const;
+  return fbsStatusOutcome(order);
 }
 
 function orderStatusLabel(order: Pick<FbsOrder, "supplierStatus" | "wbStatus">) {
@@ -1320,6 +1324,8 @@ export async function GET(request: Request) {
           wbStatus: order.wbStatus || "",
         });
         const completion = completionForOrder(order, outcome, completionIndex);
+        const detectedCompletion = fbsOrderResult.completionObservations?.[fbsOrderKey(order)];
+        const matchedDetection = detectedCompletion?.outcome === outcome ? detectedCompletion : null;
         const nmId = Number(order.nmId || 0);
         const orderUid = String(order.orderUid || "").trim();
         const rid = financeIdentity(order.rid);
@@ -1344,8 +1350,8 @@ export async function GET(request: Request) {
           outcome,
           invalid,
           statusLabel: orderStatusLabel(order),
-          completionAt: completion?.at || null,
-          completionSource: completion?.source || null,
+          completionAt: completion?.at || matchedDetection?.detectedAt || null,
+          completionSource: completion?.source || (matchedDetection ? "status_detected" : null),
           settlement,
         };
       })
@@ -1429,7 +1435,13 @@ export async function GET(request: Request) {
     const todayActiveAbnormalOrderIds = new Set<string>();
     const todayActiveUnmatchedSuccessKeys = new Set<string>();
     const todayActiveUnmatchedAbnormalKeys = new Set<string>();
-    const recordTodayActive = (row: WbOrder, eventDate: string | undefined, outcome: "success" | "abnormal", eventKey: string) => {
+    const recordTodayActive = (
+      row: WbOrder,
+      eventDate: string | undefined,
+      outcome: "success" | "abnormal",
+      source: "sale" | "return" | "cancel",
+      eventKey: string,
+    ) => {
       if (todayDate < from || todayDate > to || wbStatisticsBeijingDateKey(eventDate) !== todayDate) return;
       const identities = statisticsOrderIdentities(row);
       let matchedOrder: (typeof allDetailedOrders)[number] | undefined;
@@ -1443,6 +1455,8 @@ export async function GET(request: Request) {
         // The statistics event is the authoritative outcome for today's activity.
         // This also keeps the clicked list consistent if the FBS status cache lags behind.
         matchedOrder.outcome = outcome;
+        matchedOrder.completionAt = normalizeWbStatisticsTime(eventDate) || matchedOrder.completionAt;
+        matchedOrder.completionSource = source;
         if (outcome === "abnormal") {
           todayActiveAbnormalOrderIds.add(matchedOrder.id);
           todayActiveSuccessOrderIds.delete(matchedOrder.id);
@@ -1461,11 +1475,24 @@ export async function GET(request: Request) {
       }
     };
     for (const sale of statistics.sales) {
-      recordTodayActive(sale, sale.date, isReturn(sale) ? "abnormal" : "success", sale.saleID || "sale");
+      const returned = isReturn(sale);
+      recordTodayActive(sale, sale.date, returned ? "abnormal" : "success", returned ? "return" : "sale", sale.saleID || "sale");
     }
     for (const order of statistics.orders) {
       if (!order.isCancel) continue;
-      recordTodayActive(order, order.cancelDate, "abnormal", "cancel");
+      recordTodayActive(order, order.cancelDate, "abnormal", "cancel", "cancel");
+    }
+    // WB Statistics can lag behind the live marketplace status by several hours.
+    // Count a persisted pending -> completed status transition immediately, then
+    // let the official sale/cancel event above replace its timestamp when available.
+    for (const order of detailedOrders) {
+      if (order.completionSource !== "status_detected" || beijingDateKey(order.completionAt || "") !== todayDate) continue;
+      if (order.outcome === "abnormal") {
+        todayActiveAbnormalOrderIds.add(order.id);
+        todayActiveSuccessOrderIds.delete(order.id);
+      } else if (order.outcome === "success" && !todayActiveAbnormalOrderIds.has(order.id)) {
+        todayActiveSuccessOrderIds.add(order.id);
+      }
     }
     const todayActiveOrderIds = [...todayActiveSuccessOrderIds, ...todayActiveAbnormalOrderIds];
     const todayActiveUnmatched = todayActiveUnmatchedSuccessKeys.size + todayActiveUnmatchedAbnormalKeys.size;
