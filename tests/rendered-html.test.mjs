@@ -99,6 +99,8 @@ test("server-renders the completed-today sales label", async () => {
   assert.match(html, /预估成本支出/);
   assert.match(html, /净利润预估/);
   assert.match(html, /平台净扣费＋商品成本/);
+  assert.match(html, /当前新订单/);
+  assert.match(html, /supplier-new-count/);
   assert.doesNotMatch(html, /今日活跃订单/);
 });
 
