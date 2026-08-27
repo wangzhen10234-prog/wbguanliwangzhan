@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { AppSidebar } from "../_components/app-sidebar";
 import { normalizeProductSku, productCostSourceKey } from "../_lib/product-cost-aliases";
 import { calculateOrderFinancial, isCurrentValidNewOrder, waitingFinancial, type OrderFinancial } from "../_lib/sales-financials";
+import { matchesWbStatusFilter, supplierStatusLabel, WB_STATUS_FILTERS, wbStatusLabel, type WbLogisticsStage } from "../_lib/wb-order-status";
 
 type Product = { nmId: number; name: string; sku: string; image: string | null };
 type OrderSettlement = {
@@ -74,9 +75,29 @@ type SalesData = {
   };
   dataAvailability: { orderDetails: boolean; financeReport: boolean };
 };
+type LiveOrderStatus = {
+  source: string;
+  checkedAt: string;
+  orderId: string;
+  supplierStatus: string;
+  supplierLabel: string;
+  wbStatus: string;
+  wbLabel: string;
+  stage: WbLogisticsStage;
+  stageLabel: string;
+  description: string;
+};
 
 const DAY_MS = 86_400_000;
 const PAGE_SIZE = 100;
+const WB_STAGE_STEPS: Array<{ stage: Exclude<WbLogisticsStage, "canceled" | "unknown">; label: string }> = [
+  { stage: "new", label: "新订单" },
+  { stage: "preparing", label: "备货交接" },
+  { stage: "carrier", label: "运输途中" },
+  { stage: "sorted", label: "WB 分拣" },
+  { stage: "pickup", label: "待签收" },
+  { stage: "delivered", label: "已签收" },
+];
 
 function beijingDateKey(value: Date | string = new Date()) {
   const date = value instanceof Date ? value : new Date(value);
@@ -142,10 +163,24 @@ function formatBeijingCompletionDate(value?: string | null) {
     day: "2-digit",
   }).format(date).replaceAll("/", ".");
 }
-function supplierStatusLabel(value: string) {
-  return ({ new: "新订单", confirm: "备货中", complete: "配送中", cancel: "卖家取消" } as Record<string, string>)[value] || "—";
+function formatBeijingStatusTime(value?: string) {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return "—";
+  return new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).format(date);
 }
-
+function wbStageIndex(stage: WbLogisticsStage) {
+  return WB_STAGE_STEPS.findIndex((item) => item.stage === stage);
+}
 export default function SalesPage() {
   const [today, setToday] = useState(() => toInputDate(new Date()));
   const earliest = "2024-01-29";
@@ -162,11 +197,17 @@ export default function SalesPage() {
   const [reloadKey, setReloadKey] = useState(0);
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
+  const [wbStatusFilter, setWbStatusFilter] = useState("all");
   const [dateFilter, setDateFilter] = useState<"all" | "today-active">("all");
   const [financialFilter, setFinancialFilter] = useState<"all" | "profit" | "cost">("all");
   const [page, setPage] = useState(1);
+  const [statusOrder, setStatusOrder] = useState<Order | null>(null);
+  const [liveStatus, setLiveStatus] = useState<LiveOrderStatus | null>(null);
+  const [liveStatusLoading, setLiveStatusLoading] = useState(false);
+  const [liveStatusError, setLiveStatusError] = useState("");
   const forceRefreshRef = useRef(false);
   const todayRef = useRef(today);
+  const statusRequestRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -229,6 +270,21 @@ export default function SalesPage() {
     return () => window.clearTimeout(timer);
   }, [data?.syncSchedule?.nextAt]);
 
+  useEffect(() => {
+    if (!statusOrder) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      statusRequestRef.current?.abort();
+      statusRequestRef.current = null;
+      setStatusOrder(null);
+      setLiveStatus(null);
+      setLiveStatusError("");
+      setLiveStatusLoading(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [statusOrder]);
+
   const productById = useMemo(() => new Map((data?.products ?? []).map((item) => [item.nmId, item])), [data]);
   const orders = useMemo(() => data?.orderDetails ?? [], [data?.orderDetails]);
   const costBySku = useMemo(() => new Map(costRows.map((row) => [normalizeProductSku(row.sellerSku), row])), [costRows]);
@@ -255,6 +311,15 @@ export default function SalesPage() {
     }, { orders: 0, amount: 0, success: 0, abnormal: 0, pending: 0, supplierNew: 0 });
     const completed = result.success + result.abnormal;
     return { ...result, abnormalRate: completed ? (result.abnormal / completed) * 100 : 0 };
+  }, [orders]);
+  const wbStatusCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const order of orders) {
+      const status = String(order.wbStatus || "").toLowerCase();
+      counts.set(status, (counts.get(status) ?? 0) + 1);
+      if (matchesWbStatusFilter(status, "__canceled__")) counts.set("__canceled__", (counts.get("__canceled__") ?? 0) + 1);
+    }
+    return counts;
   }, [orders]);
   const financeRollup = useMemo(() => {
     const summary = { settled: 0, waiting: 0, abnormal: 0, actualAbnormal: 0, estimatedAbnormal: 0, zeroCostAbnormal: 0, costReady: 0, settlementGross: 0, postCommissionPayout: 0, platformPayout: 0, platformDeduction: 0, commissionFee: 0, logisticsFee: 0, acquiringFee: 0, penaltyFee: 0, deductionFee: 0, storageFee: 0, acceptanceFee: 0, additionalPayment: 0, productPrincipal: 0, handlingFee: 0, productCost: 0, costExpense: 0, normalCostExpense: 0, abnormalCostExpense: 0, profit: 0, saleBase: 0 };
@@ -299,15 +364,16 @@ export default function SalesPage() {
     return orders.filter((order) => {
       const product = productById.get(order.nmId);
       const matchesStatus = statusFilter === "all" || order.outcome === statusFilter;
+      const matchesWbStatus = matchesWbStatusFilter(order.wbStatus, wbStatusFilter);
       const matchesTodayActive = dateFilter !== "today-active" || todayActiveOrderIds.has(order.id);
       const finance = financialByOrder.get(order.id);
       const matchesFinancial = financialFilter === "all"
         || (financialFilter === "profit" && finance?.profit !== null && finance?.profit !== undefined)
         || (financialFilter === "cost" && finance?.costExpense !== null && finance?.costExpense !== undefined);
       const matchesQuery = !needle || [order.orderNumber, order.article, product?.name || "", order.warehouseName, order.statusLabel].some((value) => value.toLocaleLowerCase().includes(needle));
-      return matchesStatus && matchesTodayActive && matchesFinancial && matchesQuery;
+      return matchesStatus && matchesWbStatus && matchesTodayActive && matchesFinancial && matchesQuery;
     });
-  }, [data?.orderSummary?.todayActiveOrderIds, dateFilter, financialByOrder, financialFilter, orders, productById, query, statusFilter]);
+  }, [data?.orderSummary?.todayActiveOrderIds, dateFilter, financialByOrder, financialFilter, orders, productById, query, statusFilter, wbStatusFilter]);
   const pageCount = Math.max(1, Math.ceil(filteredOrders.length / PAGE_SIZE));
   const visibleOrders = filteredOrders.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
 
@@ -330,6 +396,7 @@ export default function SalesPage() {
     setQuery("");
     setPage(1);
     setFinancialFilter("all");
+    setWbStatusFilter("all");
     if (filter === "today-active") {
       setStatusFilter("all");
       setDateFilter("today-active");
@@ -342,8 +409,42 @@ export default function SalesPage() {
     setQuery("");
     setPage(1);
     setStatusFilter("all");
+    setWbStatusFilter("all");
     setDateFilter("all");
     setFinancialFilter((current) => current === filter ? "all" : filter);
+  }
+  async function readLiveOrderStatus(order: Order) {
+    statusRequestRef.current?.abort();
+    const controller = new AbortController();
+    statusRequestRef.current = controller;
+    setStatusOrder(order);
+    setLiveStatus(null);
+    setLiveStatusError("");
+    setLiveStatusLoading(true);
+    try {
+      const response = await fetch("/api/wb/order-status", {
+        method: "POST",
+        headers: { Accept: "application/json", "Content-Type": "application/json" },
+        body: JSON.stringify({ orderId: Number(order.id) }),
+        cache: "no-store",
+        signal: controller.signal,
+      });
+      const body = await response.json() as LiveOrderStatus | { error?: string };
+      if (!response.ok) throw new Error("error" in body && body.error ? body.error : "WB 当前状态读取失败");
+      if (!controller.signal.aborted) setLiveStatus(body as LiveOrderStatus);
+    } catch (reason) {
+      if (!controller.signal.aborted) setLiveStatusError(reason instanceof Error ? reason.message : "WB 当前状态读取失败");
+    } finally {
+      if (!controller.signal.aborted) setLiveStatusLoading(false);
+    }
+  }
+  function closeLiveOrderStatus() {
+    statusRequestRef.current?.abort();
+    statusRequestRef.current = null;
+    setStatusOrder(null);
+    setLiveStatus(null);
+    setLiveStatusError("");
+    setLiveStatusLoading(false);
   }
 
   return (
@@ -383,7 +484,18 @@ export default function SalesPage() {
         <section className="order-detail-panel sales-order-panel">
           <div className="order-detail-toolbar">
             <div><h2>{financialFilter === "profit" ? "净利润预估订单明细" : financialFilter === "cost" ? "预估成本支出订单明细" : "全部订单、签收与利润"}</h2><p>平台结账为成交金额依次扣除佣金、物流及其他账单费用后的最终实结；总成本支出＝平台净扣费＋商品成本，异常单＝尾程物流＋操作费。</p></div>
-            <div className="order-detail-actions"><span className={`finance-source-status ${data?.dataAvailability.financeReport ? "connected" : "waiting"}`}>{data?.dataAvailability.financeReport ? "财务账单已连接" : "财务账单待同步"}</span>{financialFilter !== "all" && <button type="button" className="financial-filter-clear" onClick={() => setFinancialFilter("all")}>清除财务筛选</button>}<div className="order-detail-filters"><label><span>⌕</span><input type="search" value={query} placeholder="搜索订单号、SKU 或仓库" onChange={(event) => { setQuery(event.target.value); setPage(1); }} /></label><select value={statusFilter} onChange={(event) => { setStatusFilter(event.target.value); setDateFilter("all"); setFinancialFilter("all"); setPage(1); }}><option value="all">全部订单状态</option><option value="success">正常签收</option><option value="abnormal">非正常签收</option><option value="pending">待签收/处理中</option></select></div></div>
+            <div className="order-detail-actions">
+              <span className={`finance-source-status ${data?.dataAvailability.financeReport ? "connected" : "waiting"}`}>{data?.dataAvailability.financeReport ? "财务账单已连接" : "财务账单待同步"}</span>
+              {financialFilter !== "all" && <button type="button" className="financial-filter-clear" onClick={() => setFinancialFilter("all")}>清除财务筛选</button>}
+              <div className="order-detail-filters">
+                <label><span>⌕</span><input type="search" value={query} placeholder="搜索订单号、SKU 或仓库" onChange={(event) => { setQuery(event.target.value); setPage(1); }} /></label>
+                <select aria-label="按签收结果筛选" value={statusFilter} onChange={(event) => { setStatusFilter(event.target.value); setDateFilter("all"); setFinancialFilter("all"); setPage(1); }}><option value="all">全部签收结果</option><option value="success">正常签收</option><option value="abnormal">非正常签收</option><option value="pending">待签收/处理中</option></select>
+                <select aria-label="按 WB 物流状态筛选" value={wbStatusFilter} onChange={(event) => { setWbStatusFilter(event.target.value); setPage(1); }}>
+                  <option value="all">全部 WB 状态</option>
+                  {WB_STATUS_FILTERS.map((item) => <option key={item.value} value={item.value}>{item.label} · {wbStatusCounts.get(item.value) ?? 0}</option>)}
+                </select>
+              </div>
+            </div>
           </div>
           <div className="order-detail-table-wrap">
             <table className="order-detail-table">
@@ -398,7 +510,7 @@ export default function SalesPage() {
                   const settlementLabel = finance.kind === "settled" ? "已结账" : finance.zeroCostReason ? "无需支出" : finance.kind === "abnormal" ? finance.billingSource === "actual" ? "已扣款" : "预估扣款" : "待结账";
                   const completionDate = formatBeijingCompletionDate(order.completionAt);
                   const costExpenseBreakdown = finance.zeroCostReason ? "新订单客户取消，未处理" : finance.kind === "settled" ? `平台净扣费 ${formatFinanceNumber(finance.platformDeduction ?? 0)}＋商品成本 ${formatFinanceNumber(finance.productCost ?? 0)}` : finance.kind === "abnormal" ? `尾程物流 ${formatFinanceNumber(finance.logisticsFee)}＋操作费 ${formatFinanceNumber(finance.handlingFee)}` : "等待订单完结/账单";
-                  return <tr key={order.id} className={financeClass}><td><b>{formatDateTime(order.createdAt)}</b><small>{order.createdAt.slice(0, 10)}</small></td><td><div className="order-id-with-photo">{product?.image ? <span className="order-photo" style={{ backgroundImage: `url(${product.image})` }} aria-hidden="true" /> : <span className="order-photo placeholder">W</span>}<div><b className="order-number" title={order.orderNumber}>{order.orderNumber}</b><small>WB {order.nmId}</small></div></div></td><td><b className="order-sku-code">{order.article || product?.sku || "—"}</b></td><td><span>{order.warehouseName}</span></td><td><b>{formatMoney(order.amount)}</b></td><td><span className={`supplier-status ${isCurrentValidNewOrder(order) ? "new" : ""}`}>{supplierStatusLabel(order.supplierStatus)}</span><small>{order.supplierStatus || "—"}</small></td><td><span>{order.statusLabel}</span><small>{order.wbStatus || "—"}</small></td><td><span className={`order-outcome ${order.outcome}`}>{order.outcome === "success" ? "正常签收" : order.outcome === "abnormal" ? "非正常签收" : "待签收"}</span>{order.outcome !== "pending" && <small className={`order-completion-date ${completionDate ? "matched" : "unavailable"}`}>{completionDate ? `完结：${completionDate}` : "完结：WB API 未返回"}</small>}</td><td className="finance-cell"><span className={`finance-status ${finance.kind}`}>{settlementLabel}</span>{finance.zeroCostReason && <small>未进入备货，无拿货/操作/物流支出</small>}</td><td className="finance-cell"><b>{finance.platformPayout === null ? finance.kind === "abnormal" ? "账单未出" : "待结账" : formatFinanceMoney(finance.platformPayout)}</b>{finance.kind === "settled" && finance.postCommissionPayout !== null && <small className="finance-breakdown">佣金后货款 {formatFinanceNumber(finance.postCommissionPayout)}；再扣账单费 {formatFinanceNumber(finance.postCommissionPayout - (finance.platformPayout ?? 0))}</small>}{finance.kind === "abnormal" && finance.platformPayout !== null && <small className="finance-breakdown">{finance.zeroCostReason ? "未处理订单，无平台扣款" : "异常单物流扣款"}</small>}</td><td className="finance-cell"><b>{finance.platformDeduction === null ? finance.kind === "abnormal" ? "待录成本" : "待结账" : formatFinanceMoney(finance.platformDeduction)}</b>{finance.platformDeduction !== null && <small className="finance-breakdown">{platformFeeBreakdown(finance)}</small>}{finance.kind === "abnormal" && <small>{finance.billingSource === "actual" ? "WB 账单实扣" : finance.billingSource === "zero" ? "新订单取消，支出为 0" : "按尾程费预估"}</small>}</td><td className="finance-cell"><b>{finance.productCost === null ? costPendingCopy : formatFinanceMoney(finance.productCost)}</b>{finance.productCost !== null && <small className="finance-breakdown">{finance.zeroCostReason ? "拿货 0.00＋操作 0.00" : productCostBreakdown(finance)}</small>}</td><td className="finance-cell"><b>{finance.costExpense === null ? costPendingCopy : formatFinanceMoney(finance.costExpense)}</b>{finance.costExpense !== null && <small className="finance-breakdown">{costExpenseBreakdown}</small>}</td><td className="finance-cell"><b>{finance.profit === null ? costPendingCopy : formatFinanceMoney(finance.profit)}</b>{finance.profit !== null && <small>收入 {formatFinanceNumber(finance.incomeEstimate ?? 0)}－支出 {formatFinanceNumber(finance.costExpense ?? 0)}</small>}</td><td className="finance-cell"><b>{finance.profitRate === null ? costPendingCopy : `${finance.profitRate.toFixed(1)}%`}</b></td></tr>;
+                  return <tr key={order.id} className={financeClass}><td><b>{formatDateTime(order.createdAt)}</b><small>{order.createdAt.slice(0, 10)}</small></td><td><div className="order-id-with-photo">{product?.image ? <span className="order-photo" style={{ backgroundImage: `url(${product.image})` }} aria-hidden="true" /> : <span className="order-photo placeholder">W</span>}<div><b className="order-number" title={order.orderNumber}>{order.orderNumber}</b><small>WB {order.nmId}</small></div></div></td><td><b className="order-sku-code">{order.article || product?.sku || "—"}</b></td><td><span>{order.warehouseName}</span></td><td><b>{formatMoney(order.amount)}</b></td><td><span className={`supplier-status ${isCurrentValidNewOrder(order) ? "new" : ""}`}>{supplierStatusLabel(order.supplierStatus)}</span><small>{order.supplierStatus || "—"}</small></td><td><button type="button" className="wb-live-status-button" title="点击通过 WB API 读取实时状态" onClick={() => readLiveOrderStatus(order)}><span>{wbStatusLabel(order.wbStatus, order.supplierStatus)}</span><small>{order.wbStatus || "—"} · 查看实时状态</small></button></td><td><span className={`order-outcome ${order.outcome}`}>{order.outcome === "success" ? "正常签收" : order.outcome === "abnormal" ? "非正常签收" : "待签收"}</span>{order.outcome !== "pending" && <small className={`order-completion-date ${completionDate ? "matched" : "unavailable"}`}>{completionDate ? `完结：${completionDate}` : "完结：WB API 未返回"}</small>}</td><td className="finance-cell"><span className={`finance-status ${finance.kind}`}>{settlementLabel}</span>{finance.zeroCostReason && <small>未进入备货，无拿货/操作/物流支出</small>}</td><td className="finance-cell"><b>{finance.platformPayout === null ? finance.kind === "abnormal" ? "账单未出" : "待结账" : formatFinanceMoney(finance.platformPayout)}</b>{finance.kind === "settled" && finance.postCommissionPayout !== null && <small className="finance-breakdown">佣金后货款 {formatFinanceNumber(finance.postCommissionPayout)}；再扣账单费 {formatFinanceNumber(finance.postCommissionPayout - (finance.platformPayout ?? 0))}</small>}{finance.kind === "abnormal" && finance.platformPayout !== null && <small className="finance-breakdown">{finance.zeroCostReason ? "未处理订单，无平台扣款" : "异常单物流扣款"}</small>}</td><td className="finance-cell"><b>{finance.platformDeduction === null ? finance.kind === "abnormal" ? "待录成本" : "待结账" : formatFinanceMoney(finance.platformDeduction)}</b>{finance.platformDeduction !== null && <small className="finance-breakdown">{platformFeeBreakdown(finance)}</small>}{finance.kind === "abnormal" && <small>{finance.billingSource === "actual" ? "WB 账单实扣" : finance.billingSource === "zero" ? "新订单取消，支出为 0" : "按尾程费预估"}</small>}</td><td className="finance-cell"><b>{finance.productCost === null ? costPendingCopy : formatFinanceMoney(finance.productCost)}</b>{finance.productCost !== null && <small className="finance-breakdown">{finance.zeroCostReason ? "拿货 0.00＋操作 0.00" : productCostBreakdown(finance)}</small>}</td><td className="finance-cell"><b>{finance.costExpense === null ? costPendingCopy : formatFinanceMoney(finance.costExpense)}</b>{finance.costExpense !== null && <small className="finance-breakdown">{costExpenseBreakdown}</small>}</td><td className="finance-cell"><b>{finance.profit === null ? costPendingCopy : formatFinanceMoney(finance.profit)}</b>{finance.profit !== null && <small>收入 {formatFinanceNumber(finance.incomeEstimate ?? 0)}－支出 {formatFinanceNumber(finance.costExpense ?? 0)}</small>}</td><td className="finance-cell"><b>{finance.profitRate === null ? costPendingCopy : `${finance.profitRate.toFixed(1)}%`}</b></td></tr>;
                 })}
                 {!loading && visibleOrders.length === 0 && <tr className="empty-row"><td colSpan={15}>{data?.dataAvailability.orderDetails ? "没有符合当前筛选条件的订单" : "WB 订单状态暂时无法读取，请稍后手动同步"}</td></tr>}
               </tbody>
@@ -407,6 +519,33 @@ export default function SalesPage() {
           <footer className="product-table-footer"><span>共 {filteredOrders.length} 笔订单 · 第 {Math.min(page, pageCount)} / {pageCount} 页</span><div><button onClick={() => setPage((value) => Math.max(1, value - 1))} disabled={page <= 1}>← 上一页</button><button onClick={() => setPage((value) => Math.min(pageCount, value + 1))} disabled={page >= pageCount}>下一页 →</button></div></footer>
         </section>
       </section>
+
+      {statusOrder && <div className="wb-status-backdrop">
+        <section className="wb-status-dialog" role="dialog" aria-modal="true" aria-labelledby="wb-status-title">
+          <button type="button" className="wb-status-close" aria-label="关闭物流状态详情" onClick={closeLiveOrderStatus}>×</button>
+          <div className="wb-status-dialog-heading">
+            <span>WB LIVE LOGISTICS</span>
+            <h2 id="wb-status-title">订单 {statusOrder.orderNumber} 的实时状态</h2>
+            <p>SKU {statusOrder.article || "—"} · {statusOrder.warehouseName}</p>
+          </div>
+
+          {liveStatusLoading && <div className="wb-status-loading" role="status"><i /><b>正在向 WB API 读取当前物流状态…</b><small>每次打开都会重新读取，不使用订单列表缓存。</small></div>}
+          {!liveStatusLoading && liveStatusError && <div className="wb-status-error" role="alert"><b>{liveStatusError}</b><button type="button" onClick={() => readLiveOrderStatus(statusOrder)}>重新读取</button></div>}
+          {!liveStatusLoading && liveStatus && <>
+            <div className={`wb-status-current ${liveStatus.stage === "canceled" ? "canceled" : ""}`}>
+              <div><span>WB 当前物流状态</span><strong>{liveStatus.wbLabel}</strong><small>{liveStatus.wbStatus || "—"}</small></div>
+              <div><span>卖家处理状态</span><strong>{liveStatus.supplierLabel}</strong><small>{liveStatus.supplierStatus || "—"}</small></div>
+              <div><span>当前节点</span><strong>{liveStatus.stageLabel}</strong><small>北京时间 {formatBeijingStatusTime(liveStatus.checkedAt)}</small></div>
+            </div>
+            {liveStatus.stage !== "canceled" && liveStatus.stage !== "unknown" && <div className="wb-status-progress-wrap"><b>常见状态参考 · 仅高亮 WB API 当前节点</b><div className="wb-status-progress" aria-label="WB 当前物流节点">
+              {WB_STAGE_STEPS.map((step, index) => <div key={step.stage} className={index === wbStageIndex(liveStatus.stage) ? "current" : "future"}><i>{index + 1}</i><span>{step.label}</span></div>)}
+            </div><small>不同配送方式不一定依次经过全部节点；未高亮节点不代表已发生或未发生。</small></div>}
+            <div className="wb-status-explanation"><b>当前状态说明</b><p>{liveStatus.description}</p></div>
+            <div className="wb-status-source"><div><span>数据源</span><b>{liveStatus.source}</b></div><button type="button" onClick={() => readLiveOrderStatus(statusOrder)}>重新读取最新状态</button></div>
+            <p className="wb-status-limit">说明：WB 通用 FBS 状态接口返回的是当前节点，不提供每个历史节点的完整时间线；本页面只展示 API 实际返回值，不补造物流轨迹。</p>
+          </>}
+        </section>
+      </div>}
     </main>
   );
 }

@@ -101,6 +101,10 @@ test("server-renders the completed-today sales label", async () => {
   assert.match(html, /平台净扣费＋商品成本/);
   assert.match(html, /当前新订单/);
   assert.match(html, /supplier-new-count/);
+  assert.match(html, /全部签收结果/);
+  assert.match(html, /全部 WB 状态/);
+  assert.match(html, /WB 已分拣/);
+  assert.match(html, /到达取货点 \/ 待签收/);
   assert.doesNotMatch(html, /今日活跃订单/);
 });
 
