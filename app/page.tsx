@@ -113,7 +113,7 @@ export default function Home() {
 
   useEffect(() => {
     const controller = new AbortController();
-    const params = new URLSearchParams({ from: periodStart, to: periodEnd, view: "overview" });
+    const params = new URLSearchParams({ from: periodStart, to: periodEnd, view: "overview", includeOrders: "true" });
     if (forceRefreshRef.current) params.set("refresh", "manual");
     forceRefreshRef.current = false;
     fetch(`/api/wb/dashboard?${params.toString()}`, {

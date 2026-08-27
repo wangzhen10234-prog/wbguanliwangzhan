@@ -64,6 +64,22 @@ export function isUnprocessedClientCancellation(
     && order.wbStatus.trim().toLowerCase() === "declined_by_client";
 }
 
+export function returnRateSummary(success: number, abnormal: number, invalid: number) {
+  const safeSuccess = Math.max(0, Number(success || 0));
+  const safeAbnormal = Math.max(0, Number(abnormal || 0));
+  const safeInvalid = Math.min(safeAbnormal, Math.max(0, Number(invalid || 0)));
+  const rateAbnormal = safeAbnormal - safeInvalid;
+  const completedForRate = safeSuccess + rateAbnormal;
+  return {
+    success: safeSuccess,
+    abnormal: safeAbnormal,
+    invalid: safeInvalid,
+    rateAbnormal,
+    completedForRate,
+    returnRate: completedForRate ? (rateAbnormal / completedForRate) * 100 : 0,
+  };
+}
+
 export function isCurrentValidNewOrder(
   order: Pick<SalesFinancialOrderInput, "outcome" | "supplierStatus" | "wbStatus">,
 ) {

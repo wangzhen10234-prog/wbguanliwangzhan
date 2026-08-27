@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { buildOrderCompletionIndex, completionForOrder } from "../../../_lib/order-completion";
 import { fbsOrderKey } from "../../../_lib/fbs-order-identity";
+import { isUnprocessedClientCancellation, returnRateSummary } from "../../../_lib/sales-financials";
 
 type WbOrder = {
   date?: string;
@@ -1313,6 +1314,11 @@ export async function GET(request: Request) {
     const allDetailedOrders = periodFbsOrders
       .map((order) => {
         const outcome = orderOutcome(order);
+        const invalid = isUnprocessedClientCancellation({
+          outcome,
+          supplierStatus: order.supplierStatus || "",
+          wbStatus: order.wbStatus || "",
+        });
         const completion = completionForOrder(order, outcome, completionIndex);
         const nmId = Number(order.nmId || 0);
         const orderUid = String(order.orderUid || "").trim();
@@ -1336,6 +1342,7 @@ export async function GET(request: Request) {
           supplierStatus: order.supplierStatus || "",
           wbStatus: order.wbStatus || "",
           outcome,
+          invalid,
           statusLabel: orderStatusLabel(order),
           completionAt: completion?.at || null,
           completionSource: completion?.source || null,
@@ -1469,12 +1476,16 @@ export async function GET(request: Request) {
       if (order.outcome === "success") {
         summary.success += 1;
         summary.salesAmount += order.amount;
-      } else if (order.outcome === "abnormal") summary.abnormal += 1;
+      } else if (order.outcome === "abnormal") {
+        summary.abnormal += 1;
+        if (order.invalid) summary.invalid += 1;
+        else summary.rateAbnormal += 1;
+      }
       else summary.pending += 1;
       return summary;
-    }, { orders: 0, success: 0, abnormal: 0, pending: 0, orderAmount: 0, salesAmount: 0 });
-    const completedDetailedOrders = detailedSummary.success + detailedSummary.abnormal;
-    const detailedAbnormalRate = completedDetailedOrders ? (detailedSummary.abnormal / completedDetailedOrders) * 100 : 0;
+    }, { orders: 0, success: 0, abnormal: 0, invalid: 0, rateAbnormal: 0, pending: 0, orderAmount: 0, salesAmount: 0 });
+    const detailedRate = returnRateSummary(detailedSummary.success, detailedSummary.abnormal, detailedSummary.invalid);
+    const detailedAbnormalRate = detailedRate.returnRate;
     const allPeriodOrders = statistics.orders.filter(inPeriod);
     const allPeriodSales = statistics.sales.filter(inPeriod);
     const periodOrders = allPeriodOrders.filter(matchesWarehouse);
@@ -1523,6 +1534,8 @@ export async function GET(request: Request) {
       preliminaryPayout: number;
       orders: number;
       grossSalesUnits: number;
+      abnormalOrdersCount: number;
+      invalidOrdersCount: number;
       returnsCount: number;
       pendingCount: number;
       stock: number;
@@ -1542,6 +1555,8 @@ export async function GET(request: Request) {
         preliminaryPayout: 0,
         orders: 0,
         grossSalesUnits: 0,
+        abnormalOrdersCount: 0,
+        invalidOrdersCount: 0,
         returnsCount: 0,
         pendingCount: 0,
         stock: stockByProduct.get(id) ?? 0,
@@ -1560,6 +1575,8 @@ export async function GET(request: Request) {
         preliminaryPayout: 0,
         orders: 0,
         grossSalesUnits: 0,
+        abnormalOrdersCount: 0,
+        invalidOrdersCount: 0,
         returnsCount: 0,
         pendingCount: 0,
         stock,
@@ -1579,6 +1596,8 @@ export async function GET(request: Request) {
         preliminaryPayout: 0,
         orders: 0,
         grossSalesUnits: 0,
+        abnormalOrdersCount: 0,
+        invalidOrdersCount: 0,
         returnsCount: 0,
         pendingCount: 0,
         stock: stockByProduct.get(id) ?? 0,
@@ -1593,7 +1612,11 @@ export async function GET(request: Request) {
         if (order.outcome === "success") {
           product.grossSalesUnits += 1;
           if (days > 90) product.sales += order.amount;
-        } else if (order.outcome === "abnormal") product.returnsCount += 1;
+        } else if (order.outcome === "abnormal") {
+          product.abnormalOrdersCount += 1;
+          if (order.invalid) product.invalidOrdersCount += 1;
+          else product.returnsCount += 1;
+        }
         else product.pendingCount += 1;
       }
       if (days <= 90) {
@@ -1623,7 +1646,7 @@ export async function GET(request: Request) {
       }
       for (const sale of returns) {
         const product = ensureProduct(sale);
-        if (product) { product.sales -= amount(sale); product.preliminaryPayout -= Math.abs(Number(sale.forPay || 0)); product.returnsCount += 1; }
+        if (product) { product.sales -= amount(sale); product.preliminaryPayout -= Math.abs(Number(sale.forPay || 0)); product.abnormalOrdersCount += 1; product.returnsCount += 1; }
       }
     }
 
@@ -1776,7 +1799,7 @@ export async function GET(request: Request) {
         payoutAmount: financeDetailsResult.available
           ? (view === "finance" ? financeMovementSummary.netChange : financePayoutAmount)
           : (view === "finance" ? null : payoutAmount),
-        returnsCount: useDetailedMetrics ? detailedSummary.abnormal : returns.length + cancelledOrders,
+        returnsCount: useDetailedMetrics ? detailedSummary.rateAbnormal : returns.length + cancelledOrders,
         returnRate: useDetailedMetrics ? detailedAbnormalRate : ((completedSales.length + returns.length + cancelledOrders) ? ((returns.length + cancelledOrders) / (completedSales.length + returns.length + cancelledOrders)) * 100 : returnRate),
         balanceCurrent,
         balanceAvailable,

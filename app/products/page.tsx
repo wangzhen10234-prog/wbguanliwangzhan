@@ -13,6 +13,8 @@ type ProductRow = {
   sales: number;
   orders: number;
   grossSalesUnits: number;
+  abnormalOrdersCount: number;
+  invalidOrdersCount: number;
   returnsCount: number;
   pendingCount: number;
   units: number;
@@ -42,7 +44,7 @@ type ProductData = {
   warehouses: Array<{ name: string; orders: number; returns: number; stock: number }>;
   dataAvailability: { productCards: boolean; feedbacks: boolean; inventory: boolean; orderDetails: boolean };
   products: ProductRow[];
-  orderSummary: { orders: number; success: number; abnormal: number; pending: number; orderAmount: number; salesAmount: number; abnormalRate: number };
+  orderSummary: { orders: number; success: number; abnormal: number; invalid: number; rateAbnormal: number; pending: number; orderAmount: number; salesAmount: number; abnormalRate: number };
   orderDetails: Array<{
     id: string;
     orderNumber: string;
@@ -193,15 +195,19 @@ export default function ProductsPage() {
     const products = scopedProducts;
     const reviews = products.reduce((sum, item) => sum + item.periodReviewsCount, 0);
     const success = products.reduce((sum, item) => sum + item.netUnits, 0);
-    const abnormal = products.reduce((sum, item) => sum + item.returnsCount, 0);
-    const completed = success + abnormal;
+    const abnormal = products.reduce((sum, item) => sum + item.abnormalOrdersCount, 0);
+    const invalid = products.reduce((sum, item) => sum + item.invalidOrdersCount, 0);
+    const rateAbnormal = products.reduce((sum, item) => sum + item.returnsCount, 0);
+    const completed = success + rateAbnormal;
     return {
       products: products.length,
       units: success,
       returns: abnormal,
+      invalid,
+      rateAbnormal,
       pending: products.reduce((sum, item) => sum + item.pendingCount, 0),
       orders: products.reduce((sum, item) => sum + item.orders, 0),
-      abnormalRate: completed ? (abnormal / completed) * 100 : 0,
+      abnormalRate: completed ? (rateAbnormal / completed) * 100 : 0,
       sales: products.reduce((sum, item) => sum + item.sales, 0),
       attention: products.filter((item) => issueStatuses.has(item.status)).length,
       positiveRate: reviews ? products.reduce((sum, item) => sum + (item.periodPositiveRate ?? 0) * item.periodReviewsCount, 0) / reviews : null,
@@ -322,8 +328,8 @@ export default function ProductsPage() {
 
   function exportCsv() {
     if (!filteredProducts.length) return;
-    const header = ["商品名称", "SKU", "WB nmId", "类目", "品牌", `销售额(${data?.currency ?? "RUB"})`, "订单数", "正常签收", "非正常签收", "待签收", "异常退货率", "正常签收率", "平均售价", "本期平均评分", "本期评价数", "本期好评率", "累计平均评分", "累计评价数", "累计好评率", "库存", "可售天数", "状态"];
-    const rows = filteredProducts.map((item) => [item.name, item.sku, item.nmId, item.category, item.brand, Math.round(item.sales), item.orders, item.netUnits, item.returnsCount, item.pendingCount, item.returnRate.toFixed(1), item.buyoutRate.toFixed(1), Math.round(item.averagePrice), item.periodAverageRating?.toFixed(2) ?? "", item.periodReviewsCount, item.periodPositiveRate?.toFixed(1) ?? "", item.averageRating?.toFixed(2) ?? "", item.reviewsCount, item.positiveRate?.toFixed(1) ?? "", item.stock, item.stockCoverDays?.toFixed(1) ?? "", item.status]);
+    const header = ["商品名称", "SKU", "WB nmId", "类目", "品牌", `销售额(${data?.currency ?? "RUB"})`, "订单数", "正常签收", "非正常签收", "无效订单（不计退货率）", "待签收", "异常退货率", "正常签收率", "平均售价", "本期平均评分", "本期评价数", "本期好评率", "累计平均评分", "累计评价数", "累计好评率", "库存", "可售天数", "状态"];
+    const rows = filteredProducts.map((item) => [item.name, item.sku, item.nmId, item.category, item.brand, Math.round(item.sales), item.orders, item.netUnits, item.abnormalOrdersCount, item.invalidOrdersCount, item.pendingCount, item.returnRate.toFixed(1), item.buyoutRate.toFixed(1), Math.round(item.averagePrice), item.periodAverageRating?.toFixed(2) ?? "", item.periodReviewsCount, item.periodPositiveRate?.toFixed(1) ?? "", item.averageRating?.toFixed(2) ?? "", item.reviewsCount, item.positiveRate?.toFixed(1) ?? "", item.stock, item.stockCoverDays?.toFixed(1) ?? "", item.status]);
     const csv = "\uFEFF" + [header, ...rows].map((row) => row.map(escapeCsv).join(",")).join("\n");
     const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
     const link = document.createElement("a");
@@ -399,7 +405,7 @@ export default function ProductsPage() {
 
         <div className={`notice product-notice ${error ? "error" : "connected"}`}>
           <div className="notice-icon">{loading ? "↻" : error ? "!" : "✓"}</div>
-          <div><strong>{loading ? "正在汇总订单状态和经营数据" : error ? "商品数据同步未完成" : selectedProduct ? `正在查看单品：${selectedProduct.name}` : "商品销售状态分析已更新"}</strong><p>{loading ? "正在读取每笔订单的签收、取消、拒收、瑕疵和配送状态。" : error || `${warehouse || "全部仓库"} · ${summary.orders} 笔订单；所有非正常签收均已计入异常退货率。`}</p></div>
+          <div><strong>{loading ? "正在汇总订单状态和经营数据" : error ? "商品数据同步未完成" : selectedProduct ? `正在查看单品：${selectedProduct.name}` : "商品销售状态分析已更新"}</strong><p>{loading ? "正在读取每笔订单的签收、取消、拒收、瑕疵和配送状态。" : error || `${warehouse || "全部仓库"} · ${summary.orders} 笔订单；新订单阶段客户取消会保留在非正常数量中，但不计入退货率。`}</p></div>
           {error && <button onClick={refresh}>重新同步</button>}
         </div>
 
@@ -407,20 +413,20 @@ export default function ProductsPage() {
           <article><span>{selectedProduct ? "当前商品" : "商品总数"}</span><strong>{loading && !data ? "—" : summary.products}</strong><small>{selectedProduct ? selectedProduct.sku : "全部在售商品卡片"}</small></article>
           <article><span>全部订单</span><strong>{summary.orders.toLocaleString("en-US")}</strong><small>待签收 {summary.pending} 笔</small></article>
           <article><span>正常签收</span><strong>{summary.units.toLocaleString("en-US")}</strong><small>已由买家正常收货</small></article>
-          <article className={summary.returns > 0 ? "attention" : ""}><span>非正常签收率</span><strong>{summary.abnormalRate.toFixed(1)}%</strong><small>{summary.returns} 笔取消、拒收、退回或瑕疵</small></article>
+          <article className={summary.returns > 0 ? "attention" : ""}><span>非正常签收率</span><strong>{summary.abnormalRate.toFixed(1)}%</strong><small>计入 {summary.rateAbnormal} 笔 · 无效 {summary.invalid} 笔已排除</small></article>
           <article><span>本期销售额</span><strong>{formatMoney(summary.sales, data?.currency)}</strong><small>{countDays(periodStart, periodEnd)} 天 · {data?.currency === "CNY" ? "店铺结算币" : "俄罗斯卢布"}</small></article>
         </section>
 
         <section className="product-table-panel">
           <div className="product-table-toolbar">
-            <div><h2>{selectedProduct ? "单品经营明细" : "商品经营明细"}</h2><p>{warehouse || "全部仓库"} · {periodStart} 至 {periodEnd} · 异常退货率＝非正常签收 ÷（正常签收＋非正常签收）。</p></div>
+            <div><h2>{selectedProduct ? "单品经营明细" : "商品经营明细"}</h2><p>{warehouse || "全部仓库"} · {periodStart} 至 {periodEnd} · 退货率＝有效非正常签收 ÷（正常签收＋有效非正常签收），无效订单不参与。</p></div>
             <div className="product-filters"><label className="product-search"><span>⌕</span><input type="search" value={query} placeholder="搜索商品、SKU、WB货号、类目" onChange={(event) => { setQuery(event.target.value); setPage(1); }} /></label><select value={statusFilter} onChange={(event) => { setStatusFilter(event.target.value); setPage(1); }} aria-label="按商品状态筛选"><option value="all">全部状态</option><option value="attention">只看需关注</option><option value="热销">热销</option><option value="稳定">稳定</option><option value="缺货">缺货</option><option value="高退货">高退货</option><option value="低评分">低评分</option><option value="滞销">滞销</option></select></div>
           </div>
 
           <div className="product-detail-table-wrap">
             <table className="product-detail-table">
               <thead><tr><th>商品</th><th><button onClick={() => changeSort("sales")}>销售额{sortMark("sales")}</button></th><th><button onClick={() => changeSort("orders")}>订单{sortMark("orders")}</button></th><th><button onClick={() => changeSort("netUnits")}>正常签收{sortMark("netUnits")}</button></th><th><button onClick={() => changeSort("returnRate")}>异常退货率{sortMark("returnRate")}</button></th><th>待签收</th><th>正常签收率</th><th><button onClick={() => changeSort("periodAverageRating")}>本期评分{sortMark("periodAverageRating")}</button></th><th><button onClick={() => changeSort("periodPositiveRate")}>本期好评率{sortMark("periodPositiveRate")}</button></th><th><button onClick={() => changeSort("stock")}>当前库存{sortMark("stock")}</button></th><th><button onClick={() => changeSort("stockCoverDays")}>可售天数{sortMark("stockCoverDays")}</button></th><th>状态</th></tr></thead>
-              <tbody>{visibleProducts.map((item, index) => <tr key={item.nmId}><td>{item.image ? <span className="product-photo" style={{ backgroundImage: `url(${item.image})` }} aria-hidden="true" /> : <div className={`product-thumb tone-${index % 4}`}>{item.category.slice(0, 1) || "W"}</div>}<div className="product-identity emphasized-sku"><b>{item.name}</b><small>{item.sku}</small><em>WB {item.nmId} · {item.category} · {item.brand}</em></div></td><td><b>{formatMoney(item.sales, data?.currency)}</b><small>均价 {formatMoney(item.averagePrice, data?.currency)}</small></td><td><b>{item.orders}</b></td><td><b>{item.netUnits}</b></td><td><span className={item.returnRate >= 15 ? "value-bad" : item.returnRate <= 5 ? "value-good" : ""}>{item.returnRate.toFixed(1)}%</span><small>{item.returnsCount} 笔非正常</small></td><td><span>{item.pendingCount}</span></td><td><span>{item.buyoutRate.toFixed(1)}%</span></td><td><span className="rating-value">{item.periodAverageRating === null ? "—" : `★ ${item.periodAverageRating.toFixed(2)}`}</span><small>本期 {item.periodReviewsCount} 条 · 累计 {item.reviewsCount}</small></td><td><span className={(item.periodPositiveRate ?? 100) < 80 ? "value-bad" : "value-good"}>{formatPercent(item.periodPositiveRate)}</span><small>累计 {formatPercent(item.positiveRate)}</small></td><td><b>{data?.dataAvailability.inventory ? item.stock : "—"}</b></td><td><span>{item.stockCoverDays === null ? "无销量" : `${item.stockCoverDays.toFixed(1)} 天`}</span><small>日均 {item.dailyUnits.toFixed(2)}</small></td><td><span className={`product-status status-${item.status}`}>{item.status}</span></td></tr>)}{!loading && visibleProducts.length === 0 && <tr className="empty-row"><td colSpan={12}>没有符合当前筛选条件的商品</td></tr>}</tbody>
+              <tbody>{visibleProducts.map((item, index) => <tr key={item.nmId}><td>{item.image ? <span className="product-photo" style={{ backgroundImage: `url(${item.image})` }} aria-hidden="true" /> : <div className={`product-thumb tone-${index % 4}`}>{item.category.slice(0, 1) || "W"}</div>}<div className="product-identity emphasized-sku"><b>{item.name}</b><small>{item.sku}</small><em>WB {item.nmId} · {item.category} · {item.brand}</em></div></td><td><b>{formatMoney(item.sales, data?.currency)}</b><small>均价 {formatMoney(item.averagePrice, data?.currency)}</small></td><td><b>{item.orders}</b></td><td><b>{item.netUnits}</b></td><td><span className={item.returnRate >= 15 ? "value-bad" : item.returnRate <= 5 ? "value-good" : ""}>{item.returnRate.toFixed(1)}%</span><small>计入 {item.returnsCount} · 无效排除 {item.invalidOrdersCount}</small></td><td><span>{item.pendingCount}</span></td><td><span>{item.buyoutRate.toFixed(1)}%</span></td><td><span className="rating-value">{item.periodAverageRating === null ? "—" : `★ ${item.periodAverageRating.toFixed(2)}`}</span><small>本期 {item.periodReviewsCount} 条 · 累计 {item.reviewsCount}</small></td><td><span className={(item.periodPositiveRate ?? 100) < 80 ? "value-bad" : "value-good"}>{formatPercent(item.periodPositiveRate)}</span><small>累计 {formatPercent(item.positiveRate)}</small></td><td><b>{data?.dataAvailability.inventory ? item.stock : "—"}</b></td><td><span>{item.stockCoverDays === null ? "无销量" : `${item.stockCoverDays.toFixed(1)} 天`}</span><small>日均 {item.dailyUnits.toFixed(2)}</small></td><td><span className={`product-status status-${item.status}`}>{item.status}</span></td></tr>)}{!loading && visibleProducts.length === 0 && <tr className="empty-row"><td colSpan={12}>没有符合当前筛选条件的商品</td></tr>}</tbody>
             </table>
           </div>
 

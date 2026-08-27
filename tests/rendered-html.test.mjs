@@ -105,6 +105,9 @@ test("server-renders the completed-today sales label", async () => {
   assert.match(html, /全部 WB 状态/);
   assert.match(html, /WB 已分拣/);
   assert.match(html, /到达取货点 \/ 待签收/);
+  assert.match(html, /非正常签收（含无效）/);
+  assert.match(html, /只看无效订单/);
+  assert.match(html, /无效.*?笔已排除/s);
   assert.doesNotMatch(html, /今日活跃订单/);
 });
 

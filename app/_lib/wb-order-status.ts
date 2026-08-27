@@ -102,6 +102,24 @@ export function wbStatusDescription(value?: string, supplierStatus?: string) {
   } as Record<string, string>)[status] || "WB 当前只返回了状态代码，未提供更详细的通用 FBS 物流轨迹。";
 }
 
+export function wbHistoryStatusLabel(value?: string) {
+  const status = String(value || "").trim().toLowerCase();
+  return ({
+    waiting: "处理中",
+    sorted: "已分拣",
+    ready_for_pickup: "已到取货点，待签收",
+    sold: "买家已签收",
+    canceled: "订单已取消",
+    canceled_by_client: "签收时拒收",
+    declined_by_client: "客户取消",
+    defect: "商品瑕疵",
+    accepted_by_carrier: "承运商已接收",
+    sent_to_carrier: "运往承运商仓库",
+    dispatched_to_delivery_service: "已交给当地配送服务",
+    on_way_to_delivery_service: "运往当地配送服务仓库",
+  } as Record<string, string>)[status] || (status ? `WB 状态：${status}` : "WB 未说明状态");
+}
+
 export function matchesWbStatusFilter(wbStatus: string | undefined, filter: string) {
   const status = String(wbStatus || "").toLowerCase();
   if (filter === "all") return true;

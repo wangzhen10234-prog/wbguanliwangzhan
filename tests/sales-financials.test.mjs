@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { calculateOrderFinancial, isCurrentValidNewOrder, isUnprocessedClientCancellation } from "../app/_lib/sales-financials.ts";
+import { calculateOrderFinancial, isCurrentValidNewOrder, isUnprocessedClientCancellation, returnRateSummary } from "../app/_lib/sales-financials.ts";
 
 const cost = {
   lengthCm: 10,
@@ -35,6 +35,15 @@ test("counts only a still-waiting new order as a current valid new order", () =>
   assert.equal(isCurrentValidNewOrder({ outcome: "pending", supplierStatus: "new", wbStatus: "waiting" }), true);
   assert.equal(isCurrentValidNewOrder({ outcome: "abnormal", supplierStatus: "new", wbStatus: "declined_by_client" }), false);
   assert.equal(isCurrentValidNewOrder({ outcome: "pending", supplierStatus: "confirm", wbStatus: "waiting" }), false);
+});
+
+test("keeps invalid first-hour cancellations in abnormal totals but out of return rates", () => {
+  const summary = returnRateSummary(80, 20, 5);
+  assert.equal(summary.abnormal, 20);
+  assert.equal(summary.invalid, 5);
+  assert.equal(summary.rateAbnormal, 15);
+  assert.equal(summary.completedForRate, 95);
+  assert.equal(summary.returnRate, 15 / 95 * 100);
 });
 
 test("does not erase costs for a refusal after the order entered delivery", () => {

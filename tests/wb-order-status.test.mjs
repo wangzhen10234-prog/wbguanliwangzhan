@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { matchesWbStatusFilter, wbLogisticsStage, wbStatusLabel } from "../app/_lib/wb-order-status.ts";
+import { matchesWbStatusFilter, wbHistoryStatusLabel, wbLogisticsStage, wbStatusLabel } from "../app/_lib/wb-order-status.ts";
 
 test("interprets waiting by the accompanying supplier status", () => {
   assert.equal(wbLogisticsStage("waiting", "new"), "new");
@@ -21,4 +21,10 @@ test("groups every cancellation status in the WB filter", () => {
   assert.equal(matchesWbStatusFilter("defect", "__canceled__"), true);
   assert.equal(matchesWbStatusFilter("sorted", "__canceled__"), false);
   assert.equal(wbLogisticsStage("canceled_by_client", "complete"), "canceled");
+});
+
+test("translates only official cross-border history codes and preserves unknown codes", () => {
+  assert.equal(wbHistoryStatusLabel("SORTED"), "已分拣");
+  assert.equal(wbHistoryStatusLabel("on_way_to_delivery_service"), "运往当地配送服务仓库");
+  assert.equal(wbHistoryStatusLabel("CUSTOM_EVENT"), "WB 状态：custom_event");
 });
