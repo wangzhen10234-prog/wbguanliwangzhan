@@ -64,6 +64,14 @@ export function isUnprocessedClientCancellation(
     && order.wbStatus.trim().toLowerCase() === "declined_by_client";
 }
 
+export function isCurrentValidNewOrder(
+  order: Pick<SalesFinancialOrderInput, "outcome" | "supplierStatus" | "wbStatus">,
+) {
+  return order.outcome === "pending"
+    && order.supplierStatus.trim().toLowerCase() === "new"
+    && order.wbStatus.trim().toLowerCase() === "waiting";
+}
+
 export function waitingFinancial(costReady = false): OrderFinancial {
   return {
     kind: "waiting",

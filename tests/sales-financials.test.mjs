@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { calculateOrderFinancial, isUnprocessedClientCancellation } from "../app/_lib/sales-financials.ts";
+import { calculateOrderFinancial, isCurrentValidNewOrder, isUnprocessedClientCancellation } from "../app/_lib/sales-financials.ts";
 
 const cost = {
   lengthCm: 10,
@@ -29,6 +29,12 @@ test("treats only a new order declined by the client before processing as zero e
   assert.equal(result.productCost, 0);
   assert.equal(result.logisticsFee, 0);
   assert.equal(result.profit, 0);
+});
+
+test("counts only a still-waiting new order as a current valid new order", () => {
+  assert.equal(isCurrentValidNewOrder({ outcome: "pending", supplierStatus: "new", wbStatus: "waiting" }), true);
+  assert.equal(isCurrentValidNewOrder({ outcome: "abnormal", supplierStatus: "new", wbStatus: "declined_by_client" }), false);
+  assert.equal(isCurrentValidNewOrder({ outcome: "pending", supplierStatus: "confirm", wbStatus: "waiting" }), false);
 });
 
 test("does not erase costs for a refusal after the order entered delivery", () => {
