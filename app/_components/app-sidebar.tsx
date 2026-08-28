@@ -1,6 +1,7 @@
 "use client";
 
-import type { ReactNode } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { DEFAULT_STOREFRONT_ID, STOREFRONTS, STOREFRONT_STORAGE_KEY, storefrontById } from "../_lib/storefronts";
 
 type Section = "overview" | "audit" | "sales" | "returns" | "products" | "details" | "stock" | "finance" | "advertising" | "promotions";
 
@@ -25,6 +26,82 @@ function timeLabel(value?: string) {
   }).format(new Date(value));
 }
 
+const STOREFRONT_CHANGE_EVENT = "wb-insight-store-change";
+
+function subscribeStorefront(onChange: () => void) {
+  window.addEventListener("storage", onChange);
+  window.addEventListener(STOREFRONT_CHANGE_EVENT, onChange);
+  return () => {
+    window.removeEventListener("storage", onChange);
+    window.removeEventListener(STOREFRONT_CHANGE_EVENT, onChange);
+  };
+}
+
+function storedStorefrontId() {
+  return storefrontById(window.localStorage.getItem(STOREFRONT_STORAGE_KEY)).id;
+}
+
+function StoreSwitcher() {
+  const activeStoreId = useSyncExternalStore(subscribeStorefront, storedStorefrontId, () => DEFAULT_STOREFRONT_ID);
+  const [open, setOpen] = useState(false);
+  const switcherRef = useRef<HTMLDivElement>(null);
+  const activeStore = storefrontById(activeStoreId);
+  const connectedCount = STOREFRONTS.filter((store) => store.enabled && store.connected).length;
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!switcherRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open]);
+
+  function selectStore(storeId: string) {
+    const nextStore = storefrontById(storeId);
+    if (!nextStore.enabled || nextStore.id === activeStoreId) {
+      setOpen(false);
+      return;
+    }
+    window.localStorage.setItem(STOREFRONT_STORAGE_KEY, nextStore.id);
+    window.dispatchEvent(new Event(STOREFRONT_CHANGE_EVENT));
+    setOpen(false);
+    window.location.reload();
+  }
+
+  return <div className={`store-switcher ${open ? "open" : ""}`} ref={switcherRef}>
+    <button type="button" className="store-switcher-trigger" aria-haspopup="listbox" aria-expanded={open} onClick={() => setOpen((value) => !value)}>
+      <span className="store-avatar" aria-hidden="true">{activeStore.badge}</span>
+      <span className="store-switcher-copy"><small>店铺切换</small><b>{activeStore.name}</b><em>{activeStore.description}</em></span>
+      <span className="store-switcher-chevron" aria-hidden="true">⌄</span>
+    </button>
+    <div className="store-switcher-menu" role="listbox" aria-label="选择 WB 店铺" hidden={!open}>
+      <div className="store-switcher-menu-head"><b>我的 WB 店铺</b><span>{connectedCount} 家已连接</span></div>
+      {STOREFRONTS.map((store) => <button
+        type="button"
+        role="option"
+        aria-selected={store.id === activeStore.id}
+        className={`${store.id === activeStore.id ? "selected" : ""} ${store.enabled ? "" : "pending"}`}
+        disabled={!store.enabled}
+        key={store.id}
+        onClick={() => selectStore(store.id)}
+      >
+        <span className="store-option-avatar" aria-hidden="true">{store.badge}</span>
+        <span><b>{store.name}</b><small>{store.description}</small></span>
+        <i aria-hidden="true">{store.id === activeStore.id ? "✓" : store.enabled ? "" : "待接入"}</i>
+      </button>)}
+      <p>新增店铺后，订单、商品、库存和财务数据将按店铺独立管理。</p>
+    </div>
+  </div>;
+}
+
 export function AppSidebar({ active, syncedAt, nextSyncAt, loading = false, error = "", onRefresh, children }: AppSidebarProps) {
   const navigation: Array<{ section: Section; href: string; label: string; icon: string }> = [
     { section: "overview", href: "/", label: "经营总览", icon: "▦" },
@@ -42,6 +119,7 @@ export function AppSidebar({ active, syncedAt, nextSyncAt, loading = false, erro
   return (
     <aside className="sidebar">
       <div className="brand"><span className="brand-mark">W</span><div><strong>WB Insight</strong><small>俄罗斯店铺分析</small></div></div>
+      <StoreSwitcher />
       <div className="sidebar-scroll-area">
         <nav aria-label="主导航">
           {navigation.map((item) => <a key={item.section} className={`nav-item ${active === item.section ? "active" : ""}`} href={item.href}><span className={`nav-icon ${item.section}`} aria-hidden="true">{item.icon}</span>{item.label}</a>)}

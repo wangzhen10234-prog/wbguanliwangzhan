@@ -21,6 +21,10 @@ test("server-renders the WB Insight dashboard", async () => {
   const html = await response.text();
   assert.match(html, /WB Insight/);
   assert.match(html, /俄罗斯店铺经营分析/);
+  assert.match(html, /店铺切换/);
+  assert.match(html, /当前 WB 店铺/);
+  assert.match(html, /下一家 WB 店铺/);
+  assert.match(html, /提供 API 后即可启用/);
   assert.match(html, /经营总览/);
   assert.match(html, /销售趋势/);
   assert.match(html, /销售状况/);
