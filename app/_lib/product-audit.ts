@@ -4,7 +4,16 @@ export type AuditPhoto = {
   c516x688?: string;
   c246x328?: string;
   square?: string;
+  tm?: string;
 };
+
+export function auditPhotoCandidates(photo: AuditPhoto | undefined, mode: "preview" | "thumb") {
+  if (!photo) return [];
+  const candidates = mode === "preview"
+    ? [photo.big, photo.c516x688, photo.c246x328, photo.square, photo.hq, photo.tm]
+    : [photo.c246x328, photo.c516x688, photo.square, photo.big, photo.hq, photo.tm];
+  return [...new Set(candidates.filter((value): value is string => Boolean(value)))];
+}
 
 export type AuditCharacteristic = {
   id?: number;

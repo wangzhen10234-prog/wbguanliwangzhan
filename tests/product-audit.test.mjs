@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { evaluateProductAudit } from "../app/_lib/product-audit.ts";
+import { auditPhotoCandidates, evaluateProductAudit } from "../app/_lib/product-audit.ts";
 
 const strongCard = {
   nmID: 1001,
@@ -19,6 +19,18 @@ const strongFunnel = {
   selected: { openCount: 500, cartCount: 80, orderCount: 20, buyoutCount: 18, conversions: { addToCartPercent: 16, cartToOrderPercent: 25, buyoutPercent: 90 } },
   comparison: { orderCountDynamic: 15 },
 };
+
+test("prefers working WB big image variants before the unreliable hq source", () => {
+  const photo = {
+    big: "https://basket.example/images/big/1.webp",
+    c516x688: "https://basket.example/images/c516x688/1.webp",
+    c246x328: "https://basket.example/images/c246x328/1.webp",
+    square: "https://basket.example/images/square/1.webp",
+    hq: "https://basket.example/images/hq/1.webp",
+  };
+  assert.deepEqual(auditPhotoCandidates(photo, "preview"), [photo.big, photo.c516x688, photo.c246x328, photo.square, photo.hq]);
+  assert.equal(auditPhotoCandidates({ big: photo.big, hq: photo.big }, "preview").length, 1);
+});
 
 test("keeps every audit score within 0-100 and explains the score", () => {
   const result = evaluateProductAudit(strongCard, strongFunnel);

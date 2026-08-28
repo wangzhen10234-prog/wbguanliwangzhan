@@ -4,7 +4,7 @@
 
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { AppSidebar } from "../_components/app-sidebar";
-import type { ProductAuditResult } from "../_lib/product-audit";
+import { auditPhotoCandidates, type ProductAuditResult } from "../_lib/product-audit";
 
 type AuditData = {
   source: "wildberries";
@@ -73,6 +73,32 @@ function productPhoto(product: ProductAuditResult) {
   return photo?.c246x328 || photo?.c516x688 || photo?.hq || photo?.big || photo?.square || "";
 }
 
+function AuditPhotoImage({ photo, mode, alt, onDimensions, onUnavailable }: {
+  photo: ProductAuditResult["photos"][number];
+  mode: "preview" | "thumb";
+  alt: string;
+  onDimensions?: (width: number, height: number) => void;
+  onUnavailable?: () => void;
+}) {
+  const candidates = auditPhotoCandidates(photo, mode);
+  const [attempt, setAttempt] = useState(0);
+  const source = candidates[attempt];
+  if (!source) return <span className="audit-photo-unavailable">图片源暂时不可用</span>;
+  return <img
+    src={source}
+    alt={alt}
+    referrerPolicy="no-referrer"
+    onLoad={(event) => onDimensions?.(event.currentTarget.naturalWidth, event.currentTarget.naturalHeight)}
+    onError={() => {
+      if (attempt + 1 < candidates.length) setAttempt(attempt + 1);
+      else {
+        onUnavailable?.();
+        setAttempt(candidates.length);
+      }
+    }}
+  />;
+}
+
 function ScoreGauge({ label, value }: { label: string; value: number }) {
   return <div className="audit-score-gauge"><div><span>{label}</span><b className={scoreTone(value)}>{value}</b></div><i><em className={scoreTone(value)} style={{ width: `${value}%` }} /></i></div>;
 }
@@ -86,7 +112,7 @@ function ProductDetail({ product, onClose }: { product: ProductAuditResult; onCl
   const [photoDimensions, setPhotoDimensions] = useState<Record<number, string>>({});
   const photos = product.photos;
   const selectedPhoto = photos[activePhoto];
-  const selectedUrl = selectedPhoto?.hq || selectedPhoto?.big || selectedPhoto?.c516x688 || selectedPhoto?.c246x328 || selectedPhoto?.square || "";
+  const selectedHasSource = auditPhotoCandidates(selectedPhoto, "preview").length > 0;
 
   return <div className="audit-drawer-layer" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}>
     <aside className="audit-drawer" role="dialog" aria-modal="true" aria-labelledby="audit-detail-title">
@@ -110,13 +136,20 @@ function ProductDetail({ product, onClose }: { product: ProductAuditResult; onCl
         <div className="audit-detail-heading"><div><span>01</span><h3>图片诊断</h3></div><small>WB Content API · 数量、高清源与页面预览</small></div>
         <div className="audit-photo-layout">
           <div className="audit-photo-preview">
-            {selectedUrl ? <img src={selectedUrl} alt={`${product.sku} 第 ${activePhoto + 1} 张商品图`} onLoad={(event) => setPhotoDimensions((value) => ({ ...value, [activePhoto]: `${event.currentTarget.naturalWidth} × ${event.currentTarget.naturalHeight}` }))} /> : <div>暂无商品图</div>}
-            {selectedUrl && <span>{photoDimensions[activePhoto] || "正在读取图片尺寸…"}</span>}
+            {selectedPhoto && selectedHasSource ? <AuditPhotoImage
+              key={`${product.nmId}-${activePhoto}`}
+              photo={selectedPhoto}
+              mode="preview"
+              alt={`${product.sku} 第 ${activePhoto + 1} 张商品图`}
+              onDimensions={(width, height) => setPhotoDimensions((value) => ({ ...value, [activePhoto]: `${width} × ${height}` }))}
+              onUnavailable={() => setPhotoDimensions((value) => ({ ...value, [activePhoto]: "WB 图片源暂时不可用" }))}
+            /> : <div>暂无商品图</div>}
+            {selectedPhoto && selectedHasSource && <span className="audit-photo-dimensions">{photoDimensions[activePhoto] || "正在读取图片尺寸…"}</span>}
           </div>
           <div className="audit-photo-thumbs">
             {photos.map((photo, index) => {
-              const url = photo.c246x328 || photo.c516x688 || photo.hq || photo.big || photo.square || "";
-              return <button key={`${url}-${index}`} type="button" className={activePhoto === index ? "active" : ""} onClick={() => setActivePhoto(index)}>{url ? <img src={url} alt="" /> : <span>{index + 1}</span>}<small>{index === 0 ? "首图" : `${index + 1}`}</small></button>;
+              const hasSource = auditPhotoCandidates(photo, "thumb").length > 0;
+              return <button key={`${product.nmId}-${index}`} type="button" className={activePhoto === index ? "active" : ""} onClick={() => setActivePhoto(index)}>{hasSource ? <AuditPhotoImage photo={photo} mode="thumb" alt="" /> : <span>{index + 1}</span>}<small>{index === 0 ? "首图" : `${index + 1}`}</small></button>;
             })}
           </div>
         </div>
