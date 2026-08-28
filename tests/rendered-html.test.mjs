@@ -32,6 +32,7 @@ test("server-renders the WB Insight dashboard", async () => {
   assert.match(html, /href="\/returns"[^>]*>.*退货/s);
   assert.match(html, /综合商品分析/);
   assert.match(html, /产品详情/);
+  assert.match(html, /价格管理/);
   assert.match(html, /库存监控/);
   assert.match(html, /href="\/advertising"[^>]*>.*推广/s);
   assert.match(html, /平台活动评估/);
@@ -41,7 +42,7 @@ test("server-renders the WB Insight dashboard", async () => {
   const sidebar = html.match(/<aside[^>]*class="sidebar"[^>]*>(.*?)<\/aside>/s)?.[1] ?? "";
   assert.ok(sidebar.indexOf("store-switcher") < sidebar.indexOf("sidebar-scroll-area"), "store switcher should be the first sidebar module");
   const navigation = html.match(/<nav[^>]*aria-label="主导航"[^>]*>(.*?)<\/nav>/s)?.[1] ?? "";
-  const expectedOrder = ["经营总览", "商品优化诊断", "销售状况", "综合商品分析", "产品详情", "库存监控", "退货", "回款与余额", "平台活动评估", "推广"];
+  const expectedOrder = ["经营总览", "商品优化诊断", "销售状况", "综合商品分析", "产品详情", "价格管理", "库存监控", "退货", "回款与余额", "平台活动评估", "推广"];
   let previousIndex = -1;
   for (const label of expectedOrder) {
     const currentIndex = navigation.indexOf(label);
@@ -94,6 +95,23 @@ test("server-renders the WB advertising workbench", async () => {
   assert.match(html, /系统建议价/);
   assert.match(html, /商品推广与出价明细/);
   assert.match(html, /广告后净利润/);
+  assert.doesNotMatch(html, /codex-preview|SkeletonPreview|Your site is taking shape/);
+});
+
+test("server-renders the WB price and profit management workbench", async () => {
+  const response = await render("/prices");
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
+
+  const html = await response.text();
+  assert.match(html, /价格管理/);
+  assert.match(html, /WB 后台价格已连接商品成本表/);
+  assert.match(html, /后台原价/);
+  assert.match(html, /折扣比例/);
+  assert.match(html, /最终折扣价/);
+  assert.match(html, /当前价格预计盈亏/);
+  assert.match(html, /利润率/);
+  assert.match(html, /不会再次按后台折扣比例重复扣费/);
   assert.doesNotMatch(html, /codex-preview|SkeletonPreview|Your site is taking shape/);
 });
 

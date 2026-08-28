@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { DEFAULT_STOREFRONT_ID, STOREFRONTS, STOREFRONT_STORAGE_KEY, storefrontById } from "../_lib/storefronts";
 
-type Section = "overview" | "audit" | "sales" | "returns" | "products" | "details" | "stock" | "finance" | "advertising" | "promotions";
+type Section = "overview" | "audit" | "sales" | "returns" | "products" | "details" | "prices" | "stock" | "finance" | "advertising" | "promotions";
 
 type AppSidebarProps = {
   active: Section;
@@ -109,6 +109,7 @@ export function AppSidebar({ active, syncedAt, nextSyncAt, loading = false, erro
     { section: "sales", href: "/sales", label: "销售状况", icon: "↗" },
     { section: "products", href: "/products", label: "综合商品分析", icon: "◇" },
     { section: "details", href: "/details", label: "产品详情", icon: "▤" },
+    { section: "prices", href: "/prices", label: "价格管理", icon: "¥" },
     { section: "stock", href: "/stock", label: "库存监控", icon: "▥" },
     { section: "returns", href: "/returns", label: "退货", icon: "↩" },
     { section: "finance", href: "/finance", label: "回款与余额", icon: "₽" },
