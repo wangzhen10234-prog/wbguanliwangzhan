@@ -20,6 +20,8 @@ export type SalesCostInput = {
   exchangeRate: number;
   productCostCny: number;
   handlingFeeCny: number;
+  lastMileFeeCny?: number;
+  commissionRate?: number;
 };
 
 export type SalesFinancialOrderInput = {
@@ -31,7 +33,7 @@ export type SalesFinancialOrderInput = {
 };
 
 export type OrderFinancial = {
-  kind: "settled" | "waiting" | "abnormal";
+  kind: "settled" | "estimated" | "waiting" | "abnormal";
   billingSource: "actual" | "estimated" | "pending" | "zero";
   costReady: boolean;
   zeroCostReason: "unprocessed-client-cancel" | null;
@@ -127,9 +129,12 @@ export function calculateOrderFinancial(
       : Number(cost.productCostCny || 0)
     : 0;
   const handling = Number(cost?.handlingFeeCny || 0);
-  const estimatedLastMile = cost
+  const calculatedLastMile = cost
     ? (Number(cost.lengthCm || 0) * Number(cost.widthCm || 0) * Number(cost.heightCm || 0) / 1000) * 2 + 6
     : 0;
+  const estimatedLastMile = Number(cost?.lastMileFeeCny || 0) > 0
+    ? Number(cost?.lastMileFeeCny || 0)
+    : calculatedLastMile;
 
   if (order.outcome === "abnormal") {
     if (isUnprocessedClientCancellation(order)) {
@@ -193,8 +198,46 @@ export function calculateOrderFinancial(
     };
   }
 
-  if (order.outcome !== "success" || !order.settlement?.matched) {
+  if (order.outcome !== "success") {
     return waitingFinancial(costReady);
+  }
+
+  if (!order.settlement?.matched) {
+    if (!cost) return waitingFinancial(false);
+    const settlementGross = Number(order.amount || 0);
+    const commissionFee = settlementGross * Math.max(0, Number(cost.commissionRate || 0)) / 100;
+    const logisticsFee = estimatedLastMile;
+    const productCost = principal + handling;
+    const postCommissionPayout = settlementGross - commissionFee;
+    const platformDeduction = commissionFee + logisticsFee;
+    const platformPayout = settlementGross - platformDeduction;
+    const costExpense = platformDeduction + productCost;
+    const profit = settlementGross - costExpense;
+    return {
+      kind: "estimated",
+      billingSource: "estimated",
+      costReady: true,
+      zeroCostReason: null,
+      settlementGross,
+      postCommissionPayout,
+      platformPayout,
+      platformDeduction,
+      commissionFee,
+      logisticsFee,
+      acquiringFee: 0,
+      penaltyFee: 0,
+      deductionFee: 0,
+      storageFee: 0,
+      acceptanceFee: 0,
+      additionalPayment: 0,
+      productPrincipal: principal,
+      handlingFee: handling,
+      productCost,
+      incomeEstimate: settlementGross,
+      costExpense,
+      profit,
+      profitRate: settlementGross > 0 ? (profit / settlementGross) * 100 : null,
+    };
   }
 
   const settlementGross = Number(order.settlement.transactionAmount || order.amount || 0);

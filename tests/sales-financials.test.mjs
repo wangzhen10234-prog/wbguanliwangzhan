@@ -10,6 +10,8 @@ const cost = {
   exchangeRate: 0,
   productCostCny: 40,
   handlingFeeCny: 5,
+  lastMileFeeCny: 8,
+  commissionRate: 20,
 };
 
 test("treats only a new order declined by the client before processing as zero expenditure", () => {
@@ -117,7 +119,7 @@ test("reconciles a settled order as income minus all platform and product costs"
   assert.equal(result.platformPayout - result.productCost, result.profit);
 });
 
-test("keeps pending and unbilled orders out of profit and expenditure totals", () => {
+test("keeps pending orders out of profit and expenditure totals", () => {
   const result = calculateOrderFinancial({
     amount: 100,
     outcome: "pending",
@@ -129,5 +131,64 @@ test("keeps pending and unbilled orders out of profit and expenditure totals", (
   assert.equal(result.kind, "waiting");
   assert.equal(result.incomeEstimate, null);
   assert.equal(result.costExpense, null);
+  assert.equal(result.profit, null);
+});
+
+test("estimates a completed normal order until the WB finance row arrives", () => {
+  const result = calculateOrderFinancial({
+    amount: 100,
+    outcome: "success",
+    supplierStatus: "complete",
+    wbStatus: "sold",
+    settlement: null,
+  }, cost);
+
+  assert.equal(result.kind, "estimated");
+  assert.equal(result.billingSource, "estimated");
+  assert.equal(result.commissionFee, 20);
+  assert.equal(result.logisticsFee, 8);
+  assert.equal(result.productCost, 45);
+  assert.equal(result.platformPayout, 72);
+  assert.equal(result.costExpense, 73);
+  assert.equal(result.profit, 27);
+  assert.equal(result.incomeEstimate - result.costExpense, result.profit);
+});
+
+test("replaces the completed-order estimate with the WB settlement without double counting", () => {
+  const result = calculateOrderFinancial({
+    amount: 100,
+    outcome: "success",
+    supplierStatus: "complete",
+    wbStatus: "sold",
+    settlement: {
+      matched: true,
+      transactionAmount: 100,
+      forPay: 80,
+      logisticsFee: 15,
+      acquiringFee: 2,
+      penaltyFee: 0,
+      deductionFee: 3,
+      storageFee: 0,
+      acceptanceFee: 0,
+      additionalPayment: 0,
+      netPayout: 60,
+    },
+  }, cost);
+
+  assert.equal(result.kind, "settled");
+  assert.equal(result.billingSource, "actual");
+  assert.equal(result.profit, 15);
+});
+
+test("does not invent a completed-order estimate when product cost is unavailable", () => {
+  const result = calculateOrderFinancial({
+    amount: 100,
+    outcome: "success",
+    supplierStatus: "complete",
+    wbStatus: "sold",
+    settlement: null,
+  }, null);
+
+  assert.equal(result.kind, "waiting");
   assert.equal(result.profit, null);
 });
