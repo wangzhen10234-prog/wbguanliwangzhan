@@ -22,7 +22,8 @@ test("server-renders the WB Insight dashboard", async () => {
   assert.match(html, /WB Insight/);
   assert.match(html, /俄罗斯店铺经营分析/);
   assert.match(html, /店铺切换/);
-  assert.match(html, /当前 WB 店铺/);
+  assert.match(html, /王振1号店/);
+  assert.doesNotMatch(html, /当前 WB 店铺/);
   assert.match(html, /下一家 WB 店铺/);
   assert.match(html, /提供 API 后即可启用/);
   assert.match(html, /经营总览/);
@@ -36,6 +37,9 @@ test("server-renders the WB Insight dashboard", async () => {
   assert.match(html, /平台活动评估/);
   assert.match(html, /08:00 · 14:00 · 19:00 · 23:00/);
   assert.match(html, /class="sidebar-scroll-area"/);
+  assert.doesNotMatch(html, /class="brand"/);
+  const sidebar = html.match(/<aside[^>]*class="sidebar"[^>]*>(.*?)<\/aside>/s)?.[1] ?? "";
+  assert.ok(sidebar.indexOf("store-switcher") < sidebar.indexOf("sidebar-scroll-area"), "store switcher should be the first sidebar module");
   const navigation = html.match(/<nav[^>]*aria-label="主导航"[^>]*>(.*?)<\/nav>/s)?.[1] ?? "";
   const expectedOrder = ["经营总览", "商品优化诊断", "销售状况", "综合商品分析", "产品详情", "库存监控", "退货", "回款与余额", "平台活动评估", "推广"];
   let previousIndex = -1;

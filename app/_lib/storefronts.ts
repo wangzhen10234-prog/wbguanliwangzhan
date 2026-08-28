@@ -15,7 +15,7 @@ export const STOREFRONT_STORAGE_KEY = "wb-insight-active-store";
 export const STOREFRONTS: Storefront[] = [
   {
     id: DEFAULT_STOREFRONT_ID,
-    name: "当前 WB 店铺",
+    name: "王振1号店",
     description: "主店铺 · API 已连接",
     enabled: true,
     connected: true,

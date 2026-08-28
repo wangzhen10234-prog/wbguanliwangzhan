@@ -118,7 +118,6 @@ export function AppSidebar({ active, syncedAt, nextSyncAt, loading = false, erro
 
   return (
     <aside className="sidebar">
-      <div className="brand"><span className="brand-mark">W</span><div><strong>WB Insight</strong><small>俄罗斯店铺分析</small></div></div>
       <StoreSwitcher />
       <div className="sidebar-scroll-area">
         <nav aria-label="主导航">
