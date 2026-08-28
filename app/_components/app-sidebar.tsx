@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { DEFAULT_STOREFRONT_ID, STOREFRONTS, STOREFRONT_STORAGE_KEY, storefrontById } from "../_lib/storefronts";
 
-type Section = "overview" | "audit" | "sales" | "returns" | "products" | "details" | "prices" | "stock" | "finance" | "advertising" | "promotions";
+type Section = "overview" | "audit" | "reviews" | "sales" | "returns" | "products" | "details" | "prices" | "stock" | "finance" | "advertising" | "promotions";
 
 type AppSidebarProps = {
   active: Section;
@@ -106,6 +106,7 @@ export function AppSidebar({ active, syncedAt, nextSyncAt, loading = false, erro
   const navigation: Array<{ section: Section; href: string; label: string; icon: string }> = [
     { section: "overview", href: "/", label: "经营总览", icon: "▦" },
     { section: "audit", href: "/audit", label: "商品优化诊断", icon: "✦" },
+    { section: "reviews", href: "/reviews", label: "评价与提问", icon: "★" },
     { section: "sales", href: "/sales", label: "销售状况", icon: "↗" },
     { section: "products", href: "/products", label: "综合商品分析", icon: "◇" },
     { section: "details", href: "/details", label: "产品详情", icon: "▤" },

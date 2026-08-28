@@ -28,6 +28,7 @@ test("server-renders the WB Insight dashboard", async () => {
   assert.match(html, /提供 API 后即可启用/);
   assert.match(html, /经营总览/);
   assert.match(html, /销售趋势/);
+  assert.match(html, /评价与提问/);
   assert.match(html, /销售状况/);
   assert.match(html, /href="\/returns"[^>]*>.*退货/s);
   assert.match(html, /综合商品分析/);
@@ -42,7 +43,7 @@ test("server-renders the WB Insight dashboard", async () => {
   const sidebar = html.match(/<aside[^>]*class="sidebar"[^>]*>(.*?)<\/aside>/s)?.[1] ?? "";
   assert.ok(sidebar.indexOf("store-switcher") < sidebar.indexOf("sidebar-scroll-area"), "store switcher should be the first sidebar module");
   const navigation = html.match(/<nav[^>]*aria-label="主导航"[^>]*>(.*?)<\/nav>/s)?.[1] ?? "";
-  const expectedOrder = ["经营总览", "商品优化诊断", "销售状况", "综合商品分析", "产品详情", "价格管理", "库存监控", "退货", "回款与余额", "平台活动评估", "推广"];
+  const expectedOrder = ["经营总览", "商品优化诊断", "评价与提问", "销售状况", "综合商品分析", "产品详情", "价格管理", "库存监控", "退货", "回款与余额", "平台活动评估", "推广"];
   let previousIndex = -1;
   for (const label of expectedOrder) {
     const currentIndex = navigation.indexOf(label);
@@ -61,6 +62,23 @@ test("server-renders the product optimization audit in the second sidebar positi
   assert.match(html, /商品诊断与优化清单/);
   assert.match(html, /图片审美不伪造机器结论/);
   assert.match(html, /查看完整诊断/);
+});
+
+test("server-renders the WB reviews and questions workbench", async () => {
+  const response = await render("/reviews");
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
+
+  const html = await response.text();
+  assert.match(html, /评价与提问/);
+  assert.match(html, /评价、星级与买家提问均来自 WB 官方 API/);
+  assert.match(html, /WB 店铺官方评分/);
+  assert.match(html, /商品评价诊断/);
+  assert.match(html, /五星分布/);
+  assert.match(html, /主要问题/);
+  assert.match(html, /“问题分类”和“修改建议”由系统/);
+  assert.match(html, /不冒充 WB 官方结论/);
+  assert.doesNotMatch(html, /codex-preview|SkeletonPreview|Your site is taking shape/);
 });
 
 test("server-renders the WB returns and logistics workbench", async () => {
