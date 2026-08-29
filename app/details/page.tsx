@@ -2,7 +2,8 @@
 
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { AppSidebar } from "../_components/app-sidebar";
-import { normalizeProductSku, productCostSourceKey } from "../_lib/product-cost-aliases";
+import { normalizeProductSku } from "../_lib/product-cost-aliases";
+import { reconcileProductCosts } from "../_lib/product-matching";
 
 type Product = {
   nmId: number;
@@ -199,6 +200,7 @@ export default function ProductDetailsPage() {
   const [data, setData] = useState<DashboardData | null>(null);
   const [costs, setCosts] = useState<Record<string, CostRow>>({});
   const [loading, setLoading] = useState(true);
+  const [matching, setMatching] = useState(false);
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState<Set<string>>(new Set());
   const [error, setError] = useState("");
@@ -210,13 +212,15 @@ export default function ProductDetailsPage() {
   const [reloadKey, setReloadKey] = useState(0);
   const forceRefreshRef = useRef(false);
   const draftSequenceRef = useRef(0);
+  const persistedSellerSkuRef = useRef<Record<string, string>>({});
 
   useEffect(() => {
     const controller = new AbortController();
     const today = new Date();
     const start = new Date(today.getTime() - 6 * DAY_MS);
     const params = new URLSearchParams({ from: inputDate(start), to: inputDate(today), view: "details" });
-    if (forceRefreshRef.current) params.set("refresh", "manual");
+    const manualMatch = forceRefreshRef.current;
+    if (manualMatch) params.set("refresh", "manual");
     forceRefreshRef.current = false;
 
     Promise.all([
@@ -231,46 +235,56 @@ export default function ProductDetailsPage() {
         return body.rows ?? [];
       }),
     ]).then(([dashboardResult, storedRows]) => {
-      const storedCosts: Record<string, CostRow> = {};
-      for (const row of storedRows) storedCosts[normalizeProductSku(row.sellerSku)] = { ...row, targetMarginRate: Number(row.targetMarginRate ?? 10), sortOrder: Number(row.sortOrder ?? 0) };
-      const nextCosts: Record<string, CostRow> = { ...storedCosts };
-      const consumedSourceKeys = new Set<string>();
-      for (const product of dashboardResult.value?.products ?? []) {
-        const key = normalizeProductSku(product.sku);
-        const sourceKey = productCostSourceKey(product.sku);
-        const source = storedCosts[key] ?? storedCosts[sourceKey];
-        nextCosts[key] = source
-          ? { ...source, sellerSku: product.sku, nmId: product.nmId }
-          : emptyCost(product);
-        if (source && sourceKey !== key) consumedSourceKeys.add(sourceKey);
+      const normalizedRows = storedRows.map((row) => ({
+        ...row,
+        targetMarginRate: Number(row.targetMarginRate ?? 10),
+        sortOrder: Number(row.sortOrder ?? 0),
+      }));
+      const matches = reconcileProductCosts(normalizedRows, dashboardResult.value?.products ?? [], emptyCost);
+      const nextCosts: Record<string, CostRow> = {};
+      const nextPersistedSellerSkus: Record<string, string> = {};
+      for (const match of matches) {
+        nextCosts[match.key] = match.cost;
+        nextPersistedSellerSkus[match.key] = match.persistedSellerSku;
       }
-      for (const sourceKey of consumedSourceKeys) delete nextCosts[sourceKey];
+      persistedSellerSkuRef.current = nextPersistedSellerSkus;
       setData(dashboardResult.value);
       setCosts(nextCosts);
       setDirty(new Set());
       setSelected(new Set());
       setError(dashboardResult.error ? `${dashboardResult.error}，产品记录表仍可编辑` : "");
+      if (manualMatch && dashboardResult.value) {
+        const matched = matches.filter((match) => match.product).length;
+        const newProducts = matches.filter((match) => match.strategy === "newProduct").length;
+        const manual = matches.filter((match) => match.strategy === "manual").length;
+        setMessage(`匹配完成：WB 已匹配 ${matched} 个${newProducts ? `，新发现 ${newProducts} 个商品` : ""}${manual ? `，${manual} 个手工记录待核对编号` : ""}`);
+      }
     }).catch((reason: Error) => {
       if (reason.name !== "AbortError") setError(reason.message);
     }).finally(() => {
-      if (!controller.signal.aborted) setLoading(false);
+      if (!controller.signal.aborted) {
+        setLoading(false);
+        setMatching(false);
+      }
     });
     return () => controller.abort();
   }, [reloadKey]);
 
   const rows = useMemo<SheetRow[]>(() => {
     const products = new Map((data?.products ?? []).map((product) => [normalizeProductSku(product.sku), product]));
-    const keys = new Set([...products.keys(), ...Object.keys(costs)]);
+    const productsByNmId = new Map((data?.products ?? []).map((product) => [product.nmId, product]));
     const productOrder = new Map([...products.keys()].sort((left, right) => left.localeCompare(right, "zh-CN")).map((key, index) => [key, 10_000 + index * 100]));
-    const manualOrder = new Map(Object.keys(costs).filter((key) => !products.has(normalizeProductSku(costs[key].sellerSku)) && !key.startsWith("draft:")).sort((left, right) => left.localeCompare(right, "zh-CN")).map((key, index) => [key, 100_000 + index * 100]));
-    return [...keys].map((key) => {
+    const manualOrder = new Map(Object.keys(costs).filter((key) => {
       const cost = costs[key];
-      if (!cost) return null;
+      return !products.has(normalizeProductSku(cost.sellerSku)) && !(cost.nmId && productsByNmId.has(cost.nmId)) && !key.startsWith("draft:");
+    }).sort((left, right) => left.localeCompare(right, "zh-CN")).map((key, index) => [key, 100_000 + index * 100]));
+    return Object.entries(costs).map(([key, cost]) => {
       const sellerKey = normalizeProductSku(cost.sellerSku);
-      const product = products.get(sellerKey) ?? products.get(key) ?? null;
-      const order = cost.sortOrder > 0 ? cost.sortOrder : ORIGINAL_ORDER.get(sellerKey) ?? productOrder.get(sellerKey) ?? manualOrder.get(key) ?? 1_000_000;
+      const product = products.get(sellerKey) ?? (cost.nmId ? productsByNmId.get(cost.nmId) : null) ?? null;
+      const productKey = product ? normalizeProductSku(product.sku) : sellerKey;
+      const order = cost.sortOrder > 0 ? cost.sortOrder : ORIGINAL_ORDER.get(sellerKey) ?? productOrder.get(productKey) ?? manualOrder.get(key) ?? 1_000_000;
       return { key, product, cost, order };
-    }).filter((row): row is SheetRow => Boolean(row)).sort((left, right) => left.order - right.order || left.cost.sellerSku.localeCompare(right.cost.sellerSku, "zh-CN"));
+    }).sort((left, right) => left.order - right.order || left.cost.sellerSku.localeCompare(right.cost.sellerSku, "zh-CN"));
   }, [costs, data?.products]);
 
   const filteredRows = useMemo(() => {
@@ -288,8 +302,10 @@ export default function ProductDetailsPage() {
       return;
     }
     forceRefreshRef.current = true;
+    setMatching(true);
     setLoading(true);
     setError("");
+    setMessage("正在从 WB 获取最新商品并重新匹配…");
     setReloadKey((key) => key + 1);
   }
 
@@ -441,7 +457,7 @@ export default function ProductDetailsPage() {
       const savedRows = await Promise.all(pendingKeys.map(async (key) => {
         const cost = costs[key];
         const calculated = formulas(cost);
-        const payload = { ...cost, productCostCny: calculated.productCostCny ?? cost.productCostCny, lastMileFeeCny: calculated.lastMileFeeCny, referencePriceCny: calculated.referencePriceCny ?? 0 };
+        const payload = { ...cost, previousSellerSku: persistedSellerSkuRef.current[key] || "", productCostCny: calculated.productCostCny ?? cost.productCostCny, lastMileFeeCny: calculated.lastMileFeeCny, referencePriceCny: calculated.referencePriceCny ?? 0 };
         const response = await fetch("/api/product-costs", {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
@@ -451,6 +467,12 @@ export default function ProductDetailsPage() {
         if (!response.ok || !body.row) throw new Error(body.error || `${cost.sellerSku} 保存失败`);
         return [key, normalizeProductSku(body.row.sellerSku), body.row] as const;
       }));
+      const nextPersistedSellerSkus = { ...persistedSellerSkuRef.current };
+      for (const [oldKey, newKey, row] of savedRows) {
+        delete nextPersistedSellerSkus[oldKey];
+        nextPersistedSellerSkus[newKey] = row.sellerSku;
+      }
+      persistedSellerSkuRef.current = nextPersistedSellerSkus;
       setCosts((current) => {
         const next = { ...current };
         for (const [oldKey, newKey, row] of savedRows) {
@@ -505,6 +527,7 @@ export default function ProductDetailsPage() {
           <div className="pricing-commandbar">
             <div className="pricing-legend"><span><i className="editable" />白色为可编辑数据</span><span><i className="calculated" />淡紫色为自动计算</span><span><i className="price" />最终售价实时反推</span></div>
             <div className="sheet-actions">
+              <button className="product-match-button" type="button" disabled={loading || saving} onClick={refresh}>{matching ? "匹配中…" : "↻ 匹配 WB 产品"}</button>
               <label className="sheet-search"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索商品编码、SKU、分类或规格" /></label>
               <button className="sheet-save-button" disabled={saving || dirty.size === 0} onClick={saveAll}>{saving ? "保存中…" : dirty.size ? `保存修改（${dirty.size}）` : "已全部保存"}</button>
             </div>
@@ -540,16 +563,16 @@ export default function ProductDetailsPage() {
                   const invalid = value.actualSalePriceCny === null;
                   const isDraft = key.startsWith("draft:");
                   const label = cost.sellerSku || "新产品";
-                  const imageUrl = product?.image || cost.imageUrl;
-                  const imageLabel = product?.image ? "WB 主图" : cost.imageUrl ? "链接图片" : "待补图片";
+                  const imageUrl = cost.imageUrl || product?.image;
+                  const imageLabel = cost.imageUrl ? "自定义图片" : product?.image ? "WB 主图" : "待补图片";
                   return (
                     <Fragment key={key}>
                       <tr className={`pricing-data-row ${dirty.has(key) ? "is-dirty" : ""} ${selected.has(key) ? "is-selected" : ""} ${isDraft ? "is-new" : ""}`}>
                         <td className="sticky-a"><div className="row-select-cell"><input className="row-select-checkbox" type="checkbox" checked={selected.has(key)} onChange={() => toggleRow(key)} aria-label={`选择 ${label}`} /><input className="sheet-text-input" aria-label={`${label} 主推分类`} value={cost.category} placeholder="输入分类" onChange={(event) => updateCost(key, "category", event.target.value)} /></div></td>
-                        <td className="sticky-b">{isDraft ? <input className="sheet-text-input product-code-input" aria-label="新产品卖家商品编号" value={cost.sellerSku} placeholder="必填商品编号" onChange={(event) => updateCost(key, "sellerSku", event.target.value)} /> : <div className="product-code-lock"><b>{cost.sellerSku}</b><small>{product ? "已匹配 WB" : "手工记录"}</small></div>}</td>
+                        <td className="sticky-b"><div className="product-code-editor"><input className="sheet-text-input product-code-input" aria-label={`${label} 卖家商品编号`} value={cost.sellerSku} placeholder="必填商品编号" onChange={(event) => updateCost(key, "sellerSku", event.target.value)} /><small className={product ? "matched" : "unmatched"}>{product ? `已匹配 WB ${product.nmId}` : isDraft ? "待登记" : "修改编号后可重新匹配"}</small></div></td>
                         <td><input className="sheet-text-input" aria-label={`${label} SKU`} value={cost.internalSku} placeholder="内部 SKU" onChange={(event) => updateCost(key, "internalSku", event.target.value)} /></td>
                         <td><span className={`data-status ${product ? "online" : "offline"}`}><i />{product ? "已上线" : isDraft ? "待登记" : "未匹配"}</span></td>
-                        <td><div className="sheet-image-editor"><span className={`sheet-product-image ${imageUrl ? "" : "placeholder"}`}>{imageUrl ? <img src={imageUrl} alt="" loading="lazy" referrerPolicy="no-referrer" /> : isDraft ? "+" : "—"}</span>{!product?.image && <button type="button" onClick={() => editImageUrl(key, cost.imageUrl)}>{cost.imageUrl ? "更换链接" : "粘贴链接"}</button>}</div></td>
+                        <td><div className="sheet-image-editor"><span className={`sheet-product-image ${imageUrl ? "" : "placeholder"}`}>{imageUrl ? <img src={imageUrl} alt="" loading="lazy" referrerPolicy="no-referrer" /> : isDraft ? "+" : "—"}</span><button type="button" onClick={() => editImageUrl(key, cost.imageUrl)}>{cost.imageUrl ? "更换图片" : product?.image ? "自定义图片" : "粘贴链接"}</button></div></td>
                         <td><span className={`image-status ${imageUrl ? "complete" : "missing"}`}>{imageLabel}</span></td>
                         <td><input className="sheet-text-input" aria-label={`${label} 规格`} value={cost.specification} placeholder="型号 / 颜色" onChange={(event) => updateCost(key, "specification", event.target.value)} /></td>
                         <td><NumberCell blankZero label={`${label} 长`} value={cost.lengthCm} onChange={(next) => updateCost(key, "lengthCm", next)} /></td>

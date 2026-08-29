@@ -1,6 +1,7 @@
-import { asc } from "drizzle-orm";
+import { asc, eq } from "drizzle-orm";
 import { getDb } from "../../../db";
 import { productCosts } from "../../../db/schema";
+import { normalizeProductSku } from "../../_lib/product-cost-aliases";
 
 const JSON_HEADERS = {
   "Cache-Control": "private, no-store, max-age=0",
@@ -48,6 +49,7 @@ const SEED_ROWS: Array<typeof productCosts.$inferInsert> = [
 ];
 
 type CostPayload = {
+  previousSellerSku?: unknown;
   sellerSku?: unknown;
   nmId?: unknown;
   imageUrl?: unknown;
@@ -143,12 +145,15 @@ function databaseError(error: unknown) {
 export async function GET() {
   try {
     const db = getDb();
-    // D1 limits the number of bound parameters in one statement. Keep the
-    // initialization idempotent while inserting each starter row separately.
-    for (const seedRow of SEED_ROWS) {
-      await db.insert(productCosts).values(seedRow).onConflictDoNothing();
+    let rows = await db.select().from(productCosts).orderBy(asc(productCosts.sortOrder), asc(productCosts.sellerSku));
+    // Seed only a completely new store. Re-seeding on every read would recreate
+    // an old primary key after the user renames a saved seller code.
+    if (rows.length === 0) {
+      for (const seedRow of SEED_ROWS) {
+        await db.insert(productCosts).values(seedRow).onConflictDoNothing();
+      }
+      rows = await db.select().from(productCosts).orderBy(asc(productCosts.sortOrder), asc(productCosts.sellerSku));
     }
-    const rows = await db.select().from(productCosts).orderBy(asc(productCosts.sortOrder), asc(productCosts.sellerSku));
     return json({ rows });
   } catch (error) {
     return databaseError(error);
@@ -159,7 +164,25 @@ export async function PUT(request: Request) {
   try {
     const body = await request.json() as CostPayload;
     const value = normalizePayload(body);
+    const previousSellerSku = stringField(body.previousSellerSku, 120);
     const db = getDb();
+    const existingKeys = await db.select({ sellerSku: productCosts.sellerSku }).from(productCosts);
+    const normalizedSellerSku = normalizeProductSku(value.sellerSku);
+    const conflict = existingKeys.find((entry) =>
+      normalizeProductSku(entry.sellerSku) === normalizedSellerSku
+      && entry.sellerSku !== previousSellerSku,
+    );
+    if (conflict) throw new Error("SELLER_SKU_CONFLICT");
+
+    if (previousSellerSku && previousSellerSku !== value.sellerSku) {
+      const [renamed] = await db
+        .update(productCosts)
+        .set(value)
+        .where(eq(productCosts.sellerSku, previousSellerSku))
+        .returning();
+      if (renamed) return json({ row: renamed });
+    }
+
     const [row] = await db
       .insert(productCosts)
       .values(value)
@@ -195,6 +218,7 @@ export async function PUT(request: Request) {
     return json({ row });
   } catch (error) {
     if (error instanceof Error && error.message === "SELLER_SKU_REQUIRED") return json({ error: "卖家商品编号不能为空" }, 400);
+    if (error instanceof Error && error.message === "SELLER_SKU_CONFLICT") return json({ error: "卖家商品编号已存在，请使用唯一编号" }, 409);
     if (error instanceof Error && error.message === "EXCHANGE_RATE_REQUIRED") return json({ error: "填写卢布产品成本时，汇率必须大于 0" }, 400);
     if (error instanceof Error && error.message === "IMAGE_URL_INVALID") return json({ error: "商品图片必须使用有效的 HTTPS 链接" }, 400);
     if (error instanceof Error && error.message === "NUMERIC_FIELD_INVALID") return json({ error: "金额、比例或尺寸输入无效" }, 400);

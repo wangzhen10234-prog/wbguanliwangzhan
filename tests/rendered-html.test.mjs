@@ -133,6 +133,15 @@ test("server-renders the WB price and profit management workbench", async () => 
   assert.doesNotMatch(html, /codex-preview|SkeletonPreview|Your site is taking shape/);
 });
 
+test("server-renders editable product matching controls", async () => {
+  const response = await render("/details");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /匹配 WB 产品/);
+  assert.match(html, /白色为可编辑数据/);
+  assert.match(html, /按卖家商品编号自动对应/);
+});
+
 test("server-renders the completed-today sales label", async () => {
   const response = await render("/sales");
   assert.equal(response.status, 200);
