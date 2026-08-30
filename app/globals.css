@@ -393,3 +393,25 @@ td small { margin-top:3px; color:#b0abb5; font-size:7px; }
 .review-product-table{width:2050px;table-layout:fixed}
 .review-product-table th:first-child,.review-product-table td:first-child{width:340px;min-width:340px;max-width:340px}
 .review-product-table .review-product-cell>div{max-width:245px}
+
+/* Persistent horizontal navigation for every wide data surface. */
+:is(.table-wrap,.product-detail-table-wrap,.order-detail-table-wrap,.finance-movement-table-wrap,.pricing-table-scroll,.promotion-table-wrap,.returns-table-wrap,.advertising-table-wrap,.advertising-dialog-table-wrap,.audit-table-wrap,.price-table-wrap,.review-table-wrap,[data-horizontal-scroll]){overscroll-behavior-x:contain;scrollbar-color:#7658e8 #eeeafd;scrollbar-width:auto}
+:is(.table-wrap,.product-detail-table-wrap,.order-detail-table-wrap,.finance-movement-table-wrap,.pricing-table-scroll,.promotion-table-wrap,.returns-table-wrap,.advertising-table-wrap,.advertising-dialog-table-wrap,.audit-table-wrap,.price-table-wrap,.review-table-wrap,[data-horizontal-scroll])::-webkit-scrollbar{width:7px;height:14px}
+:is(.table-wrap,.product-detail-table-wrap,.order-detail-table-wrap,.finance-movement-table-wrap,.pricing-table-scroll,.promotion-table-wrap,.returns-table-wrap,.advertising-table-wrap,.advertising-dialog-table-wrap,.audit-table-wrap,.price-table-wrap,.review-table-wrap,[data-horizontal-scroll])::-webkit-scrollbar-track:horizontal{border:1px solid #e2dcf6;border-radius:10px;background:#f1edff}
+:is(.table-wrap,.product-detail-table-wrap,.order-detail-table-wrap,.finance-movement-table-wrap,.pricing-table-scroll,.promotion-table-wrap,.returns-table-wrap,.advertising-table-wrap,.advertising-dialog-table-wrap,.audit-table-wrap,.price-table-wrap,.review-table-wrap,[data-horizontal-scroll])::-webkit-scrollbar-thumb:horizontal{min-width:54px;border:3px solid #f1edff;border-radius:10px;background:#7658e8}
+:is(.table-wrap,.product-detail-table-wrap,.order-detail-table-wrap,.finance-movement-table-wrap,.pricing-table-scroll,.promotion-table-wrap,.returns-table-wrap,.advertising-table-wrap,.advertising-dialog-table-wrap,.audit-table-wrap,.price-table-wrap,.review-table-wrap,[data-horizontal-scroll])::-webkit-scrollbar-thumb:horizontal:hover{background:#5f42ce}
+.site-horizontal-scroller{position:fixed;z-index:68;right:24px;bottom:14px;left:264px;height:46px;display:grid;grid-template-columns:auto 34px minmax(120px,680px) 34px 34px;align-items:center;justify-content:center;gap:8px;padding:6px 10px;color:#665b78;border:1px solid #dcd3f7;border-radius:15px;background:rgba(255,255,255,.96);box-shadow:0 12px 34px rgba(49,35,87,.18);backdrop-filter:blur(12px)}
+.site-horizontal-scroller[hidden]{display:none}
+.site-horizontal-scroller-label{padding:0 4px;color:#6550b6;font-size:9px;font-weight:800;white-space:nowrap}
+.site-horizontal-scroller button{width:34px;height:34px;padding:0;color:#fff;border:0;border-radius:9px;background:linear-gradient(145deg,#8063e9,#6041d0);box-shadow:0 5px 12px #6246cd2d;font-size:23px;font-weight:500;line-height:1;transition:.15s ease}
+.site-horizontal-scroller button:hover:not(:disabled){filter:brightness(.94);transform:translateY(-1px)}
+.site-horizontal-scroller button:disabled{color:#aaa4b2;background:#ebe8ef;box-shadow:none;cursor:default}
+.site-horizontal-scroller input[type=range]{width:100%;height:30px;margin:0;appearance:none;background:transparent;cursor:ew-resize}
+.site-horizontal-scroller input[type=range]::-webkit-slider-runnable-track{height:9px;border:1px solid #ddd5f7;border-radius:9px;background:#eeeafd}
+.site-horizontal-scroller input[type=range]::-webkit-slider-thumb{width:34px;height:20px;margin-top:-6px;appearance:none;border:3px solid #fff;border-radius:10px;background:#7357e8;box-shadow:0 2px 8px #4e379547}
+.site-horizontal-scroller input[type=range]::-moz-range-track{height:8px;border:1px solid #ddd5f7;border-radius:9px;background:#eeeafd}
+.site-horizontal-scroller input[type=range]::-moz-range-thumb{width:28px;height:16px;border:3px solid #fff;border-radius:10px;background:#7357e8;box-shadow:0 2px 8px #4e379547}
+.site-horizontal-scroller input[type=range]:focus-visible{outline:2px solid #8b73ec;outline-offset:2px;border-radius:10px}
+.site-horizontal-scroller small{color:#8e849d;font-size:8px;font-variant-numeric:tabular-nums;text-align:center}
+@media(max-width:760px){.site-horizontal-scroller{right:10px;bottom:10px;left:10px;height:44px;grid-template-columns:30px minmax(100px,1fr) 30px 30px;padding:6px 8px}.site-horizontal-scroller-label{display:none}.site-horizontal-scroller button{width:30px;height:30px;font-size:20px}}
+@media print{.site-horizontal-scroller{display:none!important}}
