@@ -17,8 +17,16 @@ export function matchesProductDeletion(
 ) {
   const sellerSkuKey = normalizeProductSku(product.sku);
   const nmId = Number(product.nmId || 0);
-  return markers.some((marker) =>
-    (nmId > 0 && marker.nmId === nmId)
-    || Boolean(sellerSkuKey && marker.sellerSkuKey === sellerSkuKey),
-  );
+  return markers.some((marker) => {
+    const markerNmId = Number(marker.nmId || 0);
+
+    // A WB-backed deletion is scoped to the immutable WB product id. Falling
+    // back to the seller code here can hide a separate manual record that was
+    // entered before WB assigned or exposed its nmId.
+    if (markerNmId > 0) return nmId > 0 && markerNmId === nmId;
+
+    // Manual products do not have a WB id, so their normalized seller code is
+    // the durable identity used to keep an intentionally deleted row hidden.
+    return Boolean(sellerSkuKey && marker.sellerSkuKey === sellerSkuKey);
+  });
 }

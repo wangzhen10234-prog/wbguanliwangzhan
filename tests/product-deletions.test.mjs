@@ -1,29 +1,30 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFile } from "node:fs/promises";
+
 import {
   matchesProductDeletion,
   productDeletionIdentity,
 } from "../app/_lib/product-deletions.ts";
 
-test("uses the stable WB product id as the deletion identity when available", () => {
-  assert.equal(productDeletionIdentity("wz810G", 1271220961), "nm:1271220961");
+test("WB deletion markers only match the same immutable WB product id", () => {
+  const markers = [{ identityKey: "nm:1489356182", sellerSkuKey: "wzcwysj", nmId: 1489356182 }];
+
+  assert.equal(matchesProductDeletion({ sku: "wzcwysj", nmId: 1489356182 }, markers), true);
+  assert.equal(matchesProductDeletion({ sku: "wzcwysj", nmId: null }, markers), false);
+  assert.equal(matchesProductDeletion({ sku: "wzcwysj", nmId: 999 }, markers), false);
 });
 
-test("falls back to a normalized seller code for a manual product", () => {
-  assert.equal(productDeletionIdentity("  WZ-810_G ", null), "sku:wz810g");
+test("manual deletion markers continue to match normalized seller codes", () => {
+  const markers = [{ identityKey: "sku:wzcwysj", sellerSkuKey: "wzcwysj", nmId: null }];
+
+  assert.equal(matchesProductDeletion({ sku: "WZ-CWY_SJ", nmId: null }, markers), true);
+  assert.equal(matchesProductDeletion({ sku: "wzcwysj-2", nmId: null }, markers), false);
 });
 
-test("keeps deleted WB products hidden after a later dashboard synchronization", () => {
-  const markers = [{
-    identityKey: "nm:1271220961",
-    sellerSkuKey: "wz810g",
-    nmId: 1271220961,
-  }];
-
-  assert.equal(matchesProductDeletion({ sku: "renamed-product", nmId: 1271220961 }, markers), true);
-  assert.equal(matchesProductDeletion({ sku: "WZ_810-G", nmId: null }, markers), true);
-  assert.equal(matchesProductDeletion({ sku: "wz810x", nmId: 1271220962 }, markers), false);
+test("deletion identity prefers WB id and otherwise uses normalized seller code", () => {
+  assert.equal(productDeletionIdentity("wzcwysj", 1489356182), "nm:1489356182");
+  assert.equal(productDeletionIdentity("WZ-CWY_SJ", null), "sku:wzcwysj");
 });
 
 test("renders each delete action only behind the selected-row condition", async () => {

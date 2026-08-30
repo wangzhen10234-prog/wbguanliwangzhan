@@ -1,8 +1,8 @@
-import { asc, eq, or } from "drizzle-orm";
+import { asc, eq, inArray, or } from "drizzle-orm";
 import { getDb } from "../../../db";
 import { productCostDeletions, productCosts } from "../../../db/schema";
 import { normalizeProductSku } from "../../_lib/product-cost-aliases";
-import { productDeletionIdentity } from "../../_lib/product-deletions";
+import { matchesProductDeletion, productDeletionIdentity } from "../../_lib/product-deletions";
 
 const JSON_HEADERS = {
   "Cache-Control": "private, no-store, max-age=0",
@@ -79,6 +79,11 @@ type CostPayload = {
 type DeletePayload = {
   sellerSku?: unknown;
   persistedSellerSku?: unknown;
+  nmId?: unknown;
+};
+
+type RestorePayload = {
+  sellerSku?: unknown;
   nmId?: unknown;
 };
 
@@ -162,12 +167,10 @@ export async function GET() {
       rows = await db.select().from(productCosts).orderBy(asc(productCosts.sortOrder), asc(productCosts.sellerSku));
     }
     const deletedProducts = await db.select().from(productCostDeletions).orderBy(asc(productCostDeletions.deletedAt));
-    const deletedNmIds = new Set(deletedProducts.map((entry) => entry.nmId).filter((nmId): nmId is number => Boolean(nmId)));
-    const deletedSellerSkus = new Set(deletedProducts.map((entry) => entry.sellerSkuKey));
-    const activeRows = rows.filter((row) =>
-      !(row.nmId && deletedNmIds.has(row.nmId))
-      && !deletedSellerSkus.has(normalizeProductSku(row.sellerSku)),
-    );
+    const activeRows = rows.filter((row) => !matchesProductDeletion({
+      sku: row.sellerSku,
+      nmId: row.nmId,
+    }, deletedProducts));
     return json({ rows: activeRows, deletedProducts });
   } catch (error) {
     return databaseError(error);
@@ -261,7 +264,19 @@ export async function DELETE(request: Request) {
 
     const db = getDb();
     const identityKey = productDeletionIdentity(sellerSku || persistedSellerSku, nmId || null);
-    await db.insert(productCostDeletions).values({
+    const storedKeys = await db.select({
+      sellerSku: productCosts.sellerSku,
+      nmId: productCosts.nmId,
+    }).from(productCosts);
+    const normalizedPersistedSku = normalizeProductSku(persistedSellerSku);
+    const storedSellerSkus = storedKeys.filter((row) =>
+      Boolean(persistedSellerSku && row.sellerSku === persistedSellerSku)
+      || Boolean(sellerSkuKey && normalizeProductSku(row.sellerSku) === sellerSkuKey)
+      || Boolean(normalizedPersistedSku && normalizeProductSku(row.sellerSku) === normalizedPersistedSku)
+      || Boolean(nmId && row.nmId === nmId),
+    ).map((row) => row.sellerSku);
+
+    const markerQuery = db.insert(productCostDeletions).values({
       identityKey,
       sellerSkuKey,
       nmId: nmId || null,
@@ -271,9 +286,36 @@ export async function DELETE(request: Request) {
       set: { sellerSkuKey, nmId: nmId || null, deletedAt: new Date().toISOString() },
     });
 
-    const storedSellerSku = persistedSellerSku || sellerSku;
-    if (storedSellerSku) await db.delete(productCosts).where(eq(productCosts.sellerSku, storedSellerSku));
-    return json({ deleted: true, identityKey });
+    if (storedSellerSkus.length > 0) {
+      await db.batch([
+        db.delete(productCosts).where(inArray(productCosts.sellerSku, storedSellerSkus)),
+        markerQuery,
+      ]);
+    } else {
+      await markerQuery;
+    }
+    return json({ deleted: true, identityKey, deletedStoredRows: storedSellerSkus.length });
+  } catch (error) {
+    if (error instanceof Error && error.message === "NUMERIC_FIELD_INVALID") return json({ error: "商品 ID 无效" }, 400);
+    return databaseError(error);
+  }
+}
+
+export async function PATCH(request: Request) {
+  try {
+    const body = await request.json() as RestorePayload;
+    const sellerSku = stringField(body.sellerSku, 120);
+    const sellerSkuKey = normalizeProductSku(sellerSku);
+    const nmId = Math.trunc(numericField(body.nmId, Number.MAX_SAFE_INTEGER));
+    if (!sellerSkuKey && !nmId) return json({ error: "缺少要恢复的商品编号" }, 400);
+
+    const predicates = [];
+    if (sellerSkuKey) predicates.push(eq(productCostDeletions.sellerSkuKey, sellerSkuKey));
+    if (nmId) predicates.push(eq(productCostDeletions.nmId, nmId));
+    const restored = await getDb().delete(productCostDeletions)
+      .where(predicates.length === 1 ? predicates[0] : or(...predicates))
+      .returning({ identityKey: productCostDeletions.identityKey });
+    return json({ restored: true, restoredMarkers: restored.length });
   } catch (error) {
     if (error instanceof Error && error.message === "NUMERIC_FIELD_INVALID") return json({ error: "商品 ID 无效" }, 400);
     return databaseError(error);
