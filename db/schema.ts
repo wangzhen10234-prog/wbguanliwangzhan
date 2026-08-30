@@ -29,6 +29,13 @@ export const productCosts = sqliteTable("product_costs", {
   updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 });
 
+export const productCostDeletions = sqliteTable("product_cost_deletions", {
+  identityKey: text("identity_key").primaryKey(),
+  sellerSkuKey: text("seller_sku_key").notNull(),
+  nmId: integer("nm_id"),
+  deletedAt: text("deleted_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+
 export const wbSyncSnapshots = sqliteTable("wb_sync_snapshots", {
   cacheKey: text("cache_key").primaryKey(),
   payload: text("payload").notNull(),

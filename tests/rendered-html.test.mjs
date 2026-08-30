@@ -140,6 +140,8 @@ test("server-renders editable product matching controls", async () => {
   assert.match(html, /匹配 WB 产品/);
   assert.match(html, /白色为可编辑数据/);
   assert.match(html, /按卖家商品编号自动对应/);
+  assert.match(html, /操作/);
+  assert.match(html, /删除/);
 });
 
 test("server-renders the completed-today sales label", async () => {

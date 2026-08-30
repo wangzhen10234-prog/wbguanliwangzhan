@@ -43,6 +43,13 @@
       "when": 1787453259809,
       "tag": "0005_legal_lifeguard",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1788019514401,
+      "tag": "0006_low_hairball",
+      "breakpoints": true
     }
   ]
 }

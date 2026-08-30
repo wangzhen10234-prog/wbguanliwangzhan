@@ -3,6 +3,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { AppSidebar } from "../_components/app-sidebar";
 import { normalizeProductSku } from "../_lib/product-cost-aliases";
+import { matchesProductDeletion, type ProductDeletionMarker } from "../_lib/product-deletions";
 import { reconcileProductCosts } from "../_lib/product-matching";
 
 type Product = {
@@ -202,6 +203,7 @@ export default function ProductDetailsPage() {
   const [loading, setLoading] = useState(true);
   const [matching, setMatching] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState<Set<string>>(new Set());
   const [dirty, setDirty] = useState<Set<string>>(new Set());
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
@@ -230,17 +232,22 @@ export default function ProductDetailsPage() {
         return { value: body as DashboardData, error: "" };
       }).catch((reason: Error) => ({ value: null, error: reason.name === "AbortError" ? "" : reason.message })),
       fetch("/api/product-costs", { signal: controller.signal, cache: "no-store" }).then(async (response) => {
-        const body = await response.json() as { rows?: CostRow[]; error?: string };
+        const body = await response.json() as { rows?: CostRow[]; deletedProducts?: ProductDeletionMarker[]; error?: string };
         if (!response.ok) throw new Error(body.error || "产品记录表读取失败");
-        return body.rows ?? [];
+        return { rows: body.rows ?? [], deletedProducts: body.deletedProducts ?? [] };
       }),
-    ]).then(([dashboardResult, storedRows]) => {
-      const normalizedRows = storedRows.map((row) => ({
+    ]).then(([dashboardResult, productRegister]) => {
+      const visibleProducts = (dashboardResult.value?.products ?? []).filter((product) =>
+        !matchesProductDeletion(product, productRegister.deletedProducts),
+      );
+      const normalizedRows = productRegister.rows.filter((row) =>
+        !matchesProductDeletion({ sku: row.sellerSku, nmId: row.nmId }, productRegister.deletedProducts),
+      ).map((row) => ({
         ...row,
         targetMarginRate: Number(row.targetMarginRate ?? 10),
         sortOrder: Number(row.sortOrder ?? 0),
       }));
-      const matches = reconcileProductCosts(normalizedRows, dashboardResult.value?.products ?? [], emptyCost);
+      const matches = reconcileProductCosts(normalizedRows, visibleProducts, emptyCost);
       const nextCosts: Record<string, CostRow> = {};
       const nextPersistedSellerSkus: Record<string, string> = {};
       for (const match of matches) {
@@ -248,7 +255,7 @@ export default function ProductDetailsPage() {
         nextPersistedSellerSkus[match.key] = match.persistedSellerSku;
       }
       persistedSellerSkuRef.current = nextPersistedSellerSkus;
-      setData(dashboardResult.value);
+      setData(dashboardResult.value ? { ...dashboardResult.value, products: visibleProducts } : null);
       setCosts(nextCosts);
       setDirty(new Set());
       setSelected(new Set());
@@ -431,6 +438,77 @@ export default function ProductDetailsPage() {
     setMessage("已添加空白产品行，请先填写卖家商品编号");
   }
 
+  async function deleteRow(key: string, product: Product | null, cost: CostRow) {
+    const label = cost.sellerSku || cost.internalSku || "当前商品";
+    if (!window.confirm(`确认删除“${label}”这一行吗？删除后不会因 WB 同步自动重新出现。`)) return;
+
+    if (key.startsWith("draft:")) {
+      setCosts((current) => {
+        const next = { ...current };
+        delete next[key];
+        return next;
+      });
+      setDirty((current) => {
+        const next = new Set(current);
+        next.delete(key);
+        return next;
+      });
+      setSelected((current) => {
+        const next = new Set(current);
+        next.delete(key);
+        return next;
+      });
+      setMessage(`已删除未保存的产品行“${label}”`);
+      setError("");
+      return;
+    }
+
+    setDeleting((current) => new Set(current).add(key));
+    setError("");
+    setMessage("");
+    try {
+      const response = await fetch("/api/product-costs", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sellerSku: product?.sku || cost.sellerSku,
+          persistedSellerSku: persistedSellerSkuRef.current[key] || "",
+          nmId: product?.nmId ?? cost.nmId,
+        }),
+      });
+      const body = await response.json() as { deleted?: boolean; error?: string };
+      if (!response.ok || !body.deleted) throw new Error(body.error || `${label} 删除失败`);
+
+      setCosts((current) => {
+        const next = { ...current };
+        delete next[key];
+        return next;
+      });
+      setDirty((current) => {
+        const next = new Set(current);
+        next.delete(key);
+        return next;
+      });
+      setSelected((current) => {
+        const next = new Set(current);
+        next.delete(key);
+        return next;
+      });
+      const nextPersistedSellerSkus = { ...persistedSellerSkuRef.current };
+      delete nextPersistedSellerSkus[key];
+      persistedSellerSkuRef.current = nextPersistedSellerSkus;
+      setMessage(`已删除产品行“${label}”`);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "产品行删除失败");
+    } finally {
+      setDeleting((current) => {
+        const next = new Set(current);
+        next.delete(key);
+        return next;
+      });
+    }
+  }
+
   async function saveAll() {
     if (!dirty.size) return;
     setSaving(true);
@@ -548,13 +626,14 @@ export default function ProductDetailsPage() {
                 <col className="col-h" /><col className="col-i" /><col className="col-j" /><col className="col-k" /><col className="col-l" /><col className="col-m" /><col className="col-n" />
                 <col className="col-o" /><col className="col-p" /><col className="col-q" /><col className="col-r" /><col className="col-s" /><col className="col-t" /><col className="col-u" />
                 <col className="col-v" /><col className="col-w" /><col className="col-x" /><col className="col-y" /><col className="col-z" /><col className="col-aa" /><col className="col-ab" /><col className="col-ac" />
+                <col className="col-ad" />
               </colgroup>
               <thead>
-                <tr className="pricing-group-row"><th colSpan={11}><span>01</span>商品资料</th><th colSpan={5}><span>02</span>基础费用</th><th colSpan={6}><span>03</span>平台费用</th><th colSpan={2}><span>04</span>售后费用</th><th colSpan={5} className="result-group"><span>05</span>价格与利润</th></tr>
+                <tr className="pricing-group-row"><th colSpan={11}><span>01</span>商品资料</th><th colSpan={5}><span>02</span>基础费用</th><th colSpan={6}><span>03</span>平台费用</th><th colSpan={2}><span>04</span>售后费用</th><th colSpan={5} className="result-group"><span>05</span>价格与利润</th><th className="action-group"><span>06</span>操作</th></tr>
                 <tr className="pricing-heading-row">
                   <th><label className="batch-check-all"><input type="checkbox" checked={allFilteredSelected} onChange={toggleFilteredRows} aria-label={allFilteredSelected ? "取消选择当前筛选结果" : "选择当前筛选结果"} /><span>主推分类</span></label></th><th>卖家商品编号</th><th>SKU</th><th>上线状态</th><th>商品图片</th><th>图片状态</th><th>规格</th><th>长<br /><small>cm</small></th><th>宽<br /><small>cm</small></th><th>高<br /><small>cm</small></th><th>重量<br /><small>g</small></th>
                   <th>产品成本<br /><small>₽</small></th><th>汇率</th><th>产品成本<br /><small>¥</small></th><th>操作费<br /><small>¥</small></th><th>尾程物流费<br /><small>¥ · 自动</small></th><th>平台佣金率</th><th>平台佣金<br /><small>¥ · 自动</small></th><th>广告投流率</th><th>广告费用<br /><small>¥ · 自动</small></th><th>活动折扣率</th><th>折扣费用<br /><small>¥ · 自动</small></th><th>退损率</th><th>退损费<br /><small>¥ · 自动</small></th>
-                  <th>总成本<br /><small>¥</small></th><th>参考售价<br /><small>¥</small></th><th className="final-price-heading">最终售价<br /><small>¥ · 反推</small></th><th>毛利<br /><small>¥</small></th><th>目标毛利率</th>
+                  <th>总成本<br /><small>¥</small></th><th>参考售价<br /><small>¥</small></th><th className="final-price-heading">最终售价<br /><small>¥ · 反推</small></th><th>毛利<br /><small>¥</small></th><th>目标毛利率</th><th className="delete-action-heading">删除</th>
                 </tr>
               </thead>
               <tbody>
@@ -597,12 +676,13 @@ export default function ProductDetailsPage() {
                         <td className={`formula-cell actual-price ${invalid ? "formula-error" : ""}`}><span className="final-price-value"><small>¥</small>{display(value.actualSalePriceCny)}</span></td>
                         <td className="formula-cell gross-profit"><span className="result-value">{display(value.grossProfitCny)}</span></td>
                         <td><NumberCell label={`${label} 毛利率`} suffix="%" value={cost.targetMarginRate} onChange={(next) => updateCost(key, "targetMarginRate", next)} /></td>
+                        <td className="delete-action-cell">{selected.has(key) && <button type="button" disabled={deleting.has(key)} onClick={() => deleteRow(key, product, cost)}>{deleting.has(key) ? "删除中…" : "删除本行"}</button>}</td>
                       </tr>
-                      <tr className="inline-add-row"><td colSpan={29}><button aria-label={`在 ${label} 后添加新产品`} onClick={() => addRowAfter(key)}><span>＋</span>在此处插入新产品</button></td></tr>
+                      <tr className="inline-add-row"><td colSpan={30}><button aria-label={`在 ${label} 后添加新产品`} onClick={() => addRowAfter(key)}><span>＋</span>在此处插入新产品</button></td></tr>
                     </Fragment>
                   );
                 })}
-                {!loading && filteredRows.length === 0 && <tr className="sheet-empty-row"><td colSpan={29}>{query ? "没有找到符合条件的商品" : "还没有产品记录"}</td></tr>}
+                {!loading && filteredRows.length === 0 && <tr className="sheet-empty-row"><td colSpan={30}>{query ? "没有找到符合条件的商品" : "还没有产品记录"}</td></tr>}
               </tbody>
             </table>
           </div>
