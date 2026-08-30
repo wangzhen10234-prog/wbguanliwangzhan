@@ -28,7 +28,6 @@ test("server-renders the WB Insight dashboard", async () => {
   assert.match(html, /提供 API 后即可启用/);
   assert.match(html, /经营总览/);
   assert.match(html, /数据表左右滚动控制/);
-  assert.match(html, /左右滚动/);
   assert.match(html, /拖动以左右查看数据/);
   assert.match(html, /销售趋势/);
   assert.match(html, /评价与提问/);

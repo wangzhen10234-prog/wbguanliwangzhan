@@ -21,9 +21,9 @@ test("covers every wide data-table wrapper with the global horizontal controller
 
   for (const wrapper of expectedWrappers) assert.match(source, new RegExp(`\\.${wrapper}`));
   assert.match(source, /type="range"/);
-  assert.match(source, /向左滚动数据表/);
-  assert.match(source, /向右滚动数据表/);
-  assert.match(source, /左右滚动/);
+  assert.doesNotMatch(source, /<button/);
+  assert.doesNotMatch(source, /site-horizontal-scroller-label/);
+  assert.match(source, /拖动以左右查看数据/);
 });
 
 test("mounts the controller site-wide and keeps a visible native horizontal thumb", async () => {

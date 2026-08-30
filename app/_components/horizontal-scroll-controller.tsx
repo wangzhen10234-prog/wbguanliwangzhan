@@ -149,13 +149,6 @@ export function HorizontalScrollController() {
     setState((previous) => ({ ...previous, left: Math.round(left) }));
   }
 
-  function move(direction: -1 | 1) {
-    const target = activeTarget.current;
-    if (!target) return;
-    const distance = Math.max(260, Math.round(target.clientWidth * 0.72));
-    target.scrollBy({ left: direction * distance, behavior: "smooth" });
-  }
-
   const progress = state.max > 0 ? Math.round(state.left / state.max * 100) : 0;
 
   return (
@@ -164,9 +157,8 @@ export function HorizontalScrollController() {
       hidden={!state.visible}
       aria-hidden={!state.visible}
       aria-label="数据表左右滚动控制"
+      title="拖动滑块左右查看数据"
     >
-      <span className="site-horizontal-scroller-label">左右滚动</span>
-      <button type="button" onClick={() => move(-1)} disabled={state.left <= 1} aria-label="向左滚动数据表">‹</button>
       <input
         type="range"
         min={0}
@@ -176,8 +168,6 @@ export function HorizontalScrollController() {
         aria-label="拖动以左右查看数据"
         aria-valuetext={`已滚动 ${progress}%`}
       />
-      <button type="button" onClick={() => move(1)} disabled={state.left >= state.max - 1} aria-label="向右滚动数据表">›</button>
-      <small>{progress}%</small>
     </div>
   );
 }
