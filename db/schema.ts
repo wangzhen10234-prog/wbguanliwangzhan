@@ -1,8 +1,9 @@
 import { sql } from "drizzle-orm";
-import { integer, real, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { integer, primaryKey, real, sqliteTable, text } from "drizzle-orm/sqlite-core";
 
 export const productCosts = sqliteTable("product_costs", {
-  sellerSku: text("seller_sku").primaryKey(),
+  storeId: text("store_id").notNull().default("primary"),
+  sellerSku: text("seller_sku").notNull(),
   nmId: integer("nm_id"),
   imageUrl: text("image_url").notNull().default(""),
   internalSku: text("internal_sku").notNull().default(""),
@@ -27,14 +28,15 @@ export const productCosts = sqliteTable("product_costs", {
   notes: text("notes").notNull().default(""),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
-});
+}, (table) => [primaryKey({ name: "product_costs_store_seller_pk", columns: [table.storeId, table.sellerSku] })]);
 
 export const productCostDeletions = sqliteTable("product_cost_deletions", {
-  identityKey: text("identity_key").primaryKey(),
+  storeId: text("store_id").notNull().default("primary"),
+  identityKey: text("identity_key").notNull(),
   sellerSkuKey: text("seller_sku_key").notNull(),
   nmId: integer("nm_id"),
   deletedAt: text("deleted_at").notNull().default(sql`CURRENT_TIMESTAMP`),
-});
+}, (table) => [primaryKey({ name: "product_cost_deletions_store_identity_pk", columns: [table.storeId, table.identityKey] })]);
 
 export const wbSyncSnapshots = sqliteTable("wb_sync_snapshots", {
   cacheKey: text("cache_key").primaryKey(),

@@ -6,6 +6,7 @@ import {
   wbStatusDescription,
   wbStatusLabel,
 } from "../../../_lib/wb-order-status";
+import { resolveWbStore } from "../../../_lib/server-storefront";
 
 const JSON_HEADERS = {
   "Content-Type": "application/json; charset=utf-8",
@@ -91,8 +92,8 @@ async function readCrossBorderHistory(orderId: number, token: string) {
 }
 
 export async function POST(request: Request) {
-  const token = process.env.WB_API_TOKEN?.trim();
-  if (!token) return json({ error: "WB API 尚未配置" }, 503);
+  const token = resolveWbStore(request).token;
+  if (!token) return json({ error: "当前店铺的 WB API 尚未配置" }, 503);
 
   const body = await request.json().catch(() => null) as { orderId?: unknown } | null;
   const orderId = typeof body?.orderId === "number" ? body.orderId : Number(body?.orderId);

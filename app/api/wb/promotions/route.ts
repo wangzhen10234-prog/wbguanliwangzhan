@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { resolveWbStore, scopedStoreKey } from "../../../_lib/server-storefront";
 
 type PromotionListItem = {
   id?: number;
@@ -84,8 +85,8 @@ const PRODUCT_FIRST_PAUSE_MS = 725;
 const PRODUCT_BATCH_PAUSE_MS = 3_200;
 const SNAPSHOT_KEY = "promotion-calendar-v2";
 
-let memoryCache: CacheEntry | null = null;
-let pendingLoad: Promise<PromotionSnapshot> | null = null;
+const memoryCache = new Map<string, CacheEntry>();
+const pendingLoads = new Map<string, Promise<PromotionSnapshot>>();
 
 function syncSchedule(now = Date.now()) {
   const beijingNow = new Date(now + BEIJING_OFFSET_MS);
@@ -143,10 +144,10 @@ async function wbRequest<T>(url: string, token: string) {
   return response.json() as Promise<T>;
 }
 
-async function readSnapshot() {
+async function readSnapshot(cacheKey: string) {
   try {
     const row = await env.DB.prepare("SELECT payload, sync_slot AS syncSlot FROM wb_sync_snapshots WHERE cache_key = ?")
-      .bind(SNAPSHOT_KEY)
+      .bind(cacheKey)
       .first<{ payload: string; syncSlot: string }>();
     return row?.payload ? { value: JSON.parse(row.payload) as PromotionSnapshot, syncSlot: row.syncSlot || "" } : null;
   } catch {
@@ -154,7 +155,7 @@ async function readSnapshot() {
   }
 }
 
-async function writeSnapshot(value: PromotionSnapshot) {
+async function writeSnapshot(cacheKey: string, value: PromotionSnapshot) {
   try {
     await env.DB.prepare(`
       INSERT INTO wb_sync_snapshots (cache_key, payload, sync_slot, manual_bucket, updated_at)
@@ -163,7 +164,7 @@ async function writeSnapshot(value: PromotionSnapshot) {
         payload = excluded.payload,
         sync_slot = excluded.sync_slot,
         updated_at = CURRENT_TIMESTAMP
-    `).bind(SNAPSHOT_KEY, JSON.stringify(value), syncSchedule().slot).run();
+    `).bind(cacheKey, JSON.stringify(value), syncSchedule().slot).run();
   } catch {
     // A cache write must never invalidate fresh WB promotion data.
   }
@@ -284,35 +285,40 @@ async function fetchPromotionSnapshot(token: string) {
   };
 }
 
-async function loadPromotions(token: string, forceRefresh: boolean) {
+async function loadPromotions(token: string, storeId: string, forceRefresh: boolean) {
+  const cacheKey = scopedStoreKey(storeId, SNAPSHOT_KEY);
   const schedule = syncSchedule();
-  if (!forceRefresh && memoryCache && memoryCache.expiresAt > Date.now()) return memoryCache.value;
-  const durable = await readSnapshot();
+  const memory = memoryCache.get(cacheKey);
+  if (!forceRefresh && memory && memory.expiresAt > Date.now()) return memory.value;
+  const durable = await readSnapshot(cacheKey);
   if (!forceRefresh && durable?.syncSlot === schedule.slot) {
-    memoryCache = { value: durable.value, expiresAt: schedule.nextAt };
+    memoryCache.set(cacheKey, { value: durable.value, expiresAt: schedule.nextAt });
     return durable.value;
   }
-  if (pendingLoad) return pendingLoad;
-  pendingLoad = fetchPromotionSnapshot(token)
+  const pending = pendingLoads.get(cacheKey);
+  if (pending) return pending;
+  const load = fetchPromotionSnapshot(token)
     .then(async (snapshot) => {
-      memoryCache = { value: snapshot, expiresAt: syncSchedule().nextAt };
-      await writeSnapshot(snapshot);
+      memoryCache.set(cacheKey, { value: snapshot, expiresAt: syncSchedule().nextAt });
+      await writeSnapshot(cacheKey, snapshot);
       return snapshot;
     })
     .catch((error) => {
       if (durable?.value) return durable.value;
       throw error;
     })
-    .finally(() => { pendingLoad = null; });
-  return pendingLoad;
+    .finally(() => { pendingLoads.delete(cacheKey); });
+  pendingLoads.set(cacheKey, load);
+  return load;
 }
 
 export async function GET(request: Request) {
-  const token = process.env.WB_API_TOKEN?.trim();
-  if (!token) return json({ error: "WB API 尚未配置" }, 503);
+  const store = resolveWbStore(request, env);
+  const token = store.token;
+  if (!token) return json({ error: "当前店铺的 WB API 尚未配置" }, 503);
   const forceRefresh = new URL(request.url).searchParams.get("refresh") === "manual";
   try {
-    const snapshot = await loadPromotions(token, forceRefresh);
+    const snapshot = await loadPromotions(token, store.id, forceRefresh);
     const schedule = syncSchedule();
     return json({
       ...snapshot,

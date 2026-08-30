@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
-import { DEFAULT_STOREFRONT_ID, STOREFRONTS, STOREFRONT_STORAGE_KEY, storefrontById } from "../_lib/storefronts";
+import { DEFAULT_STOREFRONT_ID, STOREFRONTS, STOREFRONT_COOKIE_KEY, STOREFRONT_STORAGE_KEY, storefrontById } from "../_lib/storefronts";
 
 type Section = "overview" | "audit" | "reviews" | "sales" | "returns" | "products" | "details" | "prices" | "stock" | "finance" | "advertising" | "promotions";
 
@@ -38,7 +38,14 @@ function subscribeStorefront(onChange: () => void) {
 }
 
 function storedStorefrontId() {
-  return storefrontById(window.localStorage.getItem(STOREFRONT_STORAGE_KEY)).id;
+  const cookieId = document.cookie.split(";").map((entry) => entry.trim()).find((entry) => entry.startsWith(`${STOREFRONT_COOKIE_KEY}=`))?.slice(STOREFRONT_COOKIE_KEY.length + 1);
+  let decodedCookieId = "";
+  try { decodedCookieId = cookieId ? decodeURIComponent(cookieId) : ""; } catch { decodedCookieId = ""; }
+  return storefrontById(decodedCookieId || window.localStorage.getItem(STOREFRONT_STORAGE_KEY)).id;
+}
+
+function persistStorefrontCookie(storeId: string) {
+  document.cookie = `${STOREFRONT_COOKIE_KEY}=${encodeURIComponent(storeId)}; Max-Age=31536000; Path=/; SameSite=Lax`;
 }
 
 function StoreSwitcher() {
@@ -71,6 +78,7 @@ function StoreSwitcher() {
       return;
     }
     window.localStorage.setItem(STOREFRONT_STORAGE_KEY, nextStore.id);
+    persistStorefrontCookie(nextStore.id);
     window.dispatchEvent(new Event(STOREFRONT_CHANGE_EVENT));
     setOpen(false);
     window.location.reload();

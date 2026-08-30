@@ -1,5 +1,6 @@
 import { env } from "cloudflare:workers";
 import { evaluateProductAudit, type AuditCard, type AuditFunnel, type ProductAuditResult } from "../../../_lib/product-audit";
+import { resolveWbStore, scopedStoreKey } from "../../../_lib/server-storefront";
 
 type WbFunnelProduct = {
   product?: { nmId?: number };
@@ -245,8 +246,8 @@ async function fetchSnapshot(token: string, period: { from: string; to: string; 
   } satisfies AuditSnapshot;
 }
 
-async function loadAudit(token: string, period: { from: string; to: string; days: number }, manual: boolean) {
-  const key = `product-audit-v1-${period.from}-${period.to}`;
+async function loadAudit(token: string, storeId: string, period: { from: string; to: string; days: number }, manual: boolean) {
+  const key = scopedStoreKey(storeId, `product-audit-v1-${period.from}-${period.to}`);
   const schedule = syncSchedule();
   const manualBucket = Math.floor(Date.now() / MANUAL_REFRESH_MS);
   const memory = memoryCache.get(key);
@@ -277,11 +278,12 @@ async function loadAudit(token: string, period: { from: string; to: string; days
 
 export async function GET(request: Request) {
   try {
-    const token = env.WB_API_TOKEN;
-    if (!token) return json({ error: "WB API 密钥尚未配置" }, 503);
+    const store = resolveWbStore(request, env);
+    const token = store.token;
+    if (!token) return json({ error: "当前店铺的 WB API 密钥尚未配置" }, 503);
     const period = periodFromRequest(request);
     const manual = new URL(request.url).searchParams.get("refresh") === "manual";
-    return json(await loadAudit(token, period, manual));
+    return json(await loadAudit(token, store.id, period, manual));
   } catch (error) {
     const status = Number((error as WorkerError).status || 0);
     if (status === 400) return json({ error: "诊断周期需为 1–90 天，且不能晚于今天" }, 400);

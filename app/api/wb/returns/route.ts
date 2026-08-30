@@ -1,5 +1,6 @@
 import { env } from "cloudflare:workers";
 import { classifyReturnTracking, returnStatusLabel } from "../../../_lib/return-tracking";
+import { resolveWbStore, scopedStoreKey } from "../../../_lib/server-storefront";
 
 type WorkerError = Error & { status?: number };
 type GoodsReturnRow = {
@@ -223,7 +224,7 @@ async function loadClaims(token: string, isArchive: boolean) {
   return { claims, total };
 }
 
-async function fetchReturnsSnapshot(token: string, window: { from: string; to: string; maxDays: number }, forceRefresh = false) {
+async function fetchReturnsSnapshot(token: string, storeId: string, window: { from: string; to: string; maxDays: number }, forceRefresh = false) {
   const warnings: string[] = [];
   const chunks = dateChunks(window.from, window.to);
   const reportsPromise = (async () => {
@@ -231,7 +232,7 @@ async function fetchReturnsSnapshot(token: string, window: { from: string; to: s
     const schedule = syncSchedule();
     let usedStaleChunk = false;
     for (const chunk of chunks) {
-      const chunkKey = `wb-returns-report:${SNAPSHOT_VERSION}:${chunk.from}:${chunk.to}`;
+      const chunkKey = scopedStoreKey(storeId, `wb-returns-report:${SNAPSHOT_VERSION}:${chunk.from}:${chunk.to}`);
       const persisted = await readReportChunk(chunkKey);
       if (persisted && persisted.syncSlot === schedule.slot && !forceRefresh) {
         reports.push(persisted.value.rows);
@@ -347,8 +348,8 @@ async function fetchReturnsSnapshot(token: string, window: { from: string; to: s
   };
 }
 
-async function loadReturns(token: string, window: { from: string; to: string; maxDays: number }, forceRefresh: boolean) {
-  const cacheKey = `${SNAPSHOT_VERSION}:${window.from}:${window.to}`;
+async function loadReturns(token: string, storeId: string, window: { from: string; to: string; maxDays: number }, forceRefresh: boolean) {
+  const cacheKey = scopedStoreKey(storeId, `${SNAPSHOT_VERSION}:${window.from}:${window.to}`);
   const now = Date.now();
   const schedule = syncSchedule(now);
   const memory = memoryCache.get(cacheKey);
@@ -362,7 +363,7 @@ async function loadReturns(token: string, window: { from: string; to: string; ma
   }
   const pending = pendingLoads.get(cacheKey);
   if (pending) return pending;
-  const load = fetchReturnsSnapshot(token, window, forceRefresh)
+  const load = fetchReturnsSnapshot(token, storeId, window, forceRefresh)
     .then(async (snapshot) => {
       memoryCache.set(cacheKey, { value: snapshot, expiresAt: syncSchedule().nextAt });
       await writeSnapshot(cacheKey, snapshot);
@@ -378,13 +379,14 @@ async function loadReturns(token: string, window: { from: string; to: string; ma
 }
 
 export async function GET(request: Request) {
-  const token = process.env.WB_API_TOKEN?.trim();
-  if (!token) return json({ error: "WB API 尚未配置" }, 503);
+  const store = resolveWbStore(request, env);
+  const token = store.token;
+  if (!token) return json({ error: "当前店铺的 WB API 尚未配置" }, 503);
   const url = new URL(request.url);
   const window = requestWindow(url);
   const forceRefresh = url.searchParams.get("refresh") === "manual";
   try {
-    const snapshot = await loadReturns(token, window, forceRefresh);
+    const snapshot = await loadReturns(token, store.id, window, forceRefresh);
     const schedule = syncSchedule();
     return json({
       ...snapshot,

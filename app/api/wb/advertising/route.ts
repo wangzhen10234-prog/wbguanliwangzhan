@@ -1,5 +1,6 @@
 import { env } from "cloudflare:workers";
 import { averageAdvertisingPosition, campaignDailyStatistics } from "../../../_lib/advertising-statistics";
+import { resolveWbStore, scopedStoreKey } from "../../../_lib/server-storefront";
 
 type WorkerError = Error & { status?: number };
 type CampaignGroup = { type?: number; status?: number; advert_list?: Array<{ advertId?: number; changeTime?: string }> };
@@ -467,8 +468,8 @@ async function fetchAdvertisingSnapshot(token: string, window: { from: string; t
   };
 }
 
-async function loadAdvertising(token: string, window: { from: string; to: string; maxDays: number }, forceRefresh: boolean) {
-  const cacheKey = `${SNAPSHOT_VERSION}:${window.from}:${window.to}`;
+async function loadAdvertising(token: string, storeId: string, window: { from: string; to: string; maxDays: number }, forceRefresh: boolean) {
+  const cacheKey = scopedStoreKey(storeId, `${SNAPSHOT_VERSION}:${window.from}:${window.to}`);
   const now = Date.now();
   const schedule = syncSchedule(now);
   const memory = memoryCache.get(cacheKey);
@@ -498,13 +499,14 @@ async function loadAdvertising(token: string, window: { from: string; to: string
 }
 
 export async function GET(request: Request) {
-  const token = process.env.WB_API_TOKEN?.trim();
-  if (!token) return json({ error: "WB API 尚未配置" }, 503);
+  const store = resolveWbStore(request, env);
+  const token = store.token;
+  if (!token) return json({ error: "当前店铺的 WB API 尚未配置" }, 503);
   const url = new URL(request.url);
   const window = requestWindow(url);
   const forceRefresh = url.searchParams.get("refresh") === "manual";
   try {
-    const snapshot = await loadAdvertising(token, window, forceRefresh);
+    const snapshot = await loadAdvertising(token, store.id, window, forceRefresh);
     const schedule = syncSchedule();
     return json({
       ...snapshot,

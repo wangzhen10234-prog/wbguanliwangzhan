@@ -23,9 +23,10 @@ test("server-renders the WB Insight dashboard", async () => {
   assert.match(html, /俄罗斯店铺经营分析/);
   assert.match(html, /店铺切换/);
   assert.match(html, /王振1号店/);
+  assert.match(html, /王振2号店（CL）/);
   assert.doesNotMatch(html, /当前 WB 店铺/);
-  assert.match(html, /下一家 WB 店铺/);
-  assert.match(html, /提供 API 后即可启用/);
+  assert.match(html, /2(?:<!--.*?-->)?\s*家已连接/);
+  assert.doesNotMatch(html, /下一家 WB 店铺/);
   assert.match(html, /经营总览/);
   assert.match(html, /数据表左右滚动控制/);
   assert.match(html, /拖动以左右查看数据/);

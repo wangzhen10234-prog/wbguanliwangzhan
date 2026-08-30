@@ -9,6 +9,7 @@ export type Storefront = {
 
 export const DEFAULT_STOREFRONT_ID = "primary";
 export const STOREFRONT_STORAGE_KEY = "wb-insight-active-store";
+export const STOREFRONT_COOKIE_KEY = "wb-insight-active-store";
 
 // Public store metadata only. API credentials always remain in server-side
 // environment variables and must never be added to this client-visible list.
@@ -22,12 +23,12 @@ export const STOREFRONTS: Storefront[] = [
     badge: "主",
   },
   {
-    id: "next-store",
-    name: "下一家 WB 店铺",
-    description: "提供 API 后即可启用",
-    enabled: false,
-    connected: false,
-    badge: "+",
+    id: "cl",
+    name: "王振2号店（CL）",
+    description: "CL 店铺 · API 已连接",
+    enabled: true,
+    connected: true,
+    badge: "CL",
   },
 ];
 

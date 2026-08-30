@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { resolveWbStore, scopedStoreKey } from "../../../_lib/server-storefront";
 
 type WbProductDetails = {
   nmId?: number;
@@ -77,8 +78,8 @@ const MANUAL_REFRESH_MS = 5 * 60_000;
 const SNAPSHOT_KEY = "reviews-questions-v1";
 const PAGE_SIZE = 5000;
 const MAX_ROWS_PER_BUCKET = 10_000;
-let memoryCache: { value: ReviewSnapshot; expiresAt: number } | null = null;
-let pendingLoad: Promise<ReviewSnapshot> | null = null;
+const memoryCache = new Map<string, { value: ReviewSnapshot; expiresAt: number }>();
+const pendingLoads = new Map<string, Promise<ReviewSnapshot>>();
 
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: JSON_HEADERS });
@@ -182,10 +183,10 @@ async function loadCards(token: string) {
   return cards;
 }
 
-async function readSnapshot() {
+async function readSnapshot(cacheKey: string) {
   try {
     const row = await env.DB.prepare("SELECT payload, sync_slot AS syncSlot, manual_bucket AS manualBucket FROM wb_sync_snapshots WHERE cache_key = ?")
-      .bind(SNAPSHOT_KEY)
+      .bind(cacheKey)
       .first<{ payload?: string; syncSlot?: string; manualBucket?: number }>();
     if (!row?.payload) return null;
     return { value: JSON.parse(row.payload) as ReviewSnapshot, syncSlot: row.syncSlot || "", manualBucket: Number(row.manualBucket || 0) } satisfies SnapshotRecord;
@@ -194,7 +195,7 @@ async function readSnapshot() {
   }
 }
 
-async function writeSnapshot(value: ReviewSnapshot, manual: boolean) {
+async function writeSnapshot(cacheKey: string, value: ReviewSnapshot, manual: boolean) {
   try {
     await env.DB.prepare(`
       INSERT INTO wb_sync_snapshots (cache_key, payload, sync_slot, manual_bucket, updated_at)
@@ -204,7 +205,7 @@ async function writeSnapshot(value: ReviewSnapshot, manual: boolean) {
         sync_slot = excluded.sync_slot,
         manual_bucket = CASE WHEN excluded.manual_bucket > 0 THEN excluded.manual_bucket ELSE wb_sync_snapshots.manual_bucket END,
         updated_at = CURRENT_TIMESTAMP
-    `).bind(SNAPSHOT_KEY, JSON.stringify(value), schedule().slot, manual ? Math.floor(Date.now() / MANUAL_REFRESH_MS) : 0).run();
+    `).bind(cacheKey, JSON.stringify(value), schedule().slot, manual ? Math.floor(Date.now() / MANUAL_REFRESH_MS) : 0).run();
   } catch {
     // Fresh WB data stays usable even if the durable snapshot cannot be written.
   }
@@ -339,37 +340,42 @@ async function fetchSnapshot(token: string, manual: boolean) {
   } satisfies ReviewSnapshot;
 }
 
-async function loadSnapshot(token: string, manual: boolean) {
+async function loadSnapshot(token: string, storeId: string, manual: boolean) {
+  const cacheKey = scopedStoreKey(storeId, SNAPSHOT_KEY);
   const current = schedule();
   const manualBucket = Math.floor(Date.now() / MANUAL_REFRESH_MS);
-  if (!manual && memoryCache && memoryCache.expiresAt > Date.now()) return memoryCache.value;
-  const durable = await readSnapshot();
+  const memory = memoryCache.get(cacheKey);
+  if (!manual && memory && memory.expiresAt > Date.now()) return memory.value;
+  const durable = await readSnapshot(cacheKey);
   if (!manual && durable?.syncSlot === current.slot) {
-    memoryCache = { value: durable.value, expiresAt: current.nextAt };
+    memoryCache.set(cacheKey, { value: durable.value, expiresAt: current.nextAt });
     return durable.value;
   }
   if (manual && durable?.manualBucket === manualBucket) return durable.value;
-  if (pendingLoad) return pendingLoad;
-  pendingLoad = fetchSnapshot(token, manual)
+  const pending = pendingLoads.get(cacheKey);
+  if (pending) return pending;
+  const load = fetchSnapshot(token, manual)
     .then(async (value) => {
-      memoryCache = { value, expiresAt: current.nextAt };
-      await writeSnapshot(value, manual);
+      memoryCache.set(cacheKey, { value, expiresAt: current.nextAt });
+      await writeSnapshot(cacheKey, value, manual);
       return value;
     })
     .catch((error) => {
       if (durable?.value) return { ...durable.value, stale: true, warning: "WB 评价与提问接口本次读取失败，当前展示上一次成功同步的数据" };
       throw error;
     })
-    .finally(() => { pendingLoad = null; });
-  return pendingLoad;
+    .finally(() => { pendingLoads.delete(cacheKey); });
+  pendingLoads.set(cacheKey, load);
+  return load;
 }
 
 export async function GET(request: Request) {
   try {
-    const token = env.WB_API_TOKEN;
-    if (!token) return json({ error: "WB API 密钥尚未配置" }, 503);
+    const store = resolveWbStore(request, env);
+    const token = store.token;
+    if (!token) return json({ error: "当前店铺的 WB API 密钥尚未配置" }, 503);
     const manual = new URL(request.url).searchParams.get("refresh") === "manual";
-    return json(await loadSnapshot(token, manual));
+    return json(await loadSnapshot(token, store.id, manual));
   } catch (error) {
     const status = Number((error as WorkerError).status || 0);
     if (status === 401) return json({ error: "WB API 密钥无效，无法读取评价与提问" }, 502);

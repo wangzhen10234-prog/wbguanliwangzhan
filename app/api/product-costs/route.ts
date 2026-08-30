@@ -1,8 +1,10 @@
-import { asc, eq, inArray, or } from "drizzle-orm";
+import { and, asc, eq, inArray, or } from "drizzle-orm";
 import { getDb } from "../../../db";
 import { productCostDeletions, productCosts } from "../../../db/schema";
 import { normalizeProductSku } from "../../_lib/product-cost-aliases";
 import { matchesProductDeletion, productDeletionIdentity } from "../../_lib/product-deletions";
+import { DEFAULT_STOREFRONT_ID } from "../../_lib/storefronts";
+import { requestedStorefront } from "../../_lib/server-storefront";
 
 const JSON_HEADERS = {
   "Cache-Control": "private, no-store, max-age=0",
@@ -113,7 +115,7 @@ function imageUrlField(value: unknown) {
   }
 }
 
-function normalizePayload(payload: CostPayload): typeof productCosts.$inferInsert {
+function normalizePayload(payload: CostPayload, storeId: string): typeof productCosts.$inferInsert {
   const sellerSku = stringField(payload.sellerSku, 120);
   if (!sellerSku) throw new Error("SELLER_SKU_REQUIRED");
   const exchangeRate = numericField(payload.exchangeRate, 10_000);
@@ -121,6 +123,7 @@ function normalizePayload(payload: CostPayload): typeof productCosts.$inferInser
   if (productCostRub > 0 && exchangeRate === 0) throw new Error("EXCHANGE_RATE_REQUIRED");
   const nmId = numericField(payload.nmId, Number.MAX_SAFE_INTEGER);
   return {
+    storeId,
     sellerSku,
     nmId: nmId ? Math.trunc(nmId) : null,
     imageUrl: imageUrlField(payload.imageUrl),
@@ -154,19 +157,26 @@ function databaseError(error: unknown) {
   return json({ error: "产品成本数据暂时无法保存" }, 500);
 }
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
+    const store = requestedStorefront(request);
     const db = getDb();
-    let rows = await db.select().from(productCosts).orderBy(asc(productCosts.sortOrder), asc(productCosts.sellerSku));
+    let rows = await db.select().from(productCosts)
+      .where(eq(productCosts.storeId, store.id))
+      .orderBy(asc(productCosts.sortOrder), asc(productCosts.sellerSku));
     // Seed only a completely new store. Re-seeding on every read would recreate
     // an old primary key after the user renames a saved seller code.
-    if (rows.length === 0) {
+    if (rows.length === 0 && store.id === DEFAULT_STOREFRONT_ID) {
       for (const seedRow of SEED_ROWS) {
-        await db.insert(productCosts).values(seedRow).onConflictDoNothing();
+        await db.insert(productCosts).values({ ...seedRow, storeId: store.id }).onConflictDoNothing();
       }
-      rows = await db.select().from(productCosts).orderBy(asc(productCosts.sortOrder), asc(productCosts.sellerSku));
+      rows = await db.select().from(productCosts)
+        .where(eq(productCosts.storeId, store.id))
+        .orderBy(asc(productCosts.sortOrder), asc(productCosts.sellerSku));
     }
-    const deletedProducts = await db.select().from(productCostDeletions).orderBy(asc(productCostDeletions.deletedAt));
+    const deletedProducts = await db.select().from(productCostDeletions)
+      .where(eq(productCostDeletions.storeId, store.id))
+      .orderBy(asc(productCostDeletions.deletedAt));
     const activeRows = rows.filter((row) => !matchesProductDeletion({
       sku: row.sellerSku,
       nmId: row.nmId,
@@ -180,10 +190,12 @@ export async function GET() {
 export async function PUT(request: Request) {
   try {
     const body = await request.json() as CostPayload;
-    const value = normalizePayload(body);
+    const store = requestedStorefront(request);
+    const value = normalizePayload(body, store.id);
     const previousSellerSku = stringField(body.previousSellerSku, 120);
     const db = getDb();
-    const existingKeys = await db.select({ sellerSku: productCosts.sellerSku }).from(productCosts);
+    const existingKeys = await db.select({ sellerSku: productCosts.sellerSku }).from(productCosts)
+      .where(eq(productCosts.storeId, store.id));
     const normalizedSellerSku = normalizeProductSku(value.sellerSku);
     const conflict = existingKeys.find((entry) =>
       normalizeProductSku(entry.sellerSku) === normalizedSellerSku
@@ -195,12 +207,15 @@ export async function PUT(request: Request) {
       const [renamed] = await db
         .update(productCosts)
         .set(value)
-        .where(eq(productCosts.sellerSku, previousSellerSku))
+        .where(and(eq(productCosts.storeId, store.id), eq(productCosts.sellerSku, previousSellerSku)))
         .returning();
       if (renamed) {
-        await db.delete(productCostDeletions).where(or(
-          eq(productCostDeletions.sellerSkuKey, normalizedSellerSku),
-          eq(productCostDeletions.identityKey, productDeletionIdentity(value.sellerSku, value.nmId)),
+        await db.delete(productCostDeletions).where(and(
+          eq(productCostDeletions.storeId, store.id),
+          or(
+            eq(productCostDeletions.sellerSkuKey, normalizedSellerSku),
+            eq(productCostDeletions.identityKey, productDeletionIdentity(value.sellerSku, value.nmId)),
+          ),
         ));
         return json({ row: renamed });
       }
@@ -210,7 +225,7 @@ export async function PUT(request: Request) {
       .insert(productCosts)
       .values(value)
       .onConflictDoUpdate({
-        target: productCosts.sellerSku,
+        target: [productCosts.storeId, productCosts.sellerSku],
         set: {
           nmId: value.nmId,
           imageUrl: value.imageUrl,
@@ -238,9 +253,12 @@ export async function PUT(request: Request) {
         },
       })
       .returning();
-    await db.delete(productCostDeletions).where(or(
-      eq(productCostDeletions.sellerSkuKey, normalizedSellerSku),
-      eq(productCostDeletions.identityKey, productDeletionIdentity(value.sellerSku, value.nmId)),
+    await db.delete(productCostDeletions).where(and(
+      eq(productCostDeletions.storeId, store.id),
+      or(
+        eq(productCostDeletions.sellerSkuKey, normalizedSellerSku),
+        eq(productCostDeletions.identityKey, productDeletionIdentity(value.sellerSku, value.nmId)),
+      ),
     ));
     return json({ row });
   } catch (error) {
@@ -256,6 +274,7 @@ export async function PUT(request: Request) {
 export async function DELETE(request: Request) {
   try {
     const body = await request.json() as DeletePayload;
+    const store = requestedStorefront(request);
     const sellerSku = stringField(body.sellerSku, 120);
     const persistedSellerSku = stringField(body.persistedSellerSku, 120);
     const nmId = Math.trunc(numericField(body.nmId, Number.MAX_SAFE_INTEGER));
@@ -267,7 +286,7 @@ export async function DELETE(request: Request) {
     const storedKeys = await db.select({
       sellerSku: productCosts.sellerSku,
       nmId: productCosts.nmId,
-    }).from(productCosts);
+    }).from(productCosts).where(eq(productCosts.storeId, store.id));
     const normalizedPersistedSku = normalizeProductSku(persistedSellerSku);
     const storedSellerSkus = storedKeys.filter((row) =>
       Boolean(persistedSellerSku && row.sellerSku === persistedSellerSku)
@@ -277,18 +296,22 @@ export async function DELETE(request: Request) {
     ).map((row) => row.sellerSku);
 
     const markerQuery = db.insert(productCostDeletions).values({
+      storeId: store.id,
       identityKey,
       sellerSkuKey,
       nmId: nmId || null,
       deletedAt: new Date().toISOString(),
     }).onConflictDoUpdate({
-      target: productCostDeletions.identityKey,
+      target: [productCostDeletions.storeId, productCostDeletions.identityKey],
       set: { sellerSkuKey, nmId: nmId || null, deletedAt: new Date().toISOString() },
     });
 
     if (storedSellerSkus.length > 0) {
       await db.batch([
-        db.delete(productCosts).where(inArray(productCosts.sellerSku, storedSellerSkus)),
+        db.delete(productCosts).where(and(
+          eq(productCosts.storeId, store.id),
+          inArray(productCosts.sellerSku, storedSellerSkus),
+        )),
         markerQuery,
       ]);
     } else {
@@ -304,6 +327,7 @@ export async function DELETE(request: Request) {
 export async function PATCH(request: Request) {
   try {
     const body = await request.json() as RestorePayload;
+    const store = requestedStorefront(request);
     const sellerSku = stringField(body.sellerSku, 120);
     const sellerSkuKey = normalizeProductSku(sellerSku);
     const nmId = Math.trunc(numericField(body.nmId, Number.MAX_SAFE_INTEGER));
@@ -312,8 +336,9 @@ export async function PATCH(request: Request) {
     const predicates = [];
     if (sellerSkuKey) predicates.push(eq(productCostDeletions.sellerSkuKey, sellerSkuKey));
     if (nmId) predicates.push(eq(productCostDeletions.nmId, nmId));
+    const identityPredicate = predicates.length === 1 ? predicates[0] : or(...predicates);
     const restored = await getDb().delete(productCostDeletions)
-      .where(predicates.length === 1 ? predicates[0] : or(...predicates))
+      .where(and(eq(productCostDeletions.storeId, store.id), identityPredicate))
       .returning({ identityKey: productCostDeletions.identityKey });
     return json({ restored: true, restoredMarkers: restored.length });
   } catch (error) {
