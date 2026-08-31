@@ -1,4 +1,32 @@
 export type ReturnTrackingStage = "transit" | "ready" | "completed" | "unknown";
+export type ReturnPickupSortDirection = "asc" | "desc";
+
+type ReturnWithPickupTime = {
+  id: string;
+  completedAt?: string | null;
+  orderDate?: string | null;
+};
+
+function returnTimestamp(value?: string | null) {
+  if (!value) return null;
+  const result = new Date(value).getTime();
+  return Number.isFinite(result) ? result : null;
+}
+
+export function sortReturnsByPickupTime<T extends ReturnWithPickupTime>(rows: readonly T[], direction: ReturnPickupSortDirection) {
+  return [...rows].sort((left, right) => {
+    const leftPickup = returnTimestamp(left.completedAt);
+    const rightPickup = returnTimestamp(right.completedAt);
+    if (leftPickup === null && rightPickup !== null) return 1;
+    if (leftPickup !== null && rightPickup === null) return -1;
+    if (leftPickup !== null && rightPickup !== null && leftPickup !== rightPickup) {
+      return direction === "desc" ? rightPickup - leftPickup : leftPickup - rightPickup;
+    }
+    const orderDifference = (returnTimestamp(right.orderDate) ?? 0) - (returnTimestamp(left.orderDate) ?? 0);
+    if (orderDifference) return orderDifference;
+    return right.id.localeCompare(left.id, "en", { numeric: true });
+  });
+}
 
 export function classifyReturnTracking(status: string, isStatusActive: boolean, completedAt?: string | null): ReturnTrackingStage {
   const normalized = status.trim().toLocaleLowerCase("ru");

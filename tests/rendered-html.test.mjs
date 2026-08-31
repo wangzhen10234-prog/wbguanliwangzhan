@@ -95,6 +95,9 @@ test("server-renders the WB returns and logistics workbench", async () => {
   assert.match(html, /退货订单与物流明细/);
   assert.match(html, /运输至取货点/);
   assert.match(html, /已到达，可取回/);
+  assert.match(html, /取回时间/);
+  assert.match(html, /WB completedDt · 北京时间/);
+  assert.match(html, /按取回时间降序排列/);
   assert.match(html, /退货时间/);
   assert.match(html, /查看详情/);
   assert.doesNotMatch(html, />目的取货点<\/th>/);

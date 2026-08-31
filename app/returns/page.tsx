@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AppSidebar } from "../_components/app-sidebar";
+import { sortReturnsByPickupTime, type ReturnPickupSortDirection } from "../_lib/return-tracking";
 
 type TrackingStage = "transit" | "ready" | "completed" | "unknown";
 type ReturnRow = {
@@ -83,6 +84,21 @@ function dateTime(value?: string, dateOnly = false) {
   }).format(date);
 }
 
+function beijingDateTime(value?: string) {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return value;
+  return new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(date);
+}
+
 function returnEvent(row: Pick<ReturnRow, "completedAt" | "readyToReturnAt">) {
   if (row.completedAt) return { value: row.completedAt, label: "退货完成时间" };
   if (row.readyToReturnAt) return { value: row.readyToReturnAt, label: "到达取货点时间" };
@@ -103,6 +119,7 @@ export default function ReturnsPage() {
   const [reloadKey, setReloadKey] = useState(0);
   const [query, setQuery] = useState("");
   const [stageFilter, setStageFilter] = useState("all");
+  const [pickupSort, setPickupSort] = useState<ReturnPickupSortDirection | null>(null);
   const [claimFilter, setClaimFilter] = useState<"active" | "archived">("active");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const forceRefreshRef = useRef(false);
@@ -150,7 +167,7 @@ export default function ReturnsPage() {
   const productById = useMemo(() => new Map(products.map((product) => [product.nmId, product])), [products]);
   const filteredReturns = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase();
-    return (data?.returns || []).filter((row) => {
+    const filtered = (data?.returns || []).filter((row) => {
       const product = productById.get(row.nmId);
       const matchesStage = stageFilter === "all"
         || stageFilter === "active" && row.isStatusActive
@@ -158,7 +175,8 @@ export default function ReturnsPage() {
       const matchesQuery = !needle || [String(row.orderId), row.srid, String(row.nmId), product?.sku || "", product?.name || "", row.subjectName, row.reason, row.rawStatus, row.destinationAddress].some((value) => value.toLocaleLowerCase().includes(needle));
       return matchesStage && matchesQuery;
     });
-  }, [data?.returns, productById, query, stageFilter]);
+    return pickupSort ? sortReturnsByPickupTime(filtered, pickupSort) : filtered;
+  }, [data?.returns, pickupSort, productById, query, stageFilter]);
   const filteredClaims = useMemo(() => (data?.claims || []).filter((claim) => claim.isArchive === (claimFilter === "archived")), [claimFilter, data?.claims]);
   const selectedReturn = useMemo(() => (data?.returns || []).find((row) => row.id === selectedId) || null, [data?.returns, selectedId]);
 
@@ -187,6 +205,10 @@ export default function ReturnsPage() {
     setStageFilter(next);
     setQuery("");
     setSelectedId(null);
+  }
+
+  function changePickupSort() {
+    setPickupSort((current) => current === "desc" ? "asc" : "desc");
   }
 
   const messages = [warning, ...(data?.warnings || [])].filter(Boolean);
@@ -224,7 +246,7 @@ export default function ReturnsPage() {
 
       <section className="returns-table-panel">
         <div className="returns-table-toolbar"><div><h2>退货订单与物流明细</h2><p>主表保留核心状态；点击“查看详情”核对取货点、全部官方时间与物流标识。</p></div><div className="returns-filters"><input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索订单号、SKU、商品、原因或地址" aria-label="搜索退货订单" /><select value={stageFilter} onChange={(event) => chooseStage(event.target.value)} aria-label="退货物流状态"><option value="all">全部物流状态</option><option value="active">物流处理中</option><option value="transit">运输至取货点</option><option value="ready">已到达，可取回</option><option value="completed">退货已完成</option><option value="unknown">状态待确认</option></select></div></div>
-        <div className="returns-table-wrap"><table className="returns-table"><thead><tr><th>商品</th><th>订单号</th><th>下单日期</th><th>退货类型</th><th>退货时间</th><th>退货原因</th><th>物流状态</th><th>详情</th></tr></thead><tbody>
+        <div className="returns-table-wrap"><table className="returns-table"><thead><tr><th>商品</th><th>订单号</th><th>下单日期</th><th>退货类型</th><th>退货时间</th><th aria-sort={pickupSort ? pickupSort === "desc" ? "descending" : "ascending" : "none"}><button type="button" className={`returns-pickup-sort ${pickupSort ? "active" : ""}`} onClick={changePickupSort} aria-label={`按取回时间${pickupSort === "desc" ? "升序" : "降序"}排列`}><span>取回时间 <i aria-hidden="true">{pickupSort === "desc" ? "↓" : pickupSort === "asc" ? "↑" : "↕"}</i></span><small>WB completedDt · 北京时间</small></button></th><th>退货原因</th><th>物流状态</th><th>详情</th></tr></thead><tbody>
           {filteredReturns.map((row) => {
             const product = productById.get(row.nmId);
             const event = returnEvent(row);
@@ -234,12 +256,13 @@ export default function ReturnsPage() {
               <td><b>{dateTime(row.orderDate, true)}</b><small>原订单日期</small></td>
               <td className="returns-type-cell"><b title={row.returnType}>{row.returnType}</b><small>WB returnType</small></td>
               <td><b>{dateTime(event.value)}</b><small>{event.label}</small></td>
+              <td><b>{beijingDateTime(row.completedAt)}</b><small>{row.completedAt ? "WB 官方取回完成时间" : "WB 暂未返回取回时间"}</small></td>
               <td className="returns-reason-cell"><b title={row.reason}>{row.reason}</b><small>WB reason</small></td>
               <td><span className={`returns-stage ${row.trackingStage}`}>{row.statusLabel}</span><small>{row.rawStatus} · {row.isStatusActive ? "处理中" : "已结束"}</small></td>
               <td className="returns-detail-cell"><button type="button" onClick={() => setSelectedId(row.id)}>查看详情</button></td>
             </tr>;
           })}
-          {!loading && filteredReturns.length === 0 && <tr className="empty-row"><td colSpan={8}>没有符合当前筛选条件的退货订单</td></tr>}
+          {!loading && filteredReturns.length === 0 && <tr className="empty-row"><td colSpan={9}>没有符合当前筛选条件的退货订单</td></tr>}
         </tbody></table></div>
         <footer className="returns-table-footer"><span>共 {filteredReturns.length} 条退货记录</span><span>WB 当前只开放状态与关键时间，不提供逐站扫描轨迹；系统不会补造物流节点。</span></footer>
       </section>
