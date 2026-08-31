@@ -154,6 +154,8 @@ test("server-renders the completed-today sales label", async () => {
   assert.match(html, /今日已完结订单/);
   assert.match(html, /正常完结/);
   assert.match(html, /完结日期 · 北京时间/);
+  assert.match(html, /按订单时间升序排列/);
+  assert.match(html, /按签收完结时间降序排列/);
   assert.match(html, /预估成本支出/);
   assert.match(html, /综合净利润预估/);
   assert.match(html, /账单到账后自动替换且不重复计算/);

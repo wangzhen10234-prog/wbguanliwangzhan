@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { AppSidebar } from "../_components/app-sidebar";
 import { normalizeProductSku, productCostSourceKey } from "../_lib/product-cost-aliases";
 import { calculateOrderFinancial, isCurrentValidNewOrder, isUnprocessedClientCancellation, returnRateSummary, waitingFinancial, type OrderFinancial } from "../_lib/sales-financials";
+import { sortSalesOrders, type SalesOrderSortDirection, type SalesOrderSortKey } from "../_lib/sales-order-sort";
 import { matchesWbStatusFilter, supplierStatusLabel, WB_STATUS_FILTERS, wbStatusLabel, type WbLogisticsStage } from "../_lib/wb-order-status";
 
 type Product = { nmId: number; name: string; sku: string; image: string | null };
@@ -200,6 +201,7 @@ export default function SalesPage() {
   const [wbStatusFilter, setWbStatusFilter] = useState("all");
   const [dateFilter, setDateFilter] = useState<"all" | "today-active">("all");
   const [financialFilter, setFinancialFilter] = useState<"all" | "profit" | "cost">("all");
+  const [orderSort, setOrderSort] = useState<{ key: SalesOrderSortKey; direction: SalesOrderSortDirection }>({ key: "createdAt", direction: "desc" });
   const [page, setPage] = useState(1);
   const [statusOrder, setStatusOrder] = useState<Order | null>(null);
   const [liveStatus, setLiveStatus] = useState<LiveOrderStatus | null>(null);
@@ -365,7 +367,7 @@ export default function SalesPage() {
   const filteredOrders = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase();
     const todayActiveOrderIds = new Set(data?.orderSummary?.todayActiveOrderIds ?? []);
-    return orders.filter((order) => {
+    const filtered = orders.filter((order) => {
       const product = productById.get(order.nmId);
       const invalid = isUnprocessedClientCancellation(order);
       const matchesStatus = statusFilter === "all" ? true : statusFilter === "invalid" ? invalid : order.outcome === statusFilter;
@@ -378,7 +380,8 @@ export default function SalesPage() {
       const matchesQuery = !needle || [order.orderNumber, order.article, product?.name || "", order.warehouseName, order.statusLabel].some((value) => value.toLocaleLowerCase().includes(needle));
       return matchesStatus && matchesWbStatus && matchesTodayActive && matchesFinancial && matchesQuery;
     });
-  }, [data?.orderSummary?.todayActiveOrderIds, dateFilter, financialByOrder, financialFilter, orders, productById, query, statusFilter, wbStatusFilter]);
+    return sortSalesOrders(filtered, orderSort.key, orderSort.direction);
+  }, [data?.orderSummary?.todayActiveOrderIds, dateFilter, financialByOrder, financialFilter, orders, orderSort, productById, query, statusFilter, wbStatusFilter]);
   const pageCount = Math.max(1, Math.ceil(filteredOrders.length / PAGE_SIZE));
   const visibleOrders = filteredOrders.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
   const statusProduct = statusOrder ? productById.get(statusOrder.nmId) : null;
@@ -398,6 +401,16 @@ export default function SalesPage() {
     beginLoad(); setPeriodStart(draftStart); setPeriodEnd(draftEnd); setDateError(""); setReloadKey((key) => key + 1);
   }
   function refresh() { forceRefreshRef.current = true; beginLoad(); setReloadKey((key) => key + 1); }
+  function changeOrderSort(key: SalesOrderSortKey) {
+    setOrderSort((current) => current.key === key
+      ? { key, direction: current.direction === "desc" ? "asc" : "desc" }
+      : { key, direction: "desc" });
+    setPage(1);
+  }
+  function orderSortMark(key: SalesOrderSortKey) {
+    if (orderSort.key !== key) return "↕";
+    return orderSort.direction === "desc" ? "↓" : "↑";
+  }
   function chooseOrderFilter(filter: "all" | "success" | "abnormal" | "pending" | "today-active") {
     setQuery("");
     setPage(1);
@@ -505,7 +518,7 @@ export default function SalesPage() {
           </div>
           <div className="order-detail-table-wrap">
             <table className="order-detail-table">
-              <thead><tr><th>订单时间</th><th>订单号</th><th>SKU 编码</th><th>仓库</th><th>成交价</th><th>供应商状态</th><th>WB 状态</th><th>签收结果<small>完结日期 · 北京时间</small></th><th>结账状态</th><th>平台结账/预估<small>佣金＋物流＋账单费用扣除后</small></th><th>平台总扣费<small>佣金＋物流＋收款/罚款/仓储等</small></th><th>商品成本<small>拿货成本＋操作费</small></th><th>预估成本支出<small>平台净扣费＋商品成本</small></th><th>单笔利润</th><th>利润率</th></tr></thead>
+              <thead><tr><th aria-sort={orderSort.key === "createdAt" ? orderSort.direction === "desc" ? "descending" : "ascending" : "none"}><button type="button" className={`order-sort-button ${orderSort.key === "createdAt" ? "active" : ""}`} onClick={() => changeOrderSort("createdAt")} aria-label={`按订单时间${orderSort.key === "createdAt" && orderSort.direction === "desc" ? "升序" : "降序"}排列`}>订单时间 <span aria-hidden="true">{orderSortMark("createdAt")}</span></button></th><th>订单号</th><th>SKU 编码</th><th>仓库</th><th>成交价</th><th>供应商状态</th><th>WB 状态</th><th aria-sort={orderSort.key === "completionAt" ? orderSort.direction === "desc" ? "descending" : "ascending" : "none"}><button type="button" className={`order-sort-button outcome ${orderSort.key === "completionAt" ? "active" : ""}`} onClick={() => changeOrderSort("completionAt")} aria-label={`按签收完结时间${orderSort.key === "completionAt" && orderSort.direction === "desc" ? "升序" : "降序"}排列`}><span>签收结果 <i aria-hidden="true">{orderSortMark("completionAt")}</i></span><small>完结日期 · 北京时间</small></button></th><th>结账状态</th><th>平台结账/预估<small>佣金＋物流＋账单费用扣除后</small></th><th>平台总扣费<small>佣金＋物流＋收款/罚款/仓储等</small></th><th>商品成本<small>拿货成本＋操作费</small></th><th>预估成本支出<small>平台净扣费＋商品成本</small></th><th>单笔利润</th><th>利润率</th></tr></thead>
               <tbody>
                 <tr className="order-rollup-row"><td><b>综合统计</b><small>{periodStart} 至 {periodEnd}</small></td><td><b>{rollup.orders} 笔订单</b></td><td><b>{new Set(orders.map((order) => order.article)).size} 个 SKU</b></td><td><b>{warehouse || "全部仓库"}</b></td><td><b>{formatMoney(rollup.amount)}</b><small>平台成交价合计</small></td><td><b className="value-good">正常 {rollup.success}</b><small className="supplier-new-count">当前新订单 {rollup.supplierNew}</small></td><td><b>待签 {rollup.pending}</b></td><td><b className={rollup.abnormal ? "value-bad" : "value-good"}>非正常 {rollup.abnormal} · 退货率 {rollup.abnormalRate.toFixed(1)}%</b><small>计入退货率 {rollup.rateAbnormal} · 无效排除 {rollup.invalid}</small></td><td><b className="value-good">已结 {financeRollup.settled}</b><small>待结账预估 {financeRollup.estimated} · 异常实扣 {financeRollup.actualAbnormal} · 异常预估 {financeRollup.estimatedAbnormal} · 零支出 {financeRollup.zeroCostAbnormal}</small></td><td><b>{formatFinanceMoney(financeRollup.platformPayout)}</b><small className="finance-breakdown">含已结实款与待结账预估；佣金后货款 {formatFinanceNumber(financeRollup.postCommissionPayout)}</small></td><td><b>{formatFinanceMoney(financeRollup.platformDeduction)}</b><small className="finance-breakdown">{platformFeeBreakdown(financeRollup)}</small></td><td><b>{formatFinanceMoney(financeRollup.productCost)}</b><small className="finance-breakdown">{productCostBreakdown(financeRollup)} · {financeRollup.costReady} 笔</small></td><td><b>{formatFinanceMoney(financeRollup.costExpense)}</b><small className="finance-breakdown">正常 {formatFinanceNumber(financeRollup.normalCostExpense)}＋异常 {formatFinanceNumber(financeRollup.abnormalCostExpense)}</small></td><td><b className={financeRollup.profit >= 0 ? "value-good" : "value-bad"}>{formatFinanceMoney(financeRollup.profit)}</b><small>已结 {formatFinanceMoney(financeRollup.actualProfit)} · 待结账 {formatFinanceMoney(financeRollup.estimatedProfit)} · 异常 {formatFinanceMoney(financeRollup.abnormalProfit)}</small></td><td><b className={financeRollup.profitRate >= 0 ? "value-good" : "value-bad"}>{financeRollup.profitRate.toFixed(1)}%</b></td></tr>
                 {visibleOrders.map((order) => {
