@@ -102,15 +102,33 @@ type WbFinanceRow = {
   title?: string;
   docTypeName?: string;
   sellerOperName?: string;
+  bonusTypeName?: string;
   rrDate?: string;
   saleDt?: string;
   orderDt?: string;
+  officeName?: string;
+  warehouseName?: string;
+  barcode?: string;
+  stickerId?: string;
+  country?: string;
   quantity?: number;
   retailPriceWithDisc?: string | number;
   retailAmount?: string | number;
+  deliveryAmount?: number;
+  returnAmount?: number;
+  productDiscountForReport?: number;
+  sellerPromo?: string | number;
+  spp?: number;
+  kvwBase?: number;
+  kvw?: number;
+  ppvzSalesCommission?: string | number;
   forPay?: string | number;
+  ppvzReward?: string | number;
   deliveryService?: string | number;
   acquiringFee?: string | number;
+  acquiringPercent?: number;
+  paymentProcessing?: string;
+  acquiringBank?: string;
   penalty?: string | number;
   deduction?: string | number;
   storageFee?: string | number;
@@ -1097,7 +1115,8 @@ function roundedMoney(value: number) {
 }
 
 function financeOperationLabel(row: WbFinanceRow, netPayout: number) {
-  const raw = `${row.sellerOperName || ""} ${row.docTypeName || ""}`.trim();
+  const raw = `${row.sellerOperName || ""} ${row.docTypeName || ""} ${row.bonusTypeName || ""}`.trim();
+  if (/продвиж|реклам|advert|promotion/i.test(raw)) return "推广扣款";
   if (/退货|退款|возврат|return/i.test(raw)) return "退货退款";
   if (/销售|售出|продаж|sale/i.test(raw)) return "订单销售结算";
   if (/物流|配送|логист|delivery/i.test(raw)) return "物流费用";
@@ -1409,6 +1428,8 @@ export async function GET(request: Request) {
               date: dayKey(row.rrDate || row.saleDt || row.orderDt),
               operation: financeOperationLabel(row, values.netPayout),
               rawOperation: row.sellerOperName || row.docTypeName || "",
+              deductionReason: row.bonusTypeName || "",
+              isAdvertising: /продвиж|реклам|advert|promotion/i.test(`${row.sellerOperName || ""} ${row.docTypeName || ""} ${row.bonusTypeName || ""}`),
               direction: values.netPayout > 0 ? "credit" : values.netPayout < 0 ? "debit" : "neutral",
               orderNumber,
               orderUid,
@@ -1422,6 +1443,35 @@ export async function GET(request: Request) {
               additionalPayment: values.additionalPayment,
               netChange: values.netPayout,
               currency: financeCurrency(row.currency || balanceResult.currency),
+              details: {
+                financeDate: row.rrDate || "",
+                saleDate: row.saleDt || "",
+                orderDate: row.orderDt || "",
+                documentType: row.docTypeName || "",
+                operationName: row.sellerOperName || "",
+                deductionReason: row.bonusTypeName || "",
+                officeName: row.officeName || "",
+                warehouseName: row.warehouseName || "",
+                barcode: row.barcode || "",
+                stickerId: row.stickerId || "",
+                country: row.country || "",
+                quantity: financeNumber(row.quantity),
+                deliveryAmount: financeNumber(row.deliveryAmount),
+                returnAmount: financeNumber(row.returnAmount),
+                retailAmount: financeNumber(row.retailAmount),
+                retailPriceWithDiscount: financeNumber(row.retailPriceWithDisc),
+                productDiscountPercent: financeNumber(row.productDiscountForReport),
+                sellerPromo: financeNumber(row.sellerPromo),
+                spp: financeNumber(row.spp),
+                baseCommissionPercent: financeNumber(row.kvwBase),
+                commissionPercent: financeNumber(row.kvw),
+                salesCommission: financeNumber(row.ppvzSalesCommission),
+                wbReward: financeNumber(row.ppvzReward),
+                acquiringPercent: financeNumber(row.acquiringPercent),
+                paymentProcessing: row.paymentProcessing || "",
+                acquiringBank: row.acquiringBank || "",
+                shkId: row.shkId ? String(row.shkId) : "",
+              },
               feeBreakdown: {
                 logistics: values.logisticsFee,
                 acquiring: values.acquiringFee,
