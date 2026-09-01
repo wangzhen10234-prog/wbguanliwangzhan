@@ -42,8 +42,14 @@ type PromotionTrace = {
   source: string;
   fetchedAt?: string;
   date: string;
+  queriedFrom?: string;
+  queriedTo?: string;
   targetAmount: number;
-  match?: { level: "single_amount" | "document_total" | "day_total" | "multiple_amounts" | "none"; reason: string; candidateCount: number; dayTotal: number; officiallyLinked: false };
+  match?: {
+    level: "document_total" | "single_amount" | "period_total" | "multiple_documents" | "multiple_amounts" | "none";
+    reason: string; candidateCount: number; candidateTotal: number; candidateCampaignCount: number; matchedDocumentNumber: number;
+    periodTotal: number; otherCount: number; otherTotal: number; confidence: "high" | "medium" | "none"; officiallyLinked: false;
+  };
   entries: Array<{
     key: string; documentNumber: number; chargedAt: string | null; amount: number; campaignId: number; campaignName: string;
     campaignType: number; paymentType: string; campaignStatus: number; campaignStatusLabel: string; candidate: boolean;
@@ -120,6 +126,7 @@ export default function FinancePage() {
   const [selectedMovement, setSelectedMovement] = useState<FinanceMovement | null>(null);
   const [promotionTrace, setPromotionTrace] = useState<PromotionTrace | null>(null);
   const [traceLoading, setTraceLoading] = useState(false);
+  const [showOtherPromotionEntries, setShowOtherPromotionEntries] = useState(false);
   const forceRefreshRef = useRef(false);
   const movementPanelRef = useRef<HTMLElement>(null);
 
@@ -182,6 +189,9 @@ export default function FinancePage() {
   }, [data?.financeMovements, movementFilter, movementQuery]);
   const movementPageCount = Math.max(1, Math.ceil(filteredMovements.length / MOVEMENT_PAGE_SIZE));
   const visibleMovements = filteredMovements.slice((movementPage - 1) * MOVEMENT_PAGE_SIZE, movementPage * MOVEMENT_PAGE_SIZE);
+  const promotionCandidateEntries = promotionTrace?.entries.filter((entry) => entry.candidate) ?? [];
+  const promotionOtherEntries = promotionTrace?.entries.filter((entry) => !entry.candidate) ?? [];
+  const visiblePromotionEntries = promotionCandidateEntries.length > 0 && !showOtherPromotionEntries ? promotionCandidateEntries : promotionTrace?.entries ?? [];
 
   const metrics = data?.metrics;
   const balance = data?.accountBalance;
@@ -190,7 +200,7 @@ export default function FinancePage() {
   const settlementCurrency = settlement?.currency || balance?.currency || "CNY";
   const financeReady = Boolean(balance?.available && settlement?.available);
   function refresh() { forceRefreshRef.current = true; setLoading(true); setError(""); setReloadKey((key) => key + 1); }
-  function openMovementDetail(movement: FinanceMovement) { setPromotionTrace(null); setTraceLoading(movement.isAdvertising); setSelectedMovement(movement); }
+  function openMovementDetail(movement: FinanceMovement) { setPromotionTrace(null); setShowOtherPromotionEntries(false); setTraceLoading(movement.isAdvertising); setSelectedMovement(movement); }
 
   return (
     <main className="app-shell">
@@ -281,10 +291,11 @@ export default function FinancePage() {
           </section>
 
           <section className="finance-detail-section finance-promotion-trace">
-            <div className="finance-detail-section-title"><div><h3>推广扣款追溯</h3><p>推广相关扣款实时读取 WB 推广费用历史，核对活动 ID、名称、时间和金额。</p></div><span>WB /adv/v1/upd</span></div>
-            {!selectedMovement.isAdvertising ? <div className="finance-trace-empty"><b>本笔不是推广类扣款</b><span>财务原始原因未包含推广或广告标识，因此不调用推广费用接口。</span></div> : traceLoading ? <div className="finance-trace-empty loading"><b>正在读取 WB 推广费用明细…</b><span>按本笔结算日期与扣款金额进行官方数据核对。</span></div> : !promotionTrace?.available ? <div className="finance-trace-empty error"><b>推广费用明细暂未取得</b><span>{promotionTrace?.error || "WB 推广费用接口暂时没有返回数据"}</span><small>{promotionTrace?.limitation}</small></div> : <>
-              <div className={`finance-trace-result ${promotionTrace.match?.level === "none" || promotionTrace.match?.level === "multiple_amounts" ? "caution" : "candidate"}`}><div><span>追溯结果</span><b>{promotionTrace.match?.reason}</b><small>目标扣款 {money(promotionTrace.targetAmount, selectedMovement.currency)} · 当日推广费用合计 {money(promotionTrace.match?.dayTotal ?? 0, selectedMovement.currency)}</small></div><em>{promotionTrace.match?.candidateCount ? `${promotionTrace.match.candidateCount} 条候选` : "未定位"}</em></div>
-              <div className="finance-promotion-table-wrap"><table><thead><tr><th>匹配</th><th>扣费时间</th><th>推广活动</th><th>活动 ID</th><th>金额</th><th>支付方式</th><th>UPD 单据</th><th>活动状态</th></tr></thead><tbody>{promotionTrace.entries.map((entry) => <tr key={entry.key} className={entry.candidate ? "candidate" : ""}><td>{entry.candidate ? <strong>候选</strong> : "同日"}</td><td>{detailTimestamp(entry.chargedAt)}</td><td><b>{entry.campaignName}</b></td><td>{entry.campaignId || "WB 未返回"}</td><td><b>{money(entry.amount, selectedMovement.currency)}</b></td><td>{entry.paymentType}</td><td>{entry.documentNumber || "WB 未生成"}</td><td>{entry.campaignStatusLabel}</td></tr>)}{promotionTrace.entries.length === 0 && <tr><td colSpan={8}>该结算日没有推广费用记录</td></tr>}</tbody></table></div>
+            <div className="finance-detail-section-title"><div><h3>推广扣款追溯</h3><p>查询结算日前 31 天的 WB 官方推广费用，按 UPD 单据归组核对活动、时间与合计金额。</p></div><span>WB /adv/v1/upd</span></div>
+            {!selectedMovement.isAdvertising ? <div className="finance-trace-empty"><b>本笔不是推广类扣款</b><span>财务原始原因未包含推广或广告标识，因此不调用推广费用接口。</span></div> : traceLoading ? <div className="finance-trace-empty loading"><b>正在读取完整账期推广费用…</b><span>正在按 UPD 单据归组，并与本笔扣款总额逐分核对。</span></div> : !promotionTrace?.available ? <div className="finance-trace-empty error"><b>推广费用明细暂未取得</b><span>{promotionTrace?.error || "WB 推广费用接口暂时没有返回数据"}</span><small>{promotionTrace?.limitation}</small></div> : <>
+              <div className={`finance-trace-result ${promotionTrace.match?.confidence === "none" ? "caution" : "candidate"}`}><div><span>{promotionTrace.match?.confidence === "high" ? "高可信账务匹配" : "追溯结果"}</span><b>{promotionTrace.match?.reason}</b><small>目标扣款 {money(promotionTrace.targetAmount, selectedMovement.currency)} · 匹配合计 {money(promotionTrace.match?.candidateTotal ?? 0, selectedMovement.currency)} · 查询 {promotionTrace.queriedFrom} 至 {promotionTrace.queriedTo}</small></div><em>{promotionTrace.match?.candidateCount ? `${promotionTrace.match.candidateCount} 条 · ${promotionTrace.match.candidateCampaignCount} 个活动` : "未定位"}</em></div>
+              {promotionCandidateEntries.length > 0 && <div className="finance-trace-period-summary"><div><b>{promotionTrace.match?.matchedDocumentNumber ? `计入 UPD ${promotionTrace.match.matchedDocumentNumber}` : "计入本笔扣款"}</b><span>{promotionCandidateEntries.length} 条费用合计 {money(promotionTrace.match?.candidateTotal ?? 0, selectedMovement.currency)}</span></div>{promotionOtherEntries.length > 0 && <button type="button" onClick={() => setShowOtherPromotionEntries((value) => !value)}>{showOtherPromotionEntries ? "只看计入本笔" : `查看同期其他 ${promotionOtherEntries.length} 条`}</button>}</div>}
+              <div className="finance-promotion-table-wrap"><table><thead><tr><th>归属</th><th>扣费时间</th><th>推广活动</th><th>活动 ID</th><th>金额</th><th>支付方式</th><th>UPD 单据</th><th>活动状态</th></tr></thead><tbody>{visiblePromotionEntries.map((entry) => <tr key={entry.key} className={entry.candidate ? "candidate" : ""}><td>{entry.candidate ? <strong>计入本笔</strong> : "同期其他"}</td><td>{detailTimestamp(entry.chargedAt)}</td><td><b>{entry.campaignName}</b></td><td>{entry.campaignId || "WB 未返回"}</td><td><b>{money(entry.amount, selectedMovement.currency)}</b></td><td>{entry.paymentType}</td><td>{entry.documentNumber || "WB 未生成"}</td><td>{entry.campaignStatusLabel}</td></tr>)}{visiblePromotionEntries.length === 0 && <tr><td colSpan={8}>该 31 天账期没有推广费用记录</td></tr>}</tbody></table></div>
               <p className="finance-trace-limitation">{promotionTrace.limitation}</p>
             </>}
           </section>

@@ -412,3 +412,10 @@ td small { margin-top:3px; color:#b0abb5; font-size:7px; }
 .site-horizontal-scroller input[type=range]:focus-visible{outline:2px solid #8b73ec;outline-offset:2px;border-radius:10px}
 @media(max-width:760px){.site-horizontal-scroller{right:12px;bottom:8px;left:12px;width:auto;height:22px;padding:2px 8px;transform:none}}
 @media print{.site-horizontal-scroller{display:none!important}}
+
+.finance-trace-period-summary{display:flex;align-items:center;justify-content:space-between;gap:14px;margin:0 13px 13px;padding:9px 11px;border:1px solid #e8e3ed;border-radius:9px;background:#faf9fc}
+.finance-trace-period-summary b,.finance-trace-period-summary span{display:block}
+.finance-trace-period-summary b{color:#5a4e64;font-size:8px}
+.finance-trace-period-summary span{margin-top:4px;color:#968e9b;font-size:7px}
+.finance-trace-period-summary button{min-height:28px;padding:0 10px;color:#6547c7;border:1px solid #d8cdf7;border-radius:7px;background:#f5f1ff;font-size:7px;font-weight:800;cursor:pointer;white-space:nowrap}
+@media(max-width:760px){.finance-trace-period-summary{align-items:flex-start;flex-direction:column}.finance-trace-period-summary button{width:100%}}

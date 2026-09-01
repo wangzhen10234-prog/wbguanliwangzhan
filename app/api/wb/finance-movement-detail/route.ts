@@ -4,7 +4,8 @@ import { resolveWbStore, scopedStoreKey } from "../../../_lib/server-storefront"
 
 type PromotionCostSnapshot = {
   source: "WB Promotion API /adv/v1/upd";
-  date: string;
+  from: string;
+  to: string;
   fetchedAt: string;
   rows: PromotionCostInput[];
 };
@@ -26,6 +27,11 @@ function json(body: unknown, status = 200) {
 
 function dateKey(value = Date.now()) {
   return new Date(value + BEIJING_OFFSET_MS).toISOString().slice(0, 10);
+}
+
+function shiftDate(value: string, days: number) {
+  const [year, month, day] = value.split("-").map(Number);
+  return new Date(Date.UTC(year, month - 1, day + days)).toISOString().slice(0, 10);
 }
 
 function validDate(value: string | null) {
@@ -68,7 +74,7 @@ async function writeSnapshot(cacheKey: string, value: PromotionCostSnapshot) {
       INSERT INTO wb_sync_snapshots (cache_key, payload, sync_slot, manual_bucket, updated_at)
       VALUES (?, ?, ?, 0, CURRENT_TIMESTAMP)
       ON CONFLICT(cache_key) DO UPDATE SET payload = excluded.payload, sync_slot = excluded.sync_slot, updated_at = CURRENT_TIMESTAMP
-    `).bind(cacheKey, JSON.stringify(value), value.date).run();
+    `).bind(cacheKey, JSON.stringify(value), `${value.from}:${value.to}`).run();
   } catch {
     // The live response remains valid if durable caching is temporarily unavailable.
   }
@@ -76,12 +82,12 @@ async function writeSnapshot(cacheKey: string, value: PromotionCostSnapshot) {
 
 function snapshotFresh(snapshot: PromotionCostSnapshot) {
   const age = Date.now() - new Date(snapshot.fetchedAt).getTime();
-  const ttl = snapshot.date === dateKey() ? MEMORY_TTL_MS : HISTORICAL_TTL_MS;
+  const ttl = snapshot.to === dateKey() ? MEMORY_TTL_MS : HISTORICAL_TTL_MS;
   return Number.isFinite(age) && age >= 0 && age < ttl;
 }
 
-async function loadPromotionCosts(token: string, storeId: string, date: string) {
-  const cacheKey = scopedStoreKey(storeId, `finance-promotion-costs-v1:${date}`);
+async function loadPromotionCosts(token: string, storeId: string, from: string, to: string) {
+  const cacheKey = scopedStoreKey(storeId, `finance-promotion-costs-v2:${from}:${to}`);
   const memory = memoryCache.get(cacheKey);
   if (memory && memory.expiresAt > Date.now()) return memory.value;
   const durable = await readSnapshot(cacheKey);
@@ -94,8 +100,8 @@ async function loadPromotionCosts(token: string, storeId: string, date: string) 
 
   const load = (async () => {
     const url = new URL("https://advert-api.wildberries.ru/adv/v1/upd");
-    url.searchParams.set("from", date);
-    url.searchParams.set("to", date);
+    url.searchParams.set("from", from);
+    url.searchParams.set("to", to);
     try {
       const response = await fetch(url, {
         headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
@@ -111,7 +117,8 @@ async function loadPromotionCosts(token: string, storeId: string, date: string) 
       const sourceRows = await response.json() as PromotionCostInput[];
       const snapshot: PromotionCostSnapshot = {
         source: "WB Promotion API /adv/v1/upd",
-        date,
+        from,
+        to,
         fetchedAt: new Date().toISOString(),
         rows: (Array.isArray(sourceRows) ? sourceRows : []).map(normalizeRow),
       };
@@ -139,7 +146,10 @@ export async function GET(request: Request) {
   if (!date || targetAmount === null) return json({ error: "财务日期或扣款金额无效" }, 400);
 
   try {
-    const snapshot = await loadPromotionCosts(token, storeId, date);
+    // WB promotion costs can be consolidated into one finance deduction several days later.
+    // /adv/v1/upd accepts at most 31 days, so inspect the full supported settlement window.
+    const queriedFrom = shiftDate(date, -30);
+    const snapshot = await loadPromotionCosts(token, storeId, queriedFrom, date);
     const match = matchPromotionCosts(snapshot.rows, targetAmount);
     const candidateKeys = new Set(match.candidateKeys);
     const entries = snapshot.rows.map((row, index) => ({
@@ -155,21 +165,33 @@ export async function GET(request: Request) {
       campaignStatusLabel: statusLabel(Number(row.advertStatus || 0)),
       candidate: candidateKeys.has(promotionCostRowKey(row, index)),
     })).sort((left, right) => Number(right.candidate) - Number(left.candidate) || String(right.chargedAt || "").localeCompare(String(left.chargedAt || "")));
+    const candidateRows = entries.filter((entry) => entry.candidate);
+    const candidateTotal = Math.round(candidateRows.reduce((sum, entry) => sum + entry.amount, 0) * 100) / 100;
+    const otherRows = entries.filter((entry) => !entry.candidate);
+    const candidateCampaigns = new Set(candidateRows.map((entry) => entry.campaignId).filter(Boolean));
     return json({
       available: true,
       source: snapshot.source,
       fetchedAt: snapshot.fetchedAt,
       date,
+      queriedFrom: snapshot.from,
+      queriedTo: snapshot.to,
       targetAmount,
       match: {
         level: match.level,
         reason: match.reason,
         candidateCount: match.candidateKeys.length,
-        dayTotal: match.dayTotalCents / 100,
+        candidateTotal,
+        candidateCampaignCount: candidateCampaigns.size,
+        matchedDocumentNumber: match.matchedDocumentNumber,
+        periodTotal: match.periodTotalCents / 100,
+        otherCount: otherRows.length,
+        otherTotal: Math.round(otherRows.reduce((sum, entry) => sum + entry.amount, 0) * 100) / 100,
+        confidence: match.level === "document_total" ? "high" : match.level === "single_amount" || match.level === "period_total" ? "medium" : "none",
         officiallyLinked: false,
       },
       entries,
-      limitation: "WB 财务报告与推广费用接口没有返回共同关联键；候选记录仅按官方日期、金额和推广单据合计核对，不能冒充 WB 官方唯一归属。",
+      limitation: "WB 财务报告与推广费用接口没有返回共同关联键；系统查询结算日前 31 天的官方推广费用，按 UPD 单据归组并核对总额。合计完全一致属于高可信账务匹配，但不冒充 WB 官方直接关联。",
     });
   } catch (error) {
     const status = Number((error as { status?: number }).status || 0);
@@ -177,6 +199,8 @@ export async function GET(request: Request) {
       available: false,
       source: "WB Promotion API /adv/v1/upd",
       date,
+      queriedFrom: shiftDate(date, -30),
+      queriedTo: date,
       targetAmount,
       entries: [],
       error: status === 401 || status === 403 ? "当前 API 密钥没有推广费用读取权限" : status === 429 ? "WB 推广费用接口限频，请稍后重试" : "WB 推广费用明细暂时无法读取",
