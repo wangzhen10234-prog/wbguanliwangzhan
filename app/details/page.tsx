@@ -603,7 +603,7 @@ export default function ProductDetailsPage() {
           </div>
 
           <div className="pricing-commandbar">
-            <div className="pricing-legend"><span><i className="editable" />白色为可编辑数据</span><span><i className="calculated" />淡紫色为自动计算</span><span><i className="price" />最终售价实时反推</span></div>
+            <div className="pricing-legend"><span><i className="editable" />白色为可编辑数据</span><span><i className="calculated" />淡紫色为自动计算</span><span><i className="price" />最终售价实时反推</span><span className="shared-product-register-note"><i>⇄</i>王振1号店与2号店共用此表</span></div>
             <div className="sheet-actions">
               <button className="product-match-button" type="button" disabled={loading || saving} onClick={refresh}>{matching ? "匹配中…" : "↻ 匹配 WB 产品"}</button>
               <label className="sheet-search"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索商品编码、SKU、分类或规格" /></label>

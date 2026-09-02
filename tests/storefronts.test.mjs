@@ -50,11 +50,19 @@ test("every WB route resolves the active store and never reads a token directly"
   }
 });
 
-test("product and deletion rows are always scoped to the selected store", async () => {
+test("both storefronts use the primary store's shared product register", async () => {
   const source = await readFile(new URL("../app/api/product-costs/route.ts", import.meta.url), "utf8");
   assert.match(source, /requestedStorefront\(request\)/);
-  assert.match(source, /eq\(productCosts\.storeId, store\.id\)/);
-  assert.match(source, /eq\(productCostDeletions\.storeId, store\.id\)/);
+  assert.match(source, /SHARED_PRODUCT_SCOPE_ID\s*=\s*"shared-product-register"/);
+  assert.match(source, /where\(eq\(productCosts\.storeId, DEFAULT_STOREFRONT_ID\)\)/);
+  assert.match(source, /sourceStoreId:\s*DEFAULT_STOREFRONT_ID/);
+  assert.doesNotMatch(source, /eq\(productCosts\.storeId, store\.id\)/);
+  assert.doesNotMatch(source, /eq\(productCostDeletions\.storeId, store\.id\)/);
   assert.match(source, /target:\s*\[productCosts\.storeId, productCosts\.sellerSku\]/);
   assert.match(source, /target:\s*\[productCostDeletions\.storeId, productCostDeletions\.identityKey\]/);
+});
+
+test("product detail page tells the operator that both stores share one table", async () => {
+  const source = await readFile(new URL("../app/details/page.tsx", import.meta.url), "utf8");
+  assert.match(source, /王振1号店与2号店共用此表/);
 });
