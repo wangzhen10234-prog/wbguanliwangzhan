@@ -50,19 +50,21 @@ test("every WB route resolves the active store and never reads a token directly"
   }
 });
 
-test("both storefronts use the primary store's shared product register", async () => {
+test("product rows return to isolated storefront scopes after the one-time CL copy", async () => {
   const source = await readFile(new URL("../app/api/product-costs/route.ts", import.meta.url), "utf8");
   assert.match(source, /requestedStorefront\(request\)/);
-  assert.match(source, /SHARED_PRODUCT_SCOPE_ID\s*=\s*"shared-product-register"/);
+  assert.match(source, /LEGACY_SHARED_PRODUCT_SCOPE_ID\s*=\s*"shared-product-register"/);
+  assert.match(source, /SEPARATION_MIGRATION_KEY\s*=\s*"product-register-separation-v1:cl"/);
   assert.match(source, /where\(eq\(productCosts\.storeId, DEFAULT_STOREFRONT_ID\)\)/);
-  assert.match(source, /sourceStoreId:\s*DEFAULT_STOREFRONT_ID/);
-  assert.doesNotMatch(source, /eq\(productCosts\.storeId, store\.id\)/);
-  assert.doesNotMatch(source, /eq\(productCostDeletions\.storeId, store\.id\)/);
+  assert.match(source, /sharedRows\.length > 0 \? sharedRows : primaryRows/);
+  assert.match(source, /eq\(productCosts\.storeId, store\.id\)/);
+  assert.match(source, /eq\(productCostDeletions\.storeId, store\.id\)/);
+  assert.match(source, /shared:\s*false/);
   assert.match(source, /target:\s*\[productCosts\.storeId, productCosts\.sellerSku\]/);
   assert.match(source, /target:\s*\[productCostDeletions\.storeId, productCostDeletions\.identityKey\]/);
 });
 
-test("product detail page tells the operator that both stores share one table", async () => {
+test("product detail page tells the operator that each store has an independent table", async () => {
   const source = await readFile(new URL("../app/details/page.tsx", import.meta.url), "utf8");
-  assert.match(source, /王振1号店与2号店共用此表/);
+  assert.match(source, /当前店铺独立产品表/);
 });

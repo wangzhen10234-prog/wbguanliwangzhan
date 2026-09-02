@@ -1,12 +1,14 @@
 import { and, asc, eq, inArray, or } from "drizzle-orm";
 import { getDb } from "../../../db";
-import { productCostDeletions, productCosts } from "../../../db/schema";
+import { productCostDeletions, productCosts, wbSyncSnapshots } from "../../../db/schema";
 import { normalizeProductSku } from "../../_lib/product-cost-aliases";
 import { matchesProductDeletion, productDeletionIdentity } from "../../_lib/product-deletions";
 import { DEFAULT_STOREFRONT_ID } from "../../_lib/storefronts";
 import { requestedStorefront } from "../../_lib/server-storefront";
 
-export const SHARED_PRODUCT_SCOPE_ID = "shared-product-register";
+const LEGACY_SHARED_PRODUCT_SCOPE_ID = "shared-product-register";
+const SECONDARY_STOREFRONT_ID = "cl";
+const SEPARATION_MIGRATION_KEY = "product-register-separation-v1:cl";
 
 const JSON_HEADERS = {
   "Cache-Control": "private, no-store, max-age=0",
@@ -159,48 +161,69 @@ function databaseError(error: unknown) {
   return json({ error: "产品成本数据暂时无法保存" }, 500);
 }
 
-async function ensureSharedProductRegister(db: ReturnType<typeof getDb>) {
-  let rows = await db.select().from(productCosts)
-    .where(eq(productCosts.storeId, SHARED_PRODUCT_SCOPE_ID))
+async function separateSecondaryProductRegister(db: ReturnType<typeof getDb>, storeId: string) {
+  if (storeId !== SECONDARY_STOREFRONT_ID) return;
+  const migration = await db.select({ cacheKey: wbSyncSnapshots.cacheKey }).from(wbSyncSnapshots)
+    .where(eq(wbSyncSnapshots.cacheKey, SEPARATION_MIGRATION_KEY));
+  if (migration.length > 0) return;
+
+  // The short-lived shared register contains the user's completed CL matching.
+  // Copy it atomically into CL, while leaving the untouched primary rows as-is.
+  const sharedRows = await db.select().from(productCosts)
+    .where(eq(productCosts.storeId, LEGACY_SHARED_PRODUCT_SCOPE_ID))
     .orderBy(asc(productCosts.sortOrder), asc(productCosts.sellerSku));
-  if (rows.length > 0) return rows;
-
-  // One-time migration: the existing primary-store register is authoritative.
-  // Copy deletion markers first so a concurrently opened storefront cannot
-  // briefly recreate a product the user had already removed.
-  const primaryDeletions = await db.select().from(productCostDeletions)
-    .where(eq(productCostDeletions.storeId, DEFAULT_STOREFRONT_ID));
-  for (const marker of primaryDeletions) {
-    await db.insert(productCostDeletions).values({ ...marker, storeId: SHARED_PRODUCT_SCOPE_ID }).onConflictDoNothing();
-  }
-
   const primaryRows = await db.select().from(productCosts)
     .where(eq(productCosts.storeId, DEFAULT_STOREFRONT_ID))
     .orderBy(asc(productCosts.sortOrder), asc(productCosts.sellerSku));
-  const sourceRows = primaryRows.length > 0 ? primaryRows : SEED_ROWS;
-  for (const row of sourceRows) {
-    await db.insert(productCosts).values({ ...row, storeId: SHARED_PRODUCT_SCOPE_ID }).onConflictDoNothing();
-  }
+  const sourceRows = sharedRows.length > 0 ? sharedRows : primaryRows;
+  const sharedDeletions = await db.select().from(productCostDeletions)
+    .where(eq(productCostDeletions.storeId, LEGACY_SHARED_PRODUCT_SCOPE_ID));
+  const primaryDeletions = await db.select().from(productCostDeletions)
+    .where(eq(productCostDeletions.storeId, DEFAULT_STOREFRONT_ID));
+  const sourceDeletions = sharedDeletions.length > 0 ? sharedDeletions : primaryDeletions;
+  const migratedAt = new Date().toISOString();
 
-  rows = await db.select().from(productCosts)
-    .where(eq(productCosts.storeId, SHARED_PRODUCT_SCOPE_ID))
-    .orderBy(asc(productCosts.sortOrder), asc(productCosts.sellerSku));
-  return rows;
+  await db.batch([
+    db.delete(productCosts).where(eq(productCosts.storeId, SECONDARY_STOREFRONT_ID)),
+    db.delete(productCostDeletions).where(eq(productCostDeletions.storeId, SECONDARY_STOREFRONT_ID)),
+    ...sourceRows.map((row) => db.insert(productCosts).values({ ...row, storeId: SECONDARY_STOREFRONT_ID })),
+    ...sourceDeletions.map((row) => db.insert(productCostDeletions).values({ ...row, storeId: SECONDARY_STOREFRONT_ID })),
+    db.insert(wbSyncSnapshots).values({
+      cacheKey: SEPARATION_MIGRATION_KEY,
+      payload: JSON.stringify({ source: sharedRows.length > 0 ? LEGACY_SHARED_PRODUCT_SCOPE_ID : DEFAULT_STOREFRONT_ID, rows: sourceRows.length, migratedAt }),
+      syncSlot: "product-register-separation-v1",
+      manualBucket: 0,
+      updatedAt: migratedAt,
+    }).onConflictDoNothing(),
+  ]);
 }
 
 export async function GET(request: Request) {
   try {
     const store = requestedStorefront(request);
     const db = getDb();
-    const rows = await ensureSharedProductRegister(db);
+    await separateSecondaryProductRegister(db, store.id);
+    let rows = await db.select().from(productCosts)
+      .where(eq(productCosts.storeId, store.id))
+      .orderBy(asc(productCosts.sortOrder), asc(productCosts.sellerSku));
+    // Seed only a completely new primary store. Re-seeding on every read would
+    // recreate an old primary key after the user renames a saved seller code.
+    if (rows.length === 0 && store.id === DEFAULT_STOREFRONT_ID) {
+      for (const seedRow of SEED_ROWS) {
+        await db.insert(productCosts).values({ ...seedRow, storeId: store.id }).onConflictDoNothing();
+      }
+      rows = await db.select().from(productCosts)
+        .where(eq(productCosts.storeId, store.id))
+        .orderBy(asc(productCosts.sortOrder), asc(productCosts.sellerSku));
+    }
     const deletedProducts = await db.select().from(productCostDeletions)
-      .where(eq(productCostDeletions.storeId, SHARED_PRODUCT_SCOPE_ID))
+      .where(eq(productCostDeletions.storeId, store.id))
       .orderBy(asc(productCostDeletions.deletedAt));
     const activeRows = rows.filter((row) => !matchesProductDeletion({
       sku: row.sellerSku,
       nmId: row.nmId,
     }, deletedProducts));
-    return json({ rows: activeRows, deletedProducts, shared: true, activeStoreId: store.id, sourceStoreId: DEFAULT_STOREFRONT_ID });
+    return json({ rows: activeRows, deletedProducts, shared: false, activeStoreId: store.id });
   } catch (error) {
     return databaseError(error);
   }
@@ -209,13 +232,13 @@ export async function GET(request: Request) {
 export async function PUT(request: Request) {
   try {
     const body = await request.json() as CostPayload;
-    requestedStorefront(request);
-    const value = normalizePayload(body, SHARED_PRODUCT_SCOPE_ID);
+    const store = requestedStorefront(request);
+    const value = normalizePayload(body, store.id);
     const previousSellerSku = stringField(body.previousSellerSku, 120);
     const db = getDb();
-    await ensureSharedProductRegister(db);
+    await separateSecondaryProductRegister(db, store.id);
     const existingKeys = await db.select({ sellerSku: productCosts.sellerSku }).from(productCosts)
-      .where(eq(productCosts.storeId, SHARED_PRODUCT_SCOPE_ID));
+      .where(eq(productCosts.storeId, store.id));
     const normalizedSellerSku = normalizeProductSku(value.sellerSku);
     const conflict = existingKeys.find((entry) =>
       normalizeProductSku(entry.sellerSku) === normalizedSellerSku
@@ -227,11 +250,11 @@ export async function PUT(request: Request) {
       const [renamed] = await db
         .update(productCosts)
         .set(value)
-        .where(and(eq(productCosts.storeId, SHARED_PRODUCT_SCOPE_ID), eq(productCosts.sellerSku, previousSellerSku)))
+        .where(and(eq(productCosts.storeId, store.id), eq(productCosts.sellerSku, previousSellerSku)))
         .returning();
       if (renamed) {
         await db.delete(productCostDeletions).where(and(
-          eq(productCostDeletions.storeId, SHARED_PRODUCT_SCOPE_ID),
+          eq(productCostDeletions.storeId, store.id),
           or(
             eq(productCostDeletions.sellerSkuKey, normalizedSellerSku),
             eq(productCostDeletions.identityKey, productDeletionIdentity(value.sellerSku, value.nmId)),
@@ -274,7 +297,7 @@ export async function PUT(request: Request) {
       })
       .returning();
     await db.delete(productCostDeletions).where(and(
-      eq(productCostDeletions.storeId, SHARED_PRODUCT_SCOPE_ID),
+      eq(productCostDeletions.storeId, store.id),
       or(
         eq(productCostDeletions.sellerSkuKey, normalizedSellerSku),
         eq(productCostDeletions.identityKey, productDeletionIdentity(value.sellerSku, value.nmId)),
@@ -294,7 +317,7 @@ export async function PUT(request: Request) {
 export async function DELETE(request: Request) {
   try {
     const body = await request.json() as DeletePayload;
-    requestedStorefront(request);
+    const store = requestedStorefront(request);
     const sellerSku = stringField(body.sellerSku, 120);
     const persistedSellerSku = stringField(body.persistedSellerSku, 120);
     const nmId = Math.trunc(numericField(body.nmId, Number.MAX_SAFE_INTEGER));
@@ -302,12 +325,12 @@ export async function DELETE(request: Request) {
     if (!sellerSkuKey && !nmId) return json({ error: "缺少要删除的商品编号" }, 400);
 
     const db = getDb();
-    await ensureSharedProductRegister(db);
+    await separateSecondaryProductRegister(db, store.id);
     const identityKey = productDeletionIdentity(sellerSku || persistedSellerSku, nmId || null);
     const storedKeys = await db.select({
       sellerSku: productCosts.sellerSku,
       nmId: productCosts.nmId,
-    }).from(productCosts).where(eq(productCosts.storeId, SHARED_PRODUCT_SCOPE_ID));
+    }).from(productCosts).where(eq(productCosts.storeId, store.id));
     const normalizedPersistedSku = normalizeProductSku(persistedSellerSku);
     const storedSellerSkus = storedKeys.filter((row) =>
       Boolean(persistedSellerSku && row.sellerSku === persistedSellerSku)
@@ -317,7 +340,7 @@ export async function DELETE(request: Request) {
     ).map((row) => row.sellerSku);
 
     const markerQuery = db.insert(productCostDeletions).values({
-      storeId: SHARED_PRODUCT_SCOPE_ID,
+      storeId: store.id,
       identityKey,
       sellerSkuKey,
       nmId: nmId || null,
@@ -330,7 +353,7 @@ export async function DELETE(request: Request) {
     if (storedSellerSkus.length > 0) {
       await db.batch([
         db.delete(productCosts).where(and(
-          eq(productCosts.storeId, SHARED_PRODUCT_SCOPE_ID),
+          eq(productCosts.storeId, store.id),
           inArray(productCosts.sellerSku, storedSellerSkus),
         )),
         markerQuery,
@@ -348,7 +371,7 @@ export async function DELETE(request: Request) {
 export async function PATCH(request: Request) {
   try {
     const body = await request.json() as RestorePayload;
-    requestedStorefront(request);
+    const store = requestedStorefront(request);
     const sellerSku = stringField(body.sellerSku, 120);
     const sellerSkuKey = normalizeProductSku(sellerSku);
     const nmId = Math.trunc(numericField(body.nmId, Number.MAX_SAFE_INTEGER));
@@ -359,9 +382,9 @@ export async function PATCH(request: Request) {
     if (nmId) predicates.push(eq(productCostDeletions.nmId, nmId));
     const identityPredicate = predicates.length === 1 ? predicates[0] : or(...predicates);
     const db = getDb();
-    await ensureSharedProductRegister(db);
+    await separateSecondaryProductRegister(db, store.id);
     const restored = await db.delete(productCostDeletions)
-      .where(and(eq(productCostDeletions.storeId, SHARED_PRODUCT_SCOPE_ID), identityPredicate))
+      .where(and(eq(productCostDeletions.storeId, store.id), identityPredicate))
       .returning({ identityKey: productCostDeletions.identityKey });
     return json({ restored: true, restoredMarkers: restored.length });
   } catch (error) {

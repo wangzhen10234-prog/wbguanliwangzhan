@@ -420,5 +420,5 @@ td small { margin-top:3px; color:#b0abb5; font-size:7px; }
 .finance-trace-period-summary button{min-height:28px;padding:0 10px;color:#6547c7;border:1px solid #d8cdf7;border-radius:7px;background:#f5f1ff;font-size:7px;font-weight:800;cursor:pointer;white-space:nowrap}
 @media(max-width:760px){.finance-trace-period-summary{align-items:flex-start;flex-direction:column}.finance-trace-period-summary button{width:100%}}
 
-.pricing-legend .shared-product-register-note{padding:5px 8px;color:#6044c7;border:1px solid #dcd2fb;border-radius:7px;background:#f6f3ff;font-weight:800}
-.pricing-legend .shared-product-register-note i{display:inline-grid;width:16px;height:16px;place-items:center;margin-right:5px;color:#fff;border:0;border-radius:5px;background:#7354df;font-size:10px;font-style:normal}
+.pricing-legend .independent-product-register-note{padding:5px 8px;color:#247b60;border:1px solid #cce8dd;border-radius:7px;background:#f1faf6;font-weight:800}
+.pricing-legend .independent-product-register-note i{display:inline-grid;width:16px;height:16px;place-items:center;margin-right:5px;color:#fff;border:0;border-radius:5px;background:#2b9a74;font-size:8px;font-style:normal}
