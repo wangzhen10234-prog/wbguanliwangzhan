@@ -2,6 +2,7 @@
 
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { AppSidebar } from "../_components/app-sidebar";
+import { calculateCurrentSellingCost, type CurrentSellingCostStatus } from "../_lib/current-selling-cost";
 import { findCurrentSellingPrice, type SellingPriceProduct } from "../_lib/current-selling-price";
 import { normalizeProductSku } from "../_lib/product-cost-aliases";
 import { matchesProductDeletion, type ProductDeletionMarker } from "../_lib/product-deletions";
@@ -206,6 +207,13 @@ function displayCurrentPrice(price: ReturnType<typeof findCurrentSellingPrice>) 
   if (!price) return "—";
   const minimum = display(price.min);
   return Math.abs(price.max - price.min) < 0.005 ? minimum : `${minimum}–${display(price.max)}`;
+}
+
+function currentCostStatusLabel(status: CurrentSellingCostStatus) {
+  if (status === "profit") return "当前售价高于总成本";
+  if (status === "loss") return "当前售价低于总成本";
+  if (status === "mixed") return "不同规格有盈有亏";
+  return "当前售价与总成本持平";
 }
 
 function NumberCell({ value, onChange, label, step = "0.01", suffix, blankZero = false }: { value: number; onChange: (value: number) => void; label: string; step?: string; suffix?: string; blankZero?: boolean }) {
@@ -655,14 +663,14 @@ export default function ProductDetailsPage() {
                 <col className="col-h" /><col className="col-i" /><col className="col-j" /><col className="col-k" /><col className="col-l" /><col className="col-m" /><col className="col-n" />
                 <col className="col-o" /><col className="col-p" /><col className="col-q" /><col className="col-r" /><col className="col-s" /><col className="col-t" /><col className="col-u" />
                 <col className="col-v" /><col className="col-w" /><col className="col-x" /><col className="col-y" /><col className="col-z" /><col className="col-aa" /><col className="col-ab" /><col className="col-ac" />
-                <col className="col-ad" /><col className="col-ae" />
+                <col className="col-ad" /><col className="col-ae" /><col className="col-af" />
               </colgroup>
               <thead>
-                <tr className="pricing-group-row"><th colSpan={11}><span>01</span>商品资料</th><th colSpan={5}><span>02</span>基础费用</th><th colSpan={6}><span>03</span>平台费用</th><th colSpan={2}><span>04</span>售后费用</th><th colSpan={6} className="result-group"><span>05</span>价格与利润</th><th className="action-group"><span>06</span>操作</th></tr>
+                <tr className="pricing-group-row"><th colSpan={11}><span>01</span>商品资料</th><th colSpan={5}><span>02</span>基础费用</th><th colSpan={6}><span>03</span>平台费用</th><th colSpan={2}><span>04</span>售后费用</th><th colSpan={7} className="result-group"><span>05</span>价格与利润</th><th className="action-group"><span>06</span>操作</th></tr>
                 <tr className="pricing-heading-row">
                   <th><label className="batch-check-all"><input type="checkbox" checked={allFilteredSelected} onChange={toggleFilteredRows} aria-label={allFilteredSelected ? "取消选择当前筛选结果" : "选择当前筛选结果"} /><span>主推分类</span></label></th><th>卖家商品编号</th><th>SKU</th><th>上线状态</th><th>商品图片</th><th>图片状态</th><th>规格</th><th>长<br /><small>cm</small></th><th>宽<br /><small>cm</small></th><th>高<br /><small>cm</small></th><th>重量<br /><small>g</small></th>
                   <th>产品成本<br /><small>₽</small></th><th>汇率</th><th>产品成本<br /><small>¥</small></th><th>操作费<br /><small>¥</small></th><th>尾程物流费<br /><small>¥ · 自动</small></th><th>平台佣金率</th><th>平台佣金<br /><small>¥ · 自动</small></th><th>广告投流率</th><th>广告费用<br /><small>¥ · 自动</small></th><th>活动折扣率</th><th>折扣费用<br /><small>¥ · 自动</small></th><th>退损率</th><th>退损费<br /><small>¥ · 自动</small></th>
-                  <th>总成本<br /><small>¥</small></th><th>参考售价<br /><small>¥</small></th><th className="final-price-heading">最终售价<br /><small>¥ · 反推</small></th><th className="current-selling-price-heading">当前在售价<br /><small>WB API · 当前折扣价</small></th><th>毛利<br /><small>¥</small></th><th>目标毛利率</th><th className="delete-action-heading">删除</th>
+                  <th>总成本<br /><small>¥</small></th><th>参考售价<br /><small>¥</small></th><th className="final-price-heading">最终售价<br /><small>¥ · 反推</small></th><th className="current-selling-price-heading">当前在售价<br /><small>WB API · 当前折扣价</small></th><th className="current-selling-cost-heading">当前在售总成本<br /><small>¥ · 按当前售价计算</small></th><th>毛利<br /><small>¥</small></th><th>目标毛利率</th><th className="delete-action-heading">删除</th>
                 </tr>
               </thead>
               <tbody>
@@ -678,6 +686,7 @@ export default function ProductDetailsPage() {
                     { nmId: product?.nmId ?? cost.nmId, sellerSku: product?.sku ?? cost.sellerSku },
                     cost.exchangeRate,
                   );
+                  const currentSellingCost = calculateCurrentSellingCost(currentSellingPrice, cost);
                   return (
                     <Fragment key={key}>
                       <tr className={`pricing-data-row ${dirty.has(key) ? "is-dirty" : ""} ${selected.has(key) ? "is-selected" : ""} ${isDraft ? "is-new" : ""}`}>
@@ -709,15 +718,16 @@ export default function ProductDetailsPage() {
                         <td className="formula-cell reference-price"><span className="result-value">{display(value.referencePriceCny, 0)}</span></td>
                         <td className={`formula-cell actual-price ${invalid ? "formula-error" : ""}`}><span className="final-price-value"><small>¥</small>{display(value.actualSalePriceCny)}</span></td>
                         <td className="formula-cell current-selling-price"><span className={currentSellingPrice ? "current-selling-price-value" : "current-selling-price-missing"}>{currentSellingPrice && <small>{currencySymbol(currentSellingPrice.currency)}</small>}{displayCurrentPrice(currentSellingPrice)}</span><small className="current-selling-price-source">{currentSellingPrice ? currentSellingPrice.convertedToCny ? "WB API · ₽ 已按本行汇率换算" : currentSellingPrice.priceCount > 1 ? `${currentSellingPrice.priceCount} 档规格价 · WB API` : priceData?.stale ? "上次成功同步价" : "WB API 折扣后价格" : priceError ? "价格接口暂不可用" : product ? "WB 暂未返回售价" : "未匹配 WB 商品"}</small></td>
+                        <td className={`formula-cell current-selling-cost ${currentSellingCost?.status ?? "missing"}`}><span className="current-selling-cost-value">{currentSellingCost ? `¥${Math.abs(currentSellingCost.max - currentSellingCost.min) < 0.005 ? display(currentSellingCost.min) : `${display(currentSellingCost.min)}–${display(currentSellingCost.max)}`}` : "—"}</span><small>{currentSellingCost ? currentCostStatusLabel(currentSellingCost.status) : currentSellingPrice ? currentSellingPrice.currency === "CNY" ? "成本资料待补全" : "售价币种暂不能换算" : "等待当前售价"}</small></td>
                         <td className="formula-cell gross-profit"><span className="result-value">{display(value.grossProfitCny)}</span></td>
                         <td><NumberCell label={`${label} 毛利率`} suffix="%" value={cost.targetMarginRate} onChange={(next) => updateCost(key, "targetMarginRate", next)} /></td>
                         <td className="delete-action-cell">{selected.has(key) && <button type="button" disabled={deleting.has(key)} onClick={() => deleteRow(key, product, cost)}>{deleting.has(key) ? "删除中…" : "删除本行"}</button>}</td>
                       </tr>
-                      <tr className="inline-add-row"><td colSpan={31}><button aria-label={`在 ${label} 后添加新产品`} onClick={() => addRowAfter(key)}><span>＋</span>在此处插入新产品</button></td></tr>
+                      <tr className="inline-add-row"><td colSpan={32}><button aria-label={`在 ${label} 后添加新产品`} onClick={() => addRowAfter(key)}><span>＋</span>在此处插入新产品</button></td></tr>
                     </Fragment>
                   );
                 })}
-                {!loading && filteredRows.length === 0 && <tr className="sheet-empty-row"><td colSpan={31}>{query ? "没有找到符合条件的商品" : "还没有产品记录"}</td></tr>}
+                {!loading && filteredRows.length === 0 && <tr className="sheet-empty-row"><td colSpan={32}>{query ? "没有找到符合条件的商品" : "还没有产品记录"}</td></tr>}
               </tbody>
             </table>
           </div>
