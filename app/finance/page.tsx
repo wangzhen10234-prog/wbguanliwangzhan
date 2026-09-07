@@ -92,10 +92,6 @@ function compact(value: string, start = 10, end = 7) {
   if (!value || value.length <= start + end + 1) return value;
   return `${value.slice(0, start)}…${value.slice(-end)}`;
 }
-function timestamp(value?: string | null) {
-  if (!value) return "等待首次实时同步";
-  return new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(value));
-}
 function detailTimestamp(value?: string | null) {
   if (!value) return "WB 未返回";
   if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return `${value}（WB 日期）`;
@@ -196,6 +192,11 @@ export default function FinancePage() {
   const metrics = data?.metrics;
   const balance = data?.accountBalance;
   const settlement = data?.settlement;
+  const latestBillDate = (data?.financeMovements ?? []).reduce((latest, movement) => {
+    const date = movement.date;
+    return /^\d{4}-\d{2}-\d{2}$/.test(date) && date > latest ? date : latest;
+  }, "");
+  const billDateLabel = !settlement?.available ? "账单暂不可用" : latestBillDate || "本期暂无账单";
   const movementSummary = data?.financeMovementSummary;
   const settlementCurrency = settlement?.currency || balance?.currency || "CNY";
   const financeReady = Boolean(balance?.available && settlement?.available);
@@ -210,14 +211,14 @@ export default function FinancePage() {
         <div className={`notice ${error ? "error" : financeReady ? "connected" : ""}`}><div className="notice-icon">{loading ? "↻" : error ? "!" : financeReady ? "✓" : "!"}</div><div><strong>{loading ? "正在读取 WB 余额与正式财务明细" : error ? "财务数据同步未完成" : financeReady ? "真实余额与财务结算明细已更新" : "部分财务数据暂时不可用"}</strong><p>{error || `${from} 至 ${today}；余额取自 WB 余额接口，资金明细取自 WB 正式财务结算报告。`}</p></div></div>
         <section className="finance-stat-grid">
           <article className="featured"><span>本期已结算净额</span><strong>{settlement?.available ? money(movementSummary?.netChange ?? metrics?.payoutAmount, settlementCurrency) : "—"}</strong><small>{settlement?.available ? `${movementSummary?.entries ?? 0} 条 WB 正式结算明细` : "未读取到正式财务报告，不使用预估值代替"}</small></article>
-          <button type="button" className={`finance-balance-card ${showMovements ? "active" : ""}`} aria-expanded={showMovements} onClick={() => setShowMovements((value) => !value)}><span>账户当前余额</span><strong>{money(balance?.current, balance?.currency || "CNY")}</strong><small>WB 余额接口 · 更新于 {timestamp(balance?.fetchedAt)}</small><em>{showMovements ? "收起资金明细 ↑" : "点击查看逐笔资金变动 →"}</em></button>
+          <button type="button" className={`finance-balance-card ${showMovements ? "active" : ""}`} aria-expanded={showMovements} onClick={() => setShowMovements((value) => !value)}><span>账户当前余额</span><strong>{money(balance?.current, balance?.currency || "CNY")}</strong><small>余额读取时间：{detailTimestamp(balance?.fetchedAt)}</small><small>本期账单最新日期：{billDateLabel}</small><small>账单读取时间：{detailTimestamp(settlement?.fetchedAt)}</small><em>{showMovements ? "收起资金明细 ↑" : "点击查看逐笔资金变动 →"}</em></button>
           <article><span>可提现余额</span><strong>{money(balance?.forWithdraw, balance?.currency || "CNY")}</strong><small>WB 字段 for_withdraw · 当前可提取金额</small></article>
           <article><span>本期销售额</span><strong>{money(metrics?.salesAmount, "RUB")}</strong><small>{metrics?.ordersCount ?? 0} 笔有效订单 · 销售端货币</small></article>
           <article className={(metrics?.returnsCount ?? 0) > 0 ? "attention" : ""}><span>退货与取消</span><strong>{metrics?.returnsCount ?? 0}</strong><small>比例 {(metrics?.returnRate ?? 0).toFixed(1)}%</small></article>
         </section>
 
         {showMovements && <section ref={movementPanelRef} className="finance-movement-panel">
-          <div className="finance-movement-heading"><div><span>WB OFFICIAL FINANCE LEDGER</span><h2>账户资金结算明细</h2><p>每一行对应 WB 正式财务报告的一行；每笔均可查看原始类型、时间、金额组成和可追溯关联。</p></div><div className="finance-movement-source"><b>{settlement?.available ? "财务 API 已连接" : "财务 API 暂不可用"}</b><small>{settlement?.source}<br />更新于 {timestamp(settlement?.fetchedAt)}</small></div></div>
+          <div className="finance-movement-heading"><div><span>WB OFFICIAL FINANCE LEDGER</span><h2>账户资金结算明细</h2><p>每一行对应 WB 正式财务报告的一行；每笔均可查看原始类型、时间、金额组成和可追溯关联。余额与账单分别更新，最新账单日期以已返回记录为准。</p></div><div className="finance-movement-source"><b>本期账单最新日期：{billDateLabel}</b><small>{settlement?.source}<br />账单读取时间：{detailTimestamp(settlement?.fetchedAt)}</small></div></div>
           <div className="finance-movement-summary"><div><span>入账合计</span><b className="movement-credit">+{money(movementSummary?.credits ?? 0, settlementCurrency)}</b><small>{movementSummary?.creditEntries ?? 0} 条</small></div><div><span>扣款合计</span><b className="movement-debit">−{money(movementSummary?.debits ?? 0, settlementCurrency)}</b><small>{movementSummary?.debitEntries ?? 0} 条</small></div><div><span>本期净变动</span><b className={(movementSummary?.netChange ?? 0) >= 0 ? "movement-credit" : "movement-debit"}>{money(movementSummary?.netChange ?? 0, settlementCurrency)}</b><small>{movementSummary?.entries ?? 0} 条 WB 明细</small></div></div>
           <div className="finance-movement-toolbar"><label><span>⌕</span><input type="search" value={movementQuery} placeholder="搜索订单号、SKU、类型或 WB 行号" onChange={(event) => { setMovementQuery(event.target.value); setMovementPage(1); }} /></label><select value={movementFilter} onChange={(event) => { setMovementFilter(event.target.value as "all" | "credit" | "debit"); setMovementPage(1); }}><option value="all">全部资金变动</option><option value="credit">只看入账</option><option value="debit">只看扣款</option></select><button type="button" onClick={() => setShowMovements(false)}>收起明细</button></div>
           <div className="finance-movement-table-wrap">
