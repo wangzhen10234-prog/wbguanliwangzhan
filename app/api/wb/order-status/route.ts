@@ -1,3 +1,4 @@
+import { env } from "cloudflare:workers";
 import {
   supplierStatusLabel,
   wbHistoryStatusLabel,
@@ -92,7 +93,7 @@ async function readCrossBorderHistory(orderId: number, token: string) {
 }
 
 export async function POST(request: Request) {
-  const token = resolveWbStore(request).token;
+  const token = (await resolveWbStore(request, env)).token;
   if (!token) return json({ error: "当前店铺的 WB API 尚未配置" }, 503);
 
   const body = await request.json().catch(() => null) as { orderId?: unknown } | null;

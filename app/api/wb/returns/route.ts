@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { readSyncSnapshot, writeSyncSnapshot } from "../../../_lib/server-persistence";
 import { classifyReturnTracking, returnStatusLabel } from "../../../_lib/return-tracking";
 import { resolveWbStore, scopedStoreKey } from "../../../_lib/server-storefront";
 
@@ -163,9 +164,7 @@ async function wbRequest<T>(url: string, token: string) {
 
 async function readSnapshot(cacheKey: string) {
   try {
-    const row = await env.DB.prepare("SELECT payload, sync_slot AS syncSlot FROM wb_sync_snapshots WHERE cache_key = ?")
-      .bind(cacheKey)
-      .first<{ payload: string; syncSlot: string }>();
+    const row = await readSyncSnapshot(cacheKey);
     return row?.payload ? { value: JSON.parse(row.payload) as ReturnsSnapshot, syncSlot: row.syncSlot || "" } : null;
   } catch {
     return null;
@@ -174,11 +173,7 @@ async function readSnapshot(cacheKey: string) {
 
 async function writeSnapshot(cacheKey: string, value: ReturnsSnapshot) {
   try {
-    await env.DB.prepare(`
-      INSERT INTO wb_sync_snapshots (cache_key, payload, sync_slot, manual_bucket, updated_at)
-      VALUES (?, ?, ?, 0, CURRENT_TIMESTAMP)
-      ON CONFLICT(cache_key) DO UPDATE SET payload = excluded.payload, sync_slot = excluded.sync_slot, updated_at = CURRENT_TIMESTAMP
-    `).bind(cacheKey, JSON.stringify(value), syncSchedule().slot).run();
+    await writeSyncSnapshot(cacheKey, JSON.stringify(value), syncSchedule().slot);
   } catch {
     // The WB response remains valid even if durable snapshot persistence is temporarily unavailable.
   }
@@ -186,9 +181,7 @@ async function writeSnapshot(cacheKey: string, value: ReturnsSnapshot) {
 
 async function readReportChunk(cacheKey: string) {
   try {
-    const row = await env.DB.prepare("SELECT payload, sync_slot AS syncSlot FROM wb_sync_snapshots WHERE cache_key = ?")
-      .bind(cacheKey)
-      .first<{ payload: string; syncSlot: string }>();
+    const row = await readSyncSnapshot(cacheKey);
     return row?.payload ? { value: JSON.parse(row.payload) as ReturnReportChunkSnapshot, syncSlot: row.syncSlot || "" } : null;
   } catch {
     return null;
@@ -197,11 +190,7 @@ async function readReportChunk(cacheKey: string) {
 
 async function writeReportChunk(cacheKey: string, value: ReturnReportChunkSnapshot, syncSlot: string) {
   try {
-    await env.DB.prepare(`
-      INSERT INTO wb_sync_snapshots (cache_key, payload, sync_slot, manual_bucket, updated_at)
-      VALUES (?, ?, ?, 0, CURRENT_TIMESTAMP)
-      ON CONFLICT(cache_key) DO UPDATE SET payload = excluded.payload, sync_slot = excluded.sync_slot, updated_at = CURRENT_TIMESTAMP
-    `).bind(cacheKey, JSON.stringify(value), syncSlot).run();
+    await writeSyncSnapshot(cacheKey, JSON.stringify(value), syncSlot);
   } catch {
     // A successful WB response can still be used for this request when D1 is temporarily unavailable.
   }
@@ -379,7 +368,7 @@ async function loadReturns(token: string, storeId: string, window: { from: strin
 }
 
 export async function GET(request: Request) {
-  const store = resolveWbStore(request, env);
+  const store = await resolveWbStore(request, env);
   const token = store.token;
   if (!token) return json({ error: "当前店铺的 WB API 尚未配置" }, 503);
   const url = new URL(request.url);

@@ -8,10 +8,42 @@ async function render(pathname = "/") {
 
   return worker.fetch(
     new Request(`http://localhost${pathname}`, { headers: { accept: "text/html" } }),
+    { ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) }, AUTH_TEST_BYPASS: "true" },
+    { waitUntil() {}, passThroughOnException() {} },
+  );
+}
+
+async function requestWithoutLogin(pathname = "/sales") {
+  const workerUrl = new URL("../dist/server/index.js", import.meta.url);
+  workerUrl.searchParams.set("auth-test", `${process.pid}-${Date.now()}-${Math.random()}`);
+  const { default: worker } = await import(workerUrl.href);
+  return worker.fetch(
+    new Request(`https://wbwork.duoduolink.com${pathname}`, { headers: { accept: "text/html" } }),
     { ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) } },
     { waitUntil() {}, passThroughOnException() {} },
   );
 }
+
+test("protects business pages and APIs before login", async () => {
+  const page = await requestWithoutLogin("/sales?from=2026-09-01");
+  assert.equal(page.status, 302);
+  assert.match(page.headers.get("location") ?? "", /^https:\/\/wbwork\.duoduolink\.com\/login\?next=/);
+  assert.match(page.headers.get("set-cookie") ?? "", /__Host-wb_session=.*Max-Age=0/);
+
+  const api = await requestWithoutLogin("/api/product-costs");
+  assert.equal(api.status, 401);
+  assert.deepEqual(await api.json(), { error: "请先登录" });
+});
+
+test("keeps the login page public and security-hardened", async () => {
+  const response = await requestWithoutLogin("/login");
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("x-frame-options"), "DENY");
+  assert.equal(response.headers.get("x-content-type-options"), "nosniff");
+  const html = await response.text();
+  assert.match(html, /登录经营后台/);
+  assert.match(html, /安全登录/);
+});
 
 test("server-renders the WB Insight dashboard", async () => {
   const response = await render();
@@ -40,6 +72,9 @@ test("server-renders the WB Insight dashboard", async () => {
   assert.match(html, /库存监控/);
   assert.match(html, /href="\/advertising"[^>]*>.*推广/s);
   assert.match(html, /平台活动评估/);
+  assert.match(html, /href="\/settings"[^>]*>.*系统设置/s);
+  assert.match(html, /账号、API 与登录设备/);
+  assert.match(html, /添加新店铺/);
   assert.match(html, /08:00 · 14:00 · 19:00 · 23:00/);
   assert.match(html, /class="sidebar-scroll-area"/);
   assert.doesNotMatch(html, /class="brand"/);
@@ -146,8 +181,21 @@ test("server-renders editable product matching controls", async () => {
   assert.match(html, /匹配 WB 产品/);
   assert.match(html, /白色为可编辑数据/);
   assert.match(html, /按卖家商品编号自动对应/);
+  assert.match(html, /产品分类/);
+  assert.match(html, /按产品分类筛选/);
+  assert.match(html, /全部产品分类/);
+  assert.match(html, /表格编辑/);
+  assert.match(html, /卡片展示/);
   assert.match(html, /操作/);
   assert.match(html, /删除/);
+  assert.doesNotMatch(html, /主推分类/);
+
+  const source = await import("node:fs/promises").then(({ readFile }) => readFile(new URL("../app/details/page.tsx", import.meta.url), "utf8"));
+  assert.match(source, /卡片完整视图/);
+  assert.match(source, /每张卡片直接展示全部产品资料、费用、售价和利润/);
+  for (const label of ["商品资料", "基础费用", "平台与售后费用", "价格与利润", "当前在售价", "当前在售总成本", "目标毛利率", "备注", "更新时间"]) {
+    assert.match(source, new RegExp(label));
+  }
 });
 
 test("server-renders the completed-today sales label", async () => {
@@ -193,4 +241,194 @@ test("server-renders the promotion evaluation workbench", async () => {
   assert.match(html, /点击查看预计亏损商品/);
   assert.match(html, /排名\/流量加成/);
   assert.doesNotMatch(html, /codex-preview|SkeletonPreview|Your site is taking shape/);
+});
+
+test("server-renders system settings with credential and device panels", async () => {
+  const response = await render("/settings");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /系统设置/);
+  assert.match(html, /账号与密码/);
+  assert.match(html, /登录设备/);
+  assert.match(html, /店铺与 API/);
+  const source = await import("node:fs/promises").then(({ readFile }) => readFile(new URL("../app/settings/page.tsx", import.meta.url), "utf8"));
+  assert.match(source, /添加新店铺/);
+  assert.match(source, /API 仅保存在服务器，并经过加密/);
+  assert.match(source, /剩余 30 天以内显示橙色提醒/);
+  assert.match(source, /验证并保存/);
+});
+
+function fakeKv(initial = {}) {
+  const values = new Map(Object.entries(initial));
+  return {
+    async get(key, type) {
+      const value = values.get(key);
+      if (value === undefined) return null;
+      return type === "json" ? JSON.parse(value) : value;
+    },
+    async put(key, value) { values.set(key, value); },
+    async delete(key) { values.delete(key); },
+    async list({ prefix = "", limit = 100 } = {}) {
+      return { keys: [...values.keys()].filter((key) => key.startsWith(prefix)).slice(0, limit).map((name) => ({ name })), list_complete: true };
+    },
+  };
+}
+
+async function authConfig(username, password) {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const material = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
+  const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt, iterations: 100_000 }, material, 256);
+  return {
+    username,
+    passwordSalt: Buffer.from(salt).toString("base64url"),
+    passwordHash: Buffer.from(bits).toString("base64url"),
+    passwordIterations: 100_000,
+    version: 1,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+test("records successful login device, IP and approximate region behind authentication", async () => {
+  const workerUrl = new URL("../dist/server/index.js", import.meta.url);
+  workerUrl.searchParams.set("login-history-test", `${process.pid}-${Date.now()}`);
+  const { default: worker } = await import(workerUrl.href);
+  const username = "history-user";
+  const password = "A-secure-test-password-2026";
+  const kv = fakeKv({ "site-auth:config": JSON.stringify(await authConfig(username, password)) });
+  const env = {
+    AUTH_KV: kv,
+    AUTH_SESSION_SECRET: "test-session-secret-that-is-long-enough",
+    ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) },
+  };
+  const protectedHistory = await worker.fetch(new Request("https://wbwork.duoduolink.com/api/auth/login-history"), env, { waitUntil() {}, passThroughOnException() {} });
+  assert.equal(protectedHistory.status, 401);
+  assert.deepEqual(await protectedHistory.json(), { error: "登录已失效，请重新登录" });
+  const login = new Request("https://wbwork.duoduolink.com/api/auth/login", {
+    method: "POST",
+    headers: {
+      Origin: "https://wbwork.duoduolink.com",
+      "Content-Type": "application/json",
+      "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/140.0 Safari/537.36",
+      "CF-Connecting-IP": "203.0.113.8",
+      "CF-IPCountry": "CN",
+    },
+    body: JSON.stringify({ username, password }),
+  });
+  Object.defineProperty(login, "cf", { value: { country: "CN", region: "Zhejiang", regionCode: "ZJ", city: "Hangzhou", timezone: "Asia/Shanghai", colo: "HKG" } });
+  const loginResponse = await worker.fetch(login, env, { waitUntil() {}, passThroughOnException() {} });
+  assert.equal(loginResponse.status, 200);
+  const cookie = (loginResponse.headers.get("set-cookie") || "").split(";")[0];
+  assert.match(cookie, /^__Host-wb_session=/);
+
+  const historyResponse = await worker.fetch(new Request("https://wbwork.duoduolink.com/api/auth/login-history", { headers: { Cookie: cookie } }), env, { waitUntil() {}, passThroughOnException() {} });
+  assert.equal(historyResponse.status, 200);
+  const history = await historyResponse.json();
+  assert.equal(history.records.length, 1);
+  assert.equal(history.records[0].ip, "203.0.113.8");
+  assert.equal(history.records[0].device, "电脑");
+  assert.equal(history.records[0].browser, "Chrome");
+  assert.equal(history.records[0].operatingSystem, "macOS");
+  assert.match(history.records[0].location, /中国.*浙江省.*Hangzhou/);
+  assert.equal(history.records[0].current, true);
+});
+
+function testJwt({ expiresInSeconds = 120 * 24 * 60 * 60 } = {}) {
+  const encode = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  const now = Math.floor(Date.now() / 1000);
+  const permissionMask = [1, 3, 4, 6, 7, 11, 13].reduce((mask, position) => mask + 2 ** (position - 1), 0);
+  return `${encode({ alg: "ES256", typ: "JWT" })}.${encode({ acc: 3, exp: now + expiresInSeconds, iat: now, s: permissionMask, sid: "managed-store-seller" })}.test-signature-that-is-not-returned-to-the-browser`;
+}
+
+test("manages store APIs behind login without returning or storing plaintext tokens", async () => {
+  const workerUrl = new URL("../dist/server/index.js", import.meta.url);
+  workerUrl.searchParams.set("store-management-test", `${process.pid}-${Date.now()}`);
+  const { default: worker } = await import(workerUrl.href);
+  const username = "store-admin";
+  const password = "Another-secure-test-password-2026";
+  const kv = fakeKv({ "site-auth:config": JSON.stringify(await authConfig(username, password)) });
+  const env = {
+    AUTH_KV: kv,
+    AUTH_SESSION_SECRET: "store-management-session-secret-for-tests",
+    ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) },
+  };
+  const context = { waitUntil() {}, passThroughOnException() {} };
+
+  const anonymous = await worker.fetch(new Request("https://wbwork.duoduolink.com/api/settings/stores"), env, context);
+  assert.equal(anonymous.status, 401);
+
+  const loginResponse = await worker.fetch(new Request("https://wbwork.duoduolink.com/api/auth/login", {
+    method: "POST",
+    headers: { Origin: "https://wbwork.duoduolink.com", "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password }),
+  }), env, context);
+  assert.equal(loginResponse.status, 200);
+  const cookie = (loginResponse.headers.get("set-cookie") || "").split(";")[0];
+  const rawToken = testJwt();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    assert.equal(String(input), "https://common-api.wildberries.ru/ping");
+    return new Response(JSON.stringify({ Status: "OK" }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+
+  let createResponse;
+  try {
+    createResponse = await worker.fetch(new Request("https://wbwork.duoduolink.com/api/settings/stores", {
+      method: "POST",
+      headers: { Origin: "https://wbwork.duoduolink.com", Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "save", id: "", name: "王振3号店", apiToken: rawToken }),
+    }), env, context);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(createResponse.status, 200);
+  const created = await createResponse.json();
+  const createdStore = created.stores.find((store) => store.id === created.storeId);
+  assert.equal(createdStore.name, "王振3号店");
+  assert.equal(createdStore.connected, true);
+  assert.equal(createdStore.status, "active");
+  assert.ok(createdStore.permissions.includes("价格与折扣"));
+  assert.doesNotMatch(JSON.stringify(created), new RegExp(rawToken.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+
+  const stored = await kv.get(`site-config:store:${created.storeId}`, "json");
+  assert.ok(stored.apiTokenCipher);
+  assert.ok(stored.apiTokenIv);
+  assert.equal(stored.apiToken, undefined);
+  assert.doesNotMatch(JSON.stringify(stored), new RegExp(rawToken.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+
+  const clearResponse = await worker.fetch(new Request("https://wbwork.duoduolink.com/api/settings/stores", {
+    method: "POST",
+    headers: { Origin: "https://wbwork.duoduolink.com", Cookie: cookie, "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "clear-token", id: created.storeId }),
+  }), env, context);
+  assert.equal(clearResponse.status, 200);
+  assert.equal((await clearResponse.json()).stores.find((store) => store.id === created.storeId).connected, false);
+
+  const renameResponse = await worker.fetch(new Request("https://wbwork.duoduolink.com/api/settings/stores", {
+    method: "POST",
+    headers: { Origin: "https://wbwork.duoduolink.com", Cookie: cookie, "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "save", id: created.storeId, name: "王振3号店（已停用）", apiToken: "" }),
+  }), env, context);
+  assert.equal(renameResponse.status, 200);
+  assert.equal((await renameResponse.json()).stores.find((store) => store.id === created.storeId).connected, false);
+
+  const deleteResponse = await worker.fetch(new Request("https://wbwork.duoduolink.com/api/settings/stores", {
+    method: "POST",
+    headers: { Origin: "https://wbwork.duoduolink.com", Cookie: cookie, "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "delete", id: created.storeId }),
+  }), env, context);
+  assert.equal(deleteResponse.status, 200);
+  assert.equal((await deleteResponse.json()).stores.some((store) => store.id === created.storeId), false);
+});
+
+test("renders clickable inventory summary filters linked to the stock detail table", async () => {
+  const response = await render("/stock");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /aria-label="库存商品快捷筛选"/);
+  assert.match(html, /<button[^>]*aria-controls="stock-detail-table"[^>]*>.*可售库存总量/s);
+  assert.match(html, /<button[^>]*aria-controls="stock-detail-table"[^>]*>.*有库存商品/s);
+  assert.match(html, /<button[^>]*aria-controls="stock-detail-table"[^>]*>.*即将缺货/s);
+  assert.match(html, /<button[^>]*aria-controls="stock-detail-table"[^>]*>.*库存偏低/s);
+  assert.match(html, /<button[^>]*aria-controls="stock-detail-table"[^>]*>.*周转较慢/s);
+  assert.match(html, /id="stock-detail-table"/);
 });

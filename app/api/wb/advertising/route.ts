@@ -1,5 +1,6 @@
 import { env } from "cloudflare:workers";
 import { averageAdvertisingPosition, campaignDailyStatistics } from "../../../_lib/advertising-statistics";
+import { readSyncSnapshot, writeSyncSnapshot } from "../../../_lib/server-persistence";
 import { resolveWbStore, scopedStoreKey } from "../../../_lib/server-storefront";
 
 type WorkerError = Error & { status?: number };
@@ -246,10 +247,8 @@ async function wbRequest<T>(url: string, token: string, init?: RequestInit) {
 
 async function readSnapshot(cacheKey: string) {
   try {
-    const row = await env.DB.prepare("SELECT payload, sync_slot AS syncSlot FROM wb_sync_snapshots WHERE cache_key = ?")
-      .bind(cacheKey)
-      .first<{ payload: string; syncSlot: string }>();
-    return row?.payload ? { value: JSON.parse(row.payload) as AdvertisingSnapshot, syncSlot: row.syncSlot || "" } : null;
+    const row = await readSyncSnapshot(cacheKey);
+    return row?.payload ? { value: JSON.parse(row.payload) as AdvertisingSnapshot, syncSlot: row.syncSlot } : null;
   } catch {
     return null;
   }
@@ -257,14 +256,7 @@ async function readSnapshot(cacheKey: string) {
 
 async function writeSnapshot(cacheKey: string, value: AdvertisingSnapshot) {
   try {
-    await env.DB.prepare(`
-      INSERT INTO wb_sync_snapshots (cache_key, payload, sync_slot, manual_bucket, updated_at)
-      VALUES (?, ?, ?, 0, CURRENT_TIMESTAMP)
-      ON CONFLICT(cache_key) DO UPDATE SET
-        payload = excluded.payload,
-        sync_slot = excluded.sync_slot,
-        updated_at = CURRENT_TIMESTAMP
-    `).bind(cacheKey, JSON.stringify(value), syncSchedule().slot).run();
+    await writeSyncSnapshot(cacheKey, JSON.stringify(value), syncSchedule().slot);
   } catch {
     // Fresh WB data remains valid even if the durable cache write fails.
   }
@@ -499,7 +491,7 @@ async function loadAdvertising(token: string, storeId: string, window: { from: s
 }
 
 export async function GET(request: Request) {
-  const store = resolveWbStore(request, env);
+  const store = await resolveWbStore(request, env);
   const token = store.token;
   if (!token) return json({ error: "当前店铺的 WB API 尚未配置" }, 503);
   const url = new URL(request.url);

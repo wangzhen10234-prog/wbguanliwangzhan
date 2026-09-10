@@ -11,8 +11,8 @@ export const DEFAULT_STOREFRONT_ID = "primary";
 export const STOREFRONT_STORAGE_KEY = "wb-insight-active-store";
 export const STOREFRONT_COOKIE_KEY = "wb-insight-active-store";
 
-// Public store metadata only. API credentials always remain in server-side
-// environment variables and must never be added to this client-visible list.
+// Public fallback metadata only. API credentials remain in server-side encrypted
+// settings/environment variables and must never be added to this client-visible list.
 export const STOREFRONTS: Storefront[] = [
   {
     id: DEFAULT_STOREFRONT_ID,

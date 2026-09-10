@@ -109,7 +109,7 @@ const BATCH_FIELDS: BatchFieldOption[] = [
   { key: "activityDiscountRate", label: "% 活动折扣率", kind: "percent" },
   { key: "returnLossRate", label: "% 退损率", kind: "percent" },
   { key: "targetMarginRate", label: "% 目标毛利率", kind: "percent" },
-  { key: "category", label: "主推分类", kind: "text" },
+  { key: "category", label: "产品分类", kind: "text" },
   { key: "internalSku", label: "内部 SKU", kind: "text" },
   { key: "specification", label: "规格", kind: "text" },
   { key: "imageUrl", label: "商品图片链接", kind: "url" },
@@ -216,6 +216,71 @@ function currentCostStatusLabel(status: CurrentSellingCostStatus) {
   return "当前售价与总成本持平";
 }
 
+function productCategory(row: SheetRow) {
+  return row.cost.category.trim() || row.product?.category?.trim() || "未分类";
+}
+
+function ProductCardView({ rows, loading, priceData, priceError }: { rows: SheetRow[]; loading: boolean; priceData: PriceData | null; priceError: string }) {
+  if (!loading && rows.length === 0) return <div className="product-card-empty"><b>没有找到符合条件的商品</b><span>请更换产品分类或清除搜索条件。</span></div>;
+
+  return <div className="product-card-grid" aria-label="产品详情卡片">
+    {rows.map(({ key, product, cost }) => {
+      const value = formulas(cost);
+      const imageUrl = cost.imageUrl || product?.image;
+      const imageLabel = cost.imageUrl ? "自定义图片" : product?.image ? "WB 主图" : "待补图片";
+      const currentSellingPrice = findCurrentSellingPrice(
+        priceData?.products ?? [],
+        { nmId: product?.nmId ?? cost.nmId, sellerSku: product?.sku ?? cost.sellerSku },
+        cost.exchangeRate,
+      );
+      const currentSellingCost = calculateCurrentSellingCost(currentSellingPrice, cost);
+      const currentPriceSource = currentSellingPrice
+        ? currentSellingPrice.convertedToCny
+          ? "WB API · ₽ 已按本行汇率换算"
+          : currentSellingPrice.priceCount > 1
+            ? `${currentSellingPrice.priceCount} 档规格价 · WB API`
+            : priceData?.stale ? "上次成功同步价" : "WB API 折扣后价格"
+        : priceError ? "价格接口暂不可用" : product ? "WB 暂未返回售价" : "未匹配 WB 商品";
+      const currentCostValue = currentSellingCost
+        ? `¥${Math.abs(currentSellingCost.max - currentSellingCost.min) < 0.005 ? display(currentSellingCost.min) : `${display(currentSellingCost.min)}–${display(currentSellingCost.max)}`}`
+        : "—";
+      const currentCostCopy = currentSellingCost
+        ? currentCostStatusLabel(currentSellingCost.status)
+        : currentSellingPrice ? currentSellingPrice.currency === "CNY" ? "成本资料待补全" : "售价币种暂不能换算" : "等待当前售价";
+      return <article className={`product-detail-card ${key.startsWith("draft:") ? "draft" : ""}`} key={key}>
+        <header className="product-card-head">
+          <span className={`product-card-photo ${imageUrl ? "" : "placeholder"}`}>{imageUrl ? <>
+            {/* WB and user-provided image hosts are dynamic, so the native element intentionally avoids a fixed Next image allowlist. */}
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={imageUrl} alt={product?.name || cost.sellerSku || "商品图片"} loading="lazy" referrerPolicy="no-referrer" />
+          </> : "无图"}</span>
+          <div className="product-card-title"><div><span>{productCategory({ key, product, cost, order: 0 })}</span><em className={product ? "online" : "offline"}>{product ? "已上线" : key.startsWith("draft:") ? "待登记" : "未匹配"}</em></div><h3>{product?.name || cost.sellerSku || "未命名新产品"}</h3><p>卖家商品编号 <b>{cost.sellerSku || "待填写"}</b></p></div>
+          <span className={`product-card-image-state ${imageUrl ? "complete" : "missing"}`}>{imageLabel}</span>
+        </header>
+
+        <section className="product-card-section"><h4><span>01</span>商品资料</h4><dl className="product-card-data product-card-product-data">
+          <div><dt>产品分类</dt><dd>{productCategory({ key, product, cost, order: 0 })}</dd></div><div><dt>内部 SKU</dt><dd>{cost.internalSku || "—"}</dd></div><div><dt>WB 商品 ID</dt><dd>{product?.nmId ?? cost.nmId ?? "—"}</dd></div><div><dt>规格</dt><dd>{cost.specification || "—"}</dd></div>
+          <div><dt>长 × 宽 × 高</dt><dd>{cost.lengthCm || 0} × {cost.widthCm || 0} × {cost.heightCm || 0} cm</dd></div><div><dt>重量</dt><dd>{cost.weightG || 0} g</dd></div><div><dt>图片状态</dt><dd>{imageLabel}</dd></div><div><dt>表内顺序</dt><dd>{cost.sortOrder || "自动"}</dd></div>
+        </dl></section>
+
+        <section className="product-card-section"><h4><span>02</span>基础费用</h4><dl className="product-card-data">
+          <div><dt>产品成本（₽）</dt><dd>₽{display(cost.productCostRub)}</dd></div><div><dt>汇率</dt><dd>{cost.productCostRub > 0 ? display(cost.exchangeRate) : "不适用"}</dd></div><div><dt>产品成本（¥）</dt><dd>¥{display(value.productCostCny)}</dd></div><div><dt>操作费</dt><dd>¥{display(cost.handlingFeeCny)}</dd></div><div><dt>尾程物流费</dt><dd>¥{display(value.lastMileFeeCny)}</dd></div>
+        </dl></section>
+
+        <section className="product-card-section"><h4><span>03</span>平台与售后费用</h4><dl className="product-card-data rate-data">
+          <div><dt>平台佣金</dt><dd>{display(cost.commissionRate)}% <small>¥{display(value.commissionFeeCny)}</small></dd></div><div><dt>广告投流</dt><dd>{display(cost.adRate)}% <small>¥{display(value.adFeeCny)}</small></dd></div><div><dt>活动折扣</dt><dd>{display(cost.activityDiscountRate)}% <small>¥{display(value.discountFeeCny)}</small></dd></div><div><dt>退损</dt><dd>{display(cost.returnLossRate)}% <small>¥{display(value.returnLossFeeCny)}</small></dd></div>
+        </dl></section>
+
+        <section className="product-card-section product-card-pricing"><h4><span>04</span>价格与利润</h4><dl className="product-card-price-grid">
+          <div><dt>总成本</dt><dd>¥{display(value.totalCostCny)}</dd></div><div><dt>参考售价</dt><dd>¥{display(value.referencePriceCny, 0)}</dd></div><div className="recommended"><dt>最终售价</dt><dd>¥{display(value.actualSalePriceCny)}</dd><small>按目标毛利率反推</small></div><div className="live"><dt>当前在售价</dt><dd>{currentSellingPrice ? `${currencySymbol(currentSellingPrice.currency)}${displayCurrentPrice(currentSellingPrice)}` : "—"}</dd><small>{currentPriceSource}</small></div><div className={`current-cost ${currentSellingCost?.status ?? "missing"}`}><dt>当前在售总成本</dt><dd>{currentCostValue}</dd><small>{currentCostCopy}</small></div><div className="profit"><dt>毛利 / 目标毛利率</dt><dd>¥{display(value.grossProfitCny)} <small>{display(cost.targetMarginRate)}%</small></dd></div>
+        </dl></section>
+
+        <footer className="product-card-foot"><span><b>备注</b>{cost.notes || "暂无备注"}</span><span><b>更新时间</b>{cost.updatedAt ? new Date(cost.updatedAt).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false }) : key.startsWith("draft:") ? "尚未保存" : "未记录"}</span></footer>
+      </article>;
+    })}
+  </div>;
+}
+
 function NumberCell({ value, onChange, label, step = "0.01", suffix, blankZero = false }: { value: number; onChange: (value: number) => void; label: string; step?: string; suffix?: string; blankZero?: boolean }) {
   return (
     <label className={`sheet-input-wrap ${suffix ? "with-suffix" : ""}`}>
@@ -238,6 +303,8 @@ export default function ProductDetailsPage() {
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [query, setQuery] = useState("");
+  const [categoryFilter, setCategoryFilter] = useState("all");
+  const [viewMode, setViewMode] = useState<"table" | "cards">("table");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [batchField, setBatchField] = useState<BatchEditableField>("commissionRate");
   const [batchValue, setBatchValue] = useState("");
@@ -331,11 +398,17 @@ export default function ProductDetailsPage() {
     }).sort((left, right) => left.order - right.order || left.cost.sellerSku.localeCompare(right.cost.sellerSku, "zh-CN"));
   }, [costs, data?.products]);
 
+  const categories = useMemo(() => [...new Set(rows.map(productCategory))].sort((left, right) => left.localeCompare(right, "zh-CN")), [rows]);
+
   const filteredRows = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase();
-    if (!needle) return rows;
-    return rows.filter(({ cost, product }) => [cost.sellerSku, cost.internalSku, cost.category, cost.specification, product?.name ?? "", String(product?.nmId ?? "")].some((value) => value.toLocaleLowerCase().includes(needle)));
-  }, [query, rows]);
+    return rows.filter((row) => {
+      if (categoryFilter !== "all" && productCategory(row) !== categoryFilter) return false;
+      if (!needle) return true;
+      const { cost, product } = row;
+      return [cost.sellerSku, cost.internalSku, cost.category, cost.specification, product?.name ?? "", String(product?.nmId ?? "")].some((value) => value.toLocaleLowerCase().includes(needle));
+    });
+  }, [categoryFilter, query, rows]);
 
   const batchOption = BATCH_FIELDS.find((option) => option.key === batchField) ?? BATCH_FIELDS[0];
   const allFilteredSelected = filteredRows.length > 0 && filteredRows.every((row) => selected.has(row.key));
@@ -471,6 +544,7 @@ export default function ProductDetailsPage() {
     setCosts((current) => ({ ...current, [key]: emptyCost(null, sortOrder) }));
     setDirty((current) => new Set(current).add(key));
     setQuery("");
+    setCategoryFilter("all");
     setError("");
     setMessage("已添加空白产品行，请先填写卖家商品编号");
   }
@@ -630,7 +704,10 @@ export default function ProductDetailsPage() {
       <section className="workspace details-workspace sheet-workspace">
         <header className="topbar product-topbar">
           <div><p className="eyebrow">PRODUCT REGISTER · 原表公式复刻</p><h1>产品详情</h1></div>
-          <div className="sheet-save-state"><span className={error ? "error" : dirty.size ? "dirty" : "saved"} />{error || message || (loading ? "正在读取产品表" : dirty.size ? `${dirty.size} 行等待保存` : "所有修改已保存")}</div>
+          <div className="product-topbar-actions">
+            <div className="product-view-switch" role="group" aria-label="产品详情展示方式"><button type="button" className={viewMode === "table" ? "active" : ""} aria-pressed={viewMode === "table"} onClick={() => setViewMode("table")}><span aria-hidden="true">▤</span>表格编辑</button><button type="button" className={viewMode === "cards" ? "active" : ""} aria-pressed={viewMode === "cards"} onClick={() => setViewMode("cards")}><span aria-hidden="true">▦</span>卡片展示</button></div>
+            <div className="sheet-save-state"><span className={error ? "error" : dirty.size ? "dirty" : "saved"} />{error || message || (loading ? "正在读取产品表" : dirty.size ? `${dirty.size} 行等待保存` : "所有修改已保存")}</div>
+          </div>
         </header>
 
         <section className="pricing-panel">
@@ -640,14 +717,16 @@ export default function ProductDetailsPage() {
           </div>
 
           <div className="pricing-commandbar">
-            <div className="pricing-legend"><span><i className="editable" />白色为可编辑数据</span><span><i className="calculated" />淡紫色为自动计算</span><span><i className="price" />最终售价实时反推</span><span className="independent-product-register-note"><i>店</i>当前店铺独立产品表</span></div>
+            {viewMode === "table" ? <div className="pricing-legend"><span><i className="editable" />白色为可编辑数据</span><span><i className="calculated" />淡紫色为自动计算</span><span><i className="price" />最终售价实时反推</span><span className="independent-product-register-note"><i>店</i>当前店铺独立产品表</span></div> : <div className="product-card-view-copy"><b>卡片完整视图</b><span>每张卡片直接展示全部产品资料、费用、售价和利润。</span></div>}
             <div className="sheet-actions">
               <button className="product-match-button" type="button" disabled={loading || saving} onClick={refresh}>{matching ? "匹配中…" : "↻ 匹配 WB 产品"}</button>
+              <label className="product-category-filter"><span>产品分类</span><select value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)} aria-label="按产品分类筛选"><option value="all">全部产品分类（{rows.length}）</option>{categories.map((category) => <option key={category} value={category}>{category}（{rows.filter((row) => productCategory(row) === category).length}）</option>)}</select></label>
               <label className="sheet-search"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索商品编码、SKU、分类或规格" /></label>
               <button className="sheet-save-button" disabled={saving || dirty.size === 0} onClick={saveAll}>{saving ? "保存中…" : dirty.size ? `保存修改（${dirty.size}）` : "已全部保存"}</button>
             </div>
           </div>
 
+          {viewMode === "table" ? <>
           <div className={`batch-edit-bar ${selected.size ? "active" : ""}`}>
             <div className="batch-selection-summary"><b>{selected.size}</b><span>个商品已选</span>{selected.size > 0 && <button type="button" onClick={() => setSelected(new Set())}>清除选择</button>}</div>
             <label className="batch-control"><span>批量修改</span><select value={batchField} onChange={(event) => { setBatchField(event.target.value as BatchEditableField); setBatchValue(""); }} aria-label="选择批量修改字段">{BATCH_FIELDS.map((option) => <option key={option.key} value={option.key}>{option.label}</option>)}</select></label>
@@ -668,7 +747,7 @@ export default function ProductDetailsPage() {
               <thead>
                 <tr className="pricing-group-row"><th colSpan={11}><span>01</span>商品资料</th><th colSpan={5}><span>02</span>基础费用</th><th colSpan={6}><span>03</span>平台费用</th><th colSpan={2}><span>04</span>售后费用</th><th colSpan={7} className="result-group"><span>05</span>价格与利润</th><th className="action-group"><span>06</span>操作</th></tr>
                 <tr className="pricing-heading-row">
-                  <th><label className="batch-check-all"><input type="checkbox" checked={allFilteredSelected} onChange={toggleFilteredRows} aria-label={allFilteredSelected ? "取消选择当前筛选结果" : "选择当前筛选结果"} /><span>主推分类</span></label></th><th>卖家商品编号</th><th>SKU</th><th>上线状态</th><th>商品图片</th><th>图片状态</th><th>规格</th><th>长<br /><small>cm</small></th><th>宽<br /><small>cm</small></th><th>高<br /><small>cm</small></th><th>重量<br /><small>g</small></th>
+                  <th><label className="batch-check-all"><input type="checkbox" checked={allFilteredSelected} onChange={toggleFilteredRows} aria-label={allFilteredSelected ? "取消选择当前筛选结果" : "选择当前筛选结果"} /><span>产品分类</span></label></th><th>卖家商品编号</th><th>SKU</th><th>上线状态</th><th>商品图片</th><th>图片状态</th><th>规格</th><th>长<br /><small>cm</small></th><th>宽<br /><small>cm</small></th><th>高<br /><small>cm</small></th><th>重量<br /><small>g</small></th>
                   <th>产品成本<br /><small>₽</small></th><th>汇率</th><th>产品成本<br /><small>¥</small></th><th>操作费<br /><small>¥</small></th><th>尾程物流费<br /><small>¥ · 自动</small></th><th>平台佣金率</th><th>平台佣金<br /><small>¥ · 自动</small></th><th>广告投流率</th><th>广告费用<br /><small>¥ · 自动</small></th><th>活动折扣率</th><th>折扣费用<br /><small>¥ · 自动</small></th><th>退损率</th><th>退损费<br /><small>¥ · 自动</small></th>
                   <th>总成本<br /><small>¥</small></th><th>参考售价<br /><small>¥</small></th><th className="final-price-heading">最终售价<br /><small>¥ · 反推</small></th><th className="current-selling-price-heading">当前在售价<br /><small>WB API · 当前折扣价</small></th><th className="current-selling-cost-heading">当前在售总成本<br /><small>¥ · 按当前售价计算</small></th><th>毛利<br /><small>¥</small></th><th>目标毛利率</th><th className="delete-action-heading">删除</th>
                 </tr>
@@ -690,11 +769,14 @@ export default function ProductDetailsPage() {
                   return (
                     <Fragment key={key}>
                       <tr className={`pricing-data-row ${dirty.has(key) ? "is-dirty" : ""} ${selected.has(key) ? "is-selected" : ""} ${isDraft ? "is-new" : ""}`}>
-                        <td className="sticky-a"><div className="row-select-cell"><input className="row-select-checkbox" type="checkbox" checked={selected.has(key)} onChange={() => toggleRow(key)} aria-label={`选择 ${label}`} /><input className="sheet-text-input" aria-label={`${label} 主推分类`} value={cost.category} placeholder="输入分类" onChange={(event) => updateCost(key, "category", event.target.value)} /></div></td>
+                        <td className="sticky-a"><div className="row-select-cell"><input className="row-select-checkbox" type="checkbox" checked={selected.has(key)} onChange={() => toggleRow(key)} aria-label={`选择 ${label}`} /><input className="sheet-text-input" aria-label={`${label} 产品分类`} value={cost.category} placeholder="输入分类" onChange={(event) => updateCost(key, "category", event.target.value)} /></div></td>
                         <td className="sticky-b"><div className="product-code-editor"><input className="sheet-text-input product-code-input" aria-label={`${label} 卖家商品编号`} value={cost.sellerSku} placeholder="必填商品编号" onChange={(event) => updateCost(key, "sellerSku", event.target.value)} /><small className={product ? "matched" : "unmatched"}>{product ? `已匹配 WB ${product.nmId}` : isDraft ? "待登记" : "修改编号后可重新匹配"}</small></div></td>
                         <td><input className="sheet-text-input" aria-label={`${label} SKU`} value={cost.internalSku} placeholder="内部 SKU" onChange={(event) => updateCost(key, "internalSku", event.target.value)} /></td>
                         <td><span className={`data-status ${product ? "online" : "offline"}`}><i />{product ? "已上线" : isDraft ? "待登记" : "未匹配"}</span></td>
-                        <td><div className="sheet-image-editor"><span className={`sheet-product-image ${imageUrl ? "" : "placeholder"}`}>{imageUrl ? <img src={imageUrl} alt="" loading="lazy" referrerPolicy="no-referrer" /> : isDraft ? "+" : "—"}</span><button type="button" onClick={() => editImageUrl(key, cost.imageUrl)}>{cost.imageUrl ? "更换图片" : product?.image ? "自定义图片" : "粘贴链接"}</button></div></td>
+                        <td><div className="sheet-image-editor"><span className={`sheet-product-image ${imageUrl ? "" : "placeholder"}`}>{imageUrl ? <>
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img src={imageUrl} alt="" loading="lazy" referrerPolicy="no-referrer" />
+                        </> : isDraft ? "+" : "—"}</span><button type="button" onClick={() => editImageUrl(key, cost.imageUrl)}>{cost.imageUrl ? "更换图片" : product?.image ? "自定义图片" : "粘贴链接"}</button></div></td>
                         <td><span className={`image-status ${imageUrl ? "complete" : "missing"}`}>{imageLabel}</span></td>
                         <td><input className="sheet-text-input" aria-label={`${label} 规格`} value={cost.specification} placeholder="型号 / 颜色" onChange={(event) => updateCost(key, "specification", event.target.value)} /></td>
                         <td><NumberCell blankZero label={`${label} 长`} value={cost.lengthCm} onChange={(next) => updateCost(key, "lengthCm", next)} /></td>
@@ -727,11 +809,12 @@ export default function ProductDetailsPage() {
                     </Fragment>
                   );
                 })}
-                {!loading && filteredRows.length === 0 && <tr className="sheet-empty-row"><td colSpan={32}>{query ? "没有找到符合条件的商品" : "还没有产品记录"}</td></tr>}
+                {!loading && filteredRows.length === 0 && <tr className="sheet-empty-row"><td colSpan={32}>{query || categoryFilter !== "all" ? "没有找到符合条件的商品" : "还没有产品记录"}</td></tr>}
               </tbody>
             </table>
           </div>
           <footer className="pricing-footer"><div><b>实时定价公式</b><span>基础成本 ÷（1 − 佣金 − 广告 − 折扣 − 退损 − 目标毛利率）</span></div><button className="append-product-button" onClick={() => addRowAfter(rows.at(-1)?.key ?? null)}><span>＋</span>在末尾添加产品</button></footer>
+          </> : <><ProductCardView rows={filteredRows} loading={loading} priceData={priceData} priceError={priceError} /><footer className="product-card-view-footer"><span>当前展示 <b>{filteredRows.length}</b> / {rows.length} 个产品</span><small>卡片模式用于完整查看；新增或修改产品请切换到“表格编辑”。</small></footer></>}
         </section>
       </section>
     </main>

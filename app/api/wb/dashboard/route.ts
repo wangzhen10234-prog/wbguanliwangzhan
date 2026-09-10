@@ -2,7 +2,9 @@ import { env } from "cloudflare:workers";
 import { buildOrderCompletionIndex, completionForOrder, normalizeWbStatisticsTime } from "../../../_lib/order-completion";
 import { fbsStatusOutcome, updateFbsCompletionObservations, type FbsCompletionObservation } from "../../../_lib/fbs-completion-observations";
 import { fbsOrderKey } from "../../../_lib/fbs-order-identity";
+import { inventorySegmentFor } from "../../../_lib/inventory-segments";
 import { isUnprocessedClientCancellation, returnRateSummary } from "../../../_lib/sales-financials";
+import { acquireSyncLock, readSyncSnapshot, releaseSyncLock, writeSyncSnapshot } from "../../../_lib/server-persistence";
 import { resolveWbStore, scopedStoreKey } from "../../../_lib/server-storefront";
 
 type WbOrder = {
@@ -71,6 +73,8 @@ type FbsOrderSnapshot = {
   available: boolean;
   orders: FbsOrder[];
   completionObservations?: Record<string, FbsCompletionObservation>;
+  /** Oldest order date already rebuilt in this persistence backend. */
+  coverageStart?: string;
 };
 
 type WbCard = {
@@ -361,9 +365,7 @@ function manualRefreshBucket() {
 
 async function readDurableRecord<T>(key: string): Promise<DurableSnapshot<T> | null> {
   try {
-    const row = await env.DB.prepare("SELECT payload, sync_slot AS syncSlot, manual_bucket AS manualBucket FROM wb_sync_snapshots WHERE cache_key = ?")
-      .bind(key)
-      .first<{ payload: string; syncSlot: string; manualBucket: number }>();
+    const row = await readSyncSnapshot(key);
     return row?.payload ? { value: JSON.parse(row.payload) as T, syncSlot: row.syncSlot || "", manualBucket: Number(row.manualBucket || 0) } : null;
   } catch {
     return null;
@@ -382,15 +384,13 @@ function durableRecordIsFresh(record: DurableSnapshot<unknown> | null, forceRefr
 
 async function writeDurableSnapshot(key: string, value: unknown, forceRefresh = false) {
   try {
-    await env.DB.prepare(`
-      INSERT INTO wb_sync_snapshots (cache_key, payload, sync_slot, manual_bucket, updated_at)
-      VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-      ON CONFLICT(cache_key) DO UPDATE SET
-        payload = excluded.payload,
-        sync_slot = excluded.sync_slot,
-        manual_bucket = CASE WHEN excluded.manual_bucket > 0 THEN excluded.manual_bucket ELSE wb_sync_snapshots.manual_bucket END,
-        updated_at = CURRENT_TIMESTAMP
-    `).bind(key, JSON.stringify(value), syncSchedule().slot, forceRefresh ? manualRefreshBucket() : 0).run();
+    await writeSyncSnapshot(
+      key,
+      JSON.stringify(value),
+      syncSchedule().slot,
+      forceRefresh ? manualRefreshBucket() : 0,
+      { preserveManualBucket: true },
+    );
   } catch {
     // A cache write must never make a successful WB response fail.
   }
@@ -398,12 +398,7 @@ async function writeDurableSnapshot(key: string, value: unknown, forceRefresh = 
 
 async function acquireDurableRefreshLock(key: string, ttlMs = 45_000) {
   try {
-    const now = Date.now();
-    await env.DB.prepare("DELETE FROM wb_sync_locks WHERE cache_key = ? AND expires_at <= ?").bind(key, now).run();
-    const result = await env.DB.prepare("INSERT OR IGNORE INTO wb_sync_locks (cache_key, expires_at) VALUES (?, ?)")
-      .bind(key, now + ttlMs)
-      .run();
-    return Number(result.meta.changes || 0) > 0;
+    return await acquireSyncLock(key, ttlMs);
   } catch {
     return true;
   }
@@ -411,7 +406,7 @@ async function acquireDurableRefreshLock(key: string, ttlMs = 45_000) {
 
 async function releaseDurableRefreshLock(key: string) {
   try {
-    await env.DB.prepare("DELETE FROM wb_sync_locks WHERE cache_key = ?").bind(key).run();
+    await releaseSyncLock(key);
   } catch {
     // Local development may not have a D1 binding.
   }
@@ -747,17 +742,37 @@ async function loadFbsOrders(token: string, storeId: string, forceRefresh = fals
 
     const end = new Date();
     end.setUTCHours(23, 59, 59, 999);
-    const start = fallback
-      ? new Date(Math.max(new Date(`${ALL_HISTORY_START}T00:00:00Z`).getTime(), end.getTime() - (HISTORY_REFRESH_DAYS - 1) * DAY_MS))
-      : new Date(`${ALL_HISTORY_START}T00:00:00Z`);
+    // A newly deployed persistence backend has no historical snapshot. Fetching
+    // the entire account history in one Worker request competes with the other
+    // dashboard calls and can exceed the request budget, which used to make a
+    // healthy store look as if it had zero orders. Cold-start with the complete
+    // recent window, then add one older 30-day block on each later refresh.
+    const recentStartMs = Math.max(
+      new Date(`${ALL_HISTORY_START}T00:00:00Z`).getTime(),
+      end.getTime() - (HISTORY_REFRESH_DAYS - 1) * DAY_MS,
+    );
+    const start = new Date(recentStartMs);
     start.setUTCHours(0, 0, 0, 0);
 
     try {
       const refreshedOrders = await fetchFbsOrders(token, start, end);
-      const byOrder = new Map<string, FbsOrder>();
-      for (const order of fallback?.orders ?? []) {
-        if (new Date(order.createdAt || 0).getTime() < start.getTime()) byOrder.set(fbsOrderKey(order), order);
+      const knownCoverageStart = fallback
+        ? new Date(`${fallback.coverageStart || ALL_HISTORY_START}T00:00:00Z`)
+        : start;
+      let coverageStart = knownCoverageStart;
+      let backfilledOrders: FbsOrder[] = [];
+      if (fallback && knownCoverageStart.getTime() > new Date(`${ALL_HISTORY_START}T00:00:00Z`).getTime()) {
+        const backfillEnd = new Date(knownCoverageStart.getTime() - 1);
+        const backfillStart = new Date(Math.max(
+          new Date(`${ALL_HISTORY_START}T00:00:00Z`).getTime(),
+          knownCoverageStart.getTime() - 30 * DAY_MS,
+        ));
+        backfilledOrders = await fetchFbsOrders(token, backfillStart, backfillEnd);
+        coverageStart = backfillStart;
       }
+      const byOrder = new Map<string, FbsOrder>();
+      for (const order of fallback?.orders ?? []) byOrder.set(fbsOrderKey(order), order);
+      for (const order of backfilledOrders) byOrder.set(fbsOrderKey(order), order);
       for (const order of refreshedOrders) byOrder.set(fbsOrderKey(order), order);
       const orders = [...byOrder.values()];
       const completionObservations = updateFbsCompletionObservations(
@@ -765,7 +780,12 @@ async function loadFbsOrders(token: string, storeId: string, forceRefresh = fals
         orders,
         fallback?.completionObservations ?? {},
       );
-      const result: FbsOrderSnapshot = { available: true, orders, completionObservations };
+      const result: FbsOrderSnapshot = {
+        available: true,
+        orders,
+        completionObservations,
+        coverageStart: coverageStart.toISOString().slice(0, 10),
+      };
       fbsOrderCache.set(storeId, { value: result, expiresAt: cacheExpiry() });
       await Promise.all([writeEdgeCache(cacheKey, result), writeStableEdgeCache(cacheKey, result), writeRecentEdgeCache(cacheKey, result), writeDurableSnapshot(cacheKey, result, forceRefresh)]);
       return result;
@@ -1241,7 +1261,7 @@ function aggregateFinanceRows(snapshot: FinanceRowsSnapshot, from: string, to: s
 }
 
 export async function GET(request: Request) {
-  const store = resolveWbStore(request, env);
+  const store = await resolveWbStore(request, env);
   const token = store.token;
   if (!token) return json({ error: "当前店铺的 WB API 尚未配置" }, 503);
 
@@ -1806,6 +1826,7 @@ export async function GET(request: Request) {
           averagePrice: netUnits ? product.sales / netUnits : 0,
           dailyUnits,
           stockCoverDays,
+          inventorySegment: inventorySegmentFor({ stock: product.stock, stockCoverDays }),
           reviewsCount: reviews.total,
           periodReviewsCount: reviews.period,
           averageRating,
@@ -1829,12 +1850,10 @@ export async function GET(request: Request) {
     let low = 0;
     let slow = 0;
     if (combinedStocks.length) {
-      for (const product of productMap.values()) {
-        const dailyOrders = product.orders / days;
-        const coverDays = dailyOrders > 0 ? product.stock / dailyOrders : Number.POSITIVE_INFINITY;
-        if (product.stock === 0 || coverDays < 5) critical += 1;
-        else if (coverDays <= 10) low += 1;
-        else if (product.stock > 0 && product.orders === 0) slow += 1;
+      for (const product of products) {
+        if (product.inventorySegment === "critical") critical += 1;
+        else if (product.inventorySegment === "low") low += 1;
+        else if (product.inventorySegment === "slow") slow += 1;
       }
     }
 
@@ -1945,7 +1964,7 @@ export async function GET(request: Request) {
       inventory: {
         available: stockResult.length > 0 || sellerStockResult.warehouses.length > 0,
         totalQuantity: [...stockByProduct.values()].reduce((sum, value) => sum + value, 0),
-        productCount: stockByProduct.size,
+        productCount: products.filter((product) => product.stock > 0).length,
         critical,
         low,
         slow,

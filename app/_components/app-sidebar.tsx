@@ -1,9 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
-import { DEFAULT_STOREFRONT_ID, STOREFRONTS, STOREFRONT_COOKIE_KEY, STOREFRONT_STORAGE_KEY, storefrontById } from "../_lib/storefronts";
+import { DEFAULT_STOREFRONT_ID, STOREFRONTS, STOREFRONT_COOKIE_KEY, STOREFRONT_STORAGE_KEY, storefrontById, type Storefront } from "../_lib/storefronts";
 
-type Section = "overview" | "audit" | "reviews" | "sales" | "returns" | "products" | "details" | "prices" | "stock" | "finance" | "advertising" | "promotions";
+type Section = "overview" | "audit" | "reviews" | "sales" | "returns" | "products" | "details" | "prices" | "stock" | "finance" | "advertising" | "promotions" | "settings";
 
 type AppSidebarProps = {
   active: Section;
@@ -41,7 +41,8 @@ function storedStorefrontId() {
   const cookieId = document.cookie.split(";").map((entry) => entry.trim()).find((entry) => entry.startsWith(`${STOREFRONT_COOKIE_KEY}=`))?.slice(STOREFRONT_COOKIE_KEY.length + 1);
   let decodedCookieId = "";
   try { decodedCookieId = cookieId ? decodeURIComponent(cookieId) : ""; } catch { decodedCookieId = ""; }
-  return storefrontById(decodedCookieId || window.localStorage.getItem(STOREFRONT_STORAGE_KEY)).id;
+  const selected = decodedCookieId || window.localStorage.getItem(STOREFRONT_STORAGE_KEY) || DEFAULT_STOREFRONT_ID;
+  return /^[a-z0-9][a-z0-9-]{0,47}$/i.test(selected) ? selected : DEFAULT_STOREFRONT_ID;
 }
 
 function persistStorefrontCookie(storeId: string) {
@@ -50,10 +51,20 @@ function persistStorefrontCookie(storeId: string) {
 
 function StoreSwitcher() {
   const activeStoreId = useSyncExternalStore(subscribeStorefront, storedStorefrontId, () => DEFAULT_STOREFRONT_ID);
+  const [storefronts, setStorefronts] = useState(STOREFRONTS);
   const [open, setOpen] = useState(false);
   const switcherRef = useRef<HTMLDivElement>(null);
-  const activeStore = storefrontById(activeStoreId);
-  const connectedCount = STOREFRONTS.filter((store) => store.enabled && store.connected).length;
+  const activeStore = storefronts.find((store) => store.id === activeStoreId && store.enabled) || storefrontById(activeStoreId);
+  const connectedCount = storefronts.filter((store) => store.enabled && store.connected).length;
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/settings/stores", { cache: "no-store" })
+      .then(async (response) => response.ok ? response.json() as Promise<{ stores?: Storefront[] }> : null)
+      .then((body) => { if (!cancelled && body?.stores?.length) setStorefronts(body.stores); })
+      .catch(() => null);
+    return () => { cancelled = true; };
+  }, []);
 
   useEffect(() => {
     if (!open) return;
@@ -72,7 +83,7 @@ function StoreSwitcher() {
   }, [open]);
 
   function selectStore(storeId: string) {
-    const nextStore = storefrontById(storeId);
+    const nextStore = storefronts.find((store) => store.id === storeId) || storefrontById(storeId);
     if (!nextStore.enabled || nextStore.id === activeStoreId) {
       setOpen(false);
       return;
@@ -92,7 +103,7 @@ function StoreSwitcher() {
     </button>
     <div className="store-switcher-menu" role="listbox" aria-label="选择 WB 店铺" hidden={!open}>
       <div className="store-switcher-menu-head"><b>我的 WB 店铺</b><span>{connectedCount} 家已连接</span></div>
-      {STOREFRONTS.map((store) => <button
+      {storefronts.map((store) => <button
         type="button"
         role="option"
         aria-selected={store.id === activeStore.id}
@@ -105,6 +116,7 @@ function StoreSwitcher() {
         <span><b>{store.name}</b><small>{store.description}</small></span>
         <i aria-hidden="true">{store.id === activeStore.id ? "✓" : store.enabled ? "" : "待接入"}</i>
       </button>)}
+      <a className="store-add-link" href="/settings?panel=api&new=1"><span aria-hidden="true">＋</span><b>添加新店铺</b><small>保存店铺 API 后即可切换管理</small></a>
       <p>新增店铺后，订单、商品、库存和财务数据将按店铺独立管理。</p>
     </div>
   </div>;
@@ -136,6 +148,7 @@ export function AppSidebar({ active, syncedAt, nextSyncAt, loading = false, erro
         {children}
       </div>
       <div className="sidebar-foot">
+        <a className={`sidebar-account-link ${active === "settings" ? "active" : ""}`} href="/settings"><span aria-hidden="true">⚙</span><span><b>系统设置</b><small>账号、API 与登录设备</small></span><i aria-hidden="true">›</i></a>
         <div className="sidebar-schedule"><b>北京时间自动同步</b><span>08:00 · 14:00 · 19:00 · 23:00</span><small>下次：{timeLabel(nextSyncAt)}</small></div>
         <div className={`sync-status ${error ? "error" : "connected"}`}><span className="status-dot" /><div><b>{error ? "WB API 同步异常" : "WB API 已安全连接"}</b><small>{error ? "可点击下方手动重试" : `最近读取 ${timeLabel(syncedAt)}`}</small></div></div>
         <button className="connect-btn" disabled={loading} onClick={onRefresh}>{loading ? "正在同步…" : "手动同步 WB 数据"}</button>

@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { readSyncSnapshot, writeSyncSnapshot } from "../../../_lib/server-persistence";
 import { resolveWbStore, scopedStoreKey } from "../../../_lib/server-storefront";
 
 type WbPriceSize = {
@@ -148,9 +149,7 @@ async function loadCards(token: string) {
 
 async function readSnapshot(cacheKey: string) {
   try {
-    const row = await env.DB.prepare("SELECT payload, sync_slot AS syncSlot, manual_bucket AS manualBucket FROM wb_sync_snapshots WHERE cache_key = ?")
-      .bind(cacheKey)
-      .first<{ payload?: string; syncSlot?: string; manualBucket?: number }>();
+    const row = await readSyncSnapshot(cacheKey);
     if (!row?.payload) return null;
     return { value: JSON.parse(row.payload) as PriceSnapshot, syncSlot: row.syncSlot || "", manualBucket: Number(row.manualBucket || 0) } satisfies SnapshotRecord;
   } catch {
@@ -160,11 +159,7 @@ async function readSnapshot(cacheKey: string) {
 
 async function writeSnapshot(cacheKey: string, value: PriceSnapshot, manual: boolean) {
   try {
-    await env.DB.prepare(`
-      INSERT INTO wb_sync_snapshots (cache_key, payload, sync_slot, manual_bucket, updated_at)
-      VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-      ON CONFLICT(cache_key) DO UPDATE SET payload = excluded.payload, sync_slot = excluded.sync_slot, manual_bucket = excluded.manual_bucket, updated_at = CURRENT_TIMESTAMP
-    `).bind(cacheKey, JSON.stringify(value), schedule().slot, manual ? Math.floor(Date.now() / MANUAL_REFRESH_MS) : 0).run();
+    await writeSyncSnapshot(cacheKey, JSON.stringify(value), schedule().slot, manual ? Math.floor(Date.now() / MANUAL_REFRESH_MS) : 0);
   } catch {
     // A cache write must never invalidate fresh WB price data.
   }
@@ -242,7 +237,7 @@ async function loadSnapshot(token: string, storeId: string, manual: boolean) {
 
 export async function GET(request: Request) {
   try {
-    const store = resolveWbStore(request, env);
+    const store = await resolveWbStore(request, env);
     const token = store.token;
     if (!token) return json({ error: "当前店铺的 WB API 密钥尚未配置" }, 503);
     const manual = new URL(request.url).searchParams.get("refresh") === "manual";

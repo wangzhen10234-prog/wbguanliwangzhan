@@ -1,8 +1,10 @@
 import { and, asc, eq, inArray, or } from "drizzle-orm";
+import { env } from "cloudflare:workers";
 import { getDb } from "../../../db";
 import { productCostDeletions, productCosts, wbSyncSnapshots } from "../../../db/schema";
 import { normalizeProductSku } from "../../_lib/product-cost-aliases";
 import { matchesProductDeletion, productDeletionIdentity } from "../../_lib/product-deletions";
+import { persistenceBackend, readSyncSnapshot, supabaseRestRequest, writeSyncSnapshot } from "../../_lib/server-persistence";
 import { DEFAULT_STOREFRONT_ID } from "../../_lib/storefronts";
 import { requestedStorefront } from "../../_lib/server-storefront";
 
@@ -161,6 +163,161 @@ function databaseError(error: unknown) {
   return json({ error: "产品成本数据暂时无法保存" }, 500);
 }
 
+type ProductCostRow = typeof productCosts.$inferSelect;
+type ProductCostValue = typeof productCosts.$inferInsert;
+type ProductDeletionRow = typeof productCostDeletions.$inferSelect;
+
+function supabaseFilter(value: string) {
+  return `eq.${encodeURIComponent(value)}`;
+}
+
+function productToSupabase(value: ProductCostValue) {
+  return {
+    store_id: value.storeId,
+    seller_sku: value.sellerSku,
+    nm_id: value.nmId ?? null,
+    image_url: value.imageUrl ?? "",
+    internal_sku: value.internalSku ?? "",
+    category: value.category ?? "",
+    specification: value.specification ?? "",
+    length_cm: value.lengthCm ?? 0,
+    width_cm: value.widthCm ?? 0,
+    height_cm: value.heightCm ?? 0,
+    weight_g: value.weightG ?? 0,
+    product_cost_rub: value.productCostRub ?? 0,
+    exchange_rate: value.exchangeRate ?? 0,
+    product_cost_cny: value.productCostCny ?? 0,
+    handling_fee_cny: value.handlingFeeCny ?? 0,
+    last_mile_fee_cny: value.lastMileFeeCny ?? 0,
+    commission_rate: value.commissionRate ?? 0,
+    ad_rate: value.adRate ?? 0,
+    activity_discount_rate: value.activityDiscountRate ?? 0,
+    return_loss_rate: value.returnLossRate ?? 0,
+    reference_price_cny: value.referencePriceCny ?? 0,
+    target_margin_rate: value.targetMarginRate ?? 0,
+    sort_order: value.sortOrder ?? 0,
+    notes: value.notes ?? "",
+    ...(value.createdAt ? { created_at: value.createdAt } : {}),
+    ...(value.updatedAt ? { updated_at: value.updatedAt } : {}),
+  };
+}
+
+function productFromSupabase(row: Record<string, unknown>): ProductCostRow {
+  return {
+    storeId: String(row.store_id || DEFAULT_STOREFRONT_ID),
+    sellerSku: String(row.seller_sku || ""),
+    nmId: row.nm_id === null ? null : Number(row.nm_id || 0),
+    imageUrl: String(row.image_url || ""),
+    internalSku: String(row.internal_sku || ""),
+    category: String(row.category || ""),
+    specification: String(row.specification || ""),
+    lengthCm: Number(row.length_cm || 0),
+    widthCm: Number(row.width_cm || 0),
+    heightCm: Number(row.height_cm || 0),
+    weightG: Number(row.weight_g || 0),
+    productCostRub: Number(row.product_cost_rub || 0),
+    exchangeRate: Number(row.exchange_rate || 0),
+    productCostCny: Number(row.product_cost_cny || 0),
+    handlingFeeCny: Number(row.handling_fee_cny || 0),
+    lastMileFeeCny: Number(row.last_mile_fee_cny || 0),
+    commissionRate: Number(row.commission_rate || 0),
+    adRate: Number(row.ad_rate || 0),
+    activityDiscountRate: Number(row.activity_discount_rate || 0),
+    returnLossRate: Number(row.return_loss_rate || 0),
+    referencePriceCny: Number(row.reference_price_cny || 0),
+    targetMarginRate: Number(row.target_margin_rate || 0),
+    sortOrder: Number(row.sort_order || 0),
+    notes: String(row.notes || ""),
+    createdAt: String(row.created_at || ""),
+    updatedAt: String(row.updated_at || ""),
+  };
+}
+
+function deletionFromSupabase(row: Record<string, unknown>): ProductDeletionRow {
+  return {
+    storeId: String(row.store_id || DEFAULT_STOREFRONT_ID),
+    identityKey: String(row.identity_key || ""),
+    sellerSkuKey: String(row.seller_sku_key || ""),
+    nmId: row.nm_id === null ? null : Number(row.nm_id || 0),
+    deletedAt: String(row.deleted_at || ""),
+  };
+}
+
+async function supabaseProductRows(storeId: string) {
+  const response = await supabaseRestRequest(
+    `product_costs?select=*&store_id=${supabaseFilter(storeId)}&order=sort_order.asc,seller_sku.asc`,
+  );
+  return ((await response.json()) as Record<string, unknown>[]).map(productFromSupabase);
+}
+
+async function supabaseDeletionRows(storeId: string) {
+  const response = await supabaseRestRequest(
+    `product_cost_deletions?select=*&store_id=${supabaseFilter(storeId)}&order=deleted_at.asc`,
+  );
+  return ((await response.json()) as Record<string, unknown>[]).map(deletionFromSupabase);
+}
+
+async function supabaseUpsertProducts(values: ProductCostValue[]) {
+  if (!values.length) return [];
+  const response = await supabaseRestRequest("product_costs?on_conflict=store_id,seller_sku&select=*", {
+    method: "POST",
+    headers: { Prefer: "resolution=merge-duplicates,return=representation" },
+    body: JSON.stringify(values.map(productToSupabase)),
+  });
+  return ((await response.json()) as Record<string, unknown>[]).map(productFromSupabase);
+}
+
+async function supabaseDeleteProduct(storeId: string, sellerSku: string) {
+  await supabaseRestRequest(
+    `product_costs?store_id=${supabaseFilter(storeId)}&seller_sku=${supabaseFilter(sellerSku)}`,
+    { method: "DELETE" },
+  );
+}
+
+async function supabaseDeleteMarker(storeId: string, identityKey: string) {
+  await supabaseRestRequest(
+    `product_cost_deletions?store_id=${supabaseFilter(storeId)}&identity_key=${supabaseFilter(identityKey)}`,
+    { method: "DELETE" },
+  );
+}
+
+async function supabaseUpsertMarker(value: ProductDeletionRow) {
+  await supabaseRestRequest("product_cost_deletions?on_conflict=store_id,identity_key", {
+    method: "POST",
+    headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
+    body: JSON.stringify({
+      store_id: value.storeId,
+      identity_key: value.identityKey,
+      seller_sku_key: value.sellerSkuKey,
+      nm_id: value.nmId,
+      deleted_at: value.deletedAt,
+    }),
+  });
+}
+
+async function separateSecondarySupabaseProductRegister(storeId: string) {
+  if (storeId !== SECONDARY_STOREFRONT_ID) return;
+  if (await readSyncSnapshot(SEPARATION_MIGRATION_KEY)) return;
+
+  const sharedRows = await supabaseProductRows(LEGACY_SHARED_PRODUCT_SCOPE_ID);
+  const primaryRows = await supabaseProductRows(DEFAULT_STOREFRONT_ID);
+  const sourceRows = sharedRows.length > 0 ? sharedRows : primaryRows;
+  const sharedDeletions = await supabaseDeletionRows(LEGACY_SHARED_PRODUCT_SCOPE_ID);
+  const primaryDeletions = await supabaseDeletionRows(DEFAULT_STOREFRONT_ID);
+  const sourceDeletions = sharedDeletions.length > 0 ? sharedDeletions : primaryDeletions;
+  const migratedAt = new Date().toISOString();
+
+  await supabaseRestRequest(`product_costs?store_id=${supabaseFilter(SECONDARY_STOREFRONT_ID)}`, { method: "DELETE" });
+  await supabaseRestRequest(`product_cost_deletions?store_id=${supabaseFilter(SECONDARY_STOREFRONT_ID)}`, { method: "DELETE" });
+  await supabaseUpsertProducts(sourceRows.map((row) => ({ ...row, storeId: SECONDARY_STOREFRONT_ID })));
+  for (const row of sourceDeletions) await supabaseUpsertMarker({ ...row, storeId: SECONDARY_STOREFRONT_ID });
+  await writeSyncSnapshot(
+    SEPARATION_MIGRATION_KEY,
+    JSON.stringify({ source: sharedRows.length > 0 ? LEGACY_SHARED_PRODUCT_SCOPE_ID : DEFAULT_STOREFRONT_ID, rows: sourceRows.length, migratedAt }),
+    "product-register-separation-v1",
+  );
+}
+
 async function separateSecondaryProductRegister(db: ReturnType<typeof getDb>, storeId: string) {
   if (storeId !== SECONDARY_STOREFRONT_ID) return;
   const migration = await db.select({ cacheKey: wbSyncSnapshots.cacheKey }).from(wbSyncSnapshots)
@@ -198,9 +355,107 @@ async function separateSecondaryProductRegister(db: ReturnType<typeof getDb>, st
   ]);
 }
 
+async function deleteMatchingSupabaseMarkers(storeId: string, sellerSkuKey: string, identityKey: string) {
+  const markers = await supabaseDeletionRows(storeId);
+  const matches = markers.filter((row) => row.sellerSkuKey === sellerSkuKey || row.identityKey === identityKey);
+  for (const marker of matches) await supabaseDeleteMarker(storeId, marker.identityKey);
+}
+
+async function supabaseGet(request: Request) {
+  const store = await requestedStorefront(request, env);
+  await separateSecondarySupabaseProductRegister(store.id);
+  let rows = await supabaseProductRows(store.id);
+  if (rows.length === 0 && store.id === DEFAULT_STOREFRONT_ID) {
+    await supabaseUpsertProducts(SEED_ROWS.map((row) => ({ ...row, storeId: store.id })));
+    rows = await supabaseProductRows(store.id);
+  }
+  const deletedProducts = await supabaseDeletionRows(store.id);
+  const activeRows = rows.filter((row) => !matchesProductDeletion({ sku: row.sellerSku, nmId: row.nmId }, deletedProducts));
+  return json({ rows: activeRows, deletedProducts, shared: false, activeStoreId: store.id });
+}
+
+async function supabasePut(request: Request, body: CostPayload) {
+  const store = await requestedStorefront(request, env);
+  const value = normalizePayload(body, store.id);
+  const previousSellerSku = stringField(body.previousSellerSku, 120);
+  await separateSecondarySupabaseProductRegister(store.id);
+  const existingRows = await supabaseProductRows(store.id);
+  const normalizedSellerSku = normalizeProductSku(value.sellerSku);
+  const conflict = existingRows.find((entry) =>
+    normalizeProductSku(entry.sellerSku) === normalizedSellerSku
+    && entry.sellerSku !== previousSellerSku,
+  );
+  if (conflict) throw new Error("SELLER_SKU_CONFLICT");
+
+  if (previousSellerSku && previousSellerSku !== value.sellerSku) {
+    const response = await supabaseRestRequest(
+      `product_costs?store_id=${supabaseFilter(store.id)}&seller_sku=${supabaseFilter(previousSellerSku)}&select=*`,
+      {
+        method: "PATCH",
+        headers: { Prefer: "return=representation" },
+        body: JSON.stringify(productToSupabase(value)),
+      },
+    );
+    const [renamedRaw] = await response.json() as Record<string, unknown>[];
+    if (renamedRaw) {
+      const renamed = productFromSupabase(renamedRaw);
+      await deleteMatchingSupabaseMarkers(store.id, normalizedSellerSku, productDeletionIdentity(value.sellerSku, value.nmId));
+      return json({ row: renamed });
+    }
+  }
+
+  const [row] = await supabaseUpsertProducts([value]);
+  await deleteMatchingSupabaseMarkers(store.id, normalizedSellerSku, productDeletionIdentity(value.sellerSku, value.nmId));
+  return json({ row });
+}
+
+async function supabaseDelete(request: Request, body: DeletePayload) {
+  const store = await requestedStorefront(request, env);
+  const sellerSku = stringField(body.sellerSku, 120);
+  const persistedSellerSku = stringField(body.persistedSellerSku, 120);
+  const nmId = Math.trunc(numericField(body.nmId, Number.MAX_SAFE_INTEGER));
+  const sellerSkuKey = normalizeProductSku(sellerSku || persistedSellerSku);
+  if (!sellerSkuKey && !nmId) return json({ error: "缺少要删除的商品编号" }, 400);
+
+  await separateSecondarySupabaseProductRegister(store.id);
+  const identityKey = productDeletionIdentity(sellerSku || persistedSellerSku, nmId || null);
+  const rows = await supabaseProductRows(store.id);
+  const normalizedPersistedSku = normalizeProductSku(persistedSellerSku);
+  const storedSellerSkus = rows.filter((row) =>
+    Boolean(persistedSellerSku && row.sellerSku === persistedSellerSku)
+    || Boolean(sellerSkuKey && normalizeProductSku(row.sellerSku) === sellerSkuKey)
+    || Boolean(normalizedPersistedSku && normalizeProductSku(row.sellerSku) === normalizedPersistedSku)
+    || Boolean(nmId && row.nmId === nmId),
+  ).map((row) => row.sellerSku);
+  for (const storedSellerSku of storedSellerSkus) await supabaseDeleteProduct(store.id, storedSellerSku);
+  await supabaseUpsertMarker({
+    storeId: store.id,
+    identityKey,
+    sellerSkuKey,
+    nmId: nmId || null,
+    deletedAt: new Date().toISOString(),
+  });
+  return json({ deleted: true, identityKey, deletedStoredRows: storedSellerSkus.length });
+}
+
+async function supabaseRestore(request: Request, body: RestorePayload) {
+  const store = await requestedStorefront(request, env);
+  const sellerSkuKey = normalizeProductSku(stringField(body.sellerSku, 120));
+  const nmId = Math.trunc(numericField(body.nmId, Number.MAX_SAFE_INTEGER));
+  if (!sellerSkuKey && !nmId) return json({ error: "缺少要恢复的商品编号" }, 400);
+  await separateSecondarySupabaseProductRegister(store.id);
+  const markers = await supabaseDeletionRows(store.id);
+  const matches = markers.filter((row) =>
+    Boolean(sellerSkuKey && row.sellerSkuKey === sellerSkuKey) || Boolean(nmId && row.nmId === nmId),
+  );
+  for (const marker of matches) await supabaseDeleteMarker(store.id, marker.identityKey);
+  return json({ restored: true, restoredMarkers: matches.length });
+}
+
 export async function GET(request: Request) {
   try {
-    const store = requestedStorefront(request);
+    if (persistenceBackend() === "supabase") return await supabaseGet(request);
+    const store = await requestedStorefront(request, env);
     const db = getDb();
     await separateSecondaryProductRegister(db, store.id);
     let rows = await db.select().from(productCosts)
@@ -232,7 +487,8 @@ export async function GET(request: Request) {
 export async function PUT(request: Request) {
   try {
     const body = await request.json() as CostPayload;
-    const store = requestedStorefront(request);
+    if (persistenceBackend() === "supabase") return await supabasePut(request, body);
+    const store = await requestedStorefront(request, env);
     const value = normalizePayload(body, store.id);
     const previousSellerSku = stringField(body.previousSellerSku, 120);
     const db = getDb();
@@ -317,7 +573,8 @@ export async function PUT(request: Request) {
 export async function DELETE(request: Request) {
   try {
     const body = await request.json() as DeletePayload;
-    const store = requestedStorefront(request);
+    if (persistenceBackend() === "supabase") return await supabaseDelete(request, body);
+    const store = await requestedStorefront(request, env);
     const sellerSku = stringField(body.sellerSku, 120);
     const persistedSellerSku = stringField(body.persistedSellerSku, 120);
     const nmId = Math.trunc(numericField(body.nmId, Number.MAX_SAFE_INTEGER));
@@ -371,7 +628,8 @@ export async function DELETE(request: Request) {
 export async function PATCH(request: Request) {
   try {
     const body = await request.json() as RestorePayload;
-    const store = requestedStorefront(request);
+    if (persistenceBackend() === "supabase") return await supabaseRestore(request, body);
+    const store = await requestedStorefront(request, env);
     const sellerSku = stringField(body.sellerSku, 120);
     const sellerSkuKey = normalizeProductSku(sellerSku);
     const nmId = Math.trunc(numericField(body.nmId, Number.MAX_SAFE_INTEGER));

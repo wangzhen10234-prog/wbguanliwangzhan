@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { readSyncSnapshot, writeSyncSnapshot } from "../../../_lib/server-persistence";
 import { resolveWbStore, scopedStoreKey } from "../../../_lib/server-storefront";
 
 type PromotionListItem = {
@@ -146,9 +147,7 @@ async function wbRequest<T>(url: string, token: string) {
 
 async function readSnapshot(cacheKey: string) {
   try {
-    const row = await env.DB.prepare("SELECT payload, sync_slot AS syncSlot FROM wb_sync_snapshots WHERE cache_key = ?")
-      .bind(cacheKey)
-      .first<{ payload: string; syncSlot: string }>();
+    const row = await readSyncSnapshot(cacheKey);
     return row?.payload ? { value: JSON.parse(row.payload) as PromotionSnapshot, syncSlot: row.syncSlot || "" } : null;
   } catch {
     return null;
@@ -157,14 +156,7 @@ async function readSnapshot(cacheKey: string) {
 
 async function writeSnapshot(cacheKey: string, value: PromotionSnapshot) {
   try {
-    await env.DB.prepare(`
-      INSERT INTO wb_sync_snapshots (cache_key, payload, sync_slot, manual_bucket, updated_at)
-      VALUES (?, ?, ?, 0, CURRENT_TIMESTAMP)
-      ON CONFLICT(cache_key) DO UPDATE SET
-        payload = excluded.payload,
-        sync_slot = excluded.sync_slot,
-        updated_at = CURRENT_TIMESTAMP
-    `).bind(cacheKey, JSON.stringify(value), syncSchedule().slot).run();
+    await writeSyncSnapshot(cacheKey, JSON.stringify(value), syncSchedule().slot);
   } catch {
     // A cache write must never invalidate fresh WB promotion data.
   }
@@ -313,7 +305,7 @@ async function loadPromotions(token: string, storeId: string, forceRefresh: bool
 }
 
 export async function GET(request: Request) {
-  const store = resolveWbStore(request, env);
+  const store = await resolveWbStore(request, env);
   const token = store.token;
   if (!token) return json({ error: "当前店铺的 WB API 尚未配置" }, 503);
   const forceRefresh = new URL(request.url).searchParams.get("refresh") === "manual";

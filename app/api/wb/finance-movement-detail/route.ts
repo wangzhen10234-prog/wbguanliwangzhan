@@ -1,5 +1,6 @@
 import { env } from "cloudflare:workers";
 import { matchPromotionCosts, promotionCostRowKey, type PromotionCostInput } from "../../../_lib/promotion-cost-trace";
+import { readSyncSnapshot, writeSyncSnapshot } from "../../../_lib/server-persistence";
 import { resolveWbStore, scopedStoreKey } from "../../../_lib/server-storefront";
 
 type PromotionCostSnapshot = {
@@ -59,9 +60,7 @@ function normalizeRow(row: PromotionCostInput): PromotionCostInput {
 
 async function readSnapshot(cacheKey: string) {
   try {
-    const row = await env.DB.prepare("SELECT payload FROM wb_sync_snapshots WHERE cache_key = ?")
-      .bind(cacheKey)
-      .first<{ payload?: string }>();
+    const row = await readSyncSnapshot(cacheKey);
     return row?.payload ? JSON.parse(row.payload) as PromotionCostSnapshot : null;
   } catch {
     return null;
@@ -70,11 +69,7 @@ async function readSnapshot(cacheKey: string) {
 
 async function writeSnapshot(cacheKey: string, value: PromotionCostSnapshot) {
   try {
-    await env.DB.prepare(`
-      INSERT INTO wb_sync_snapshots (cache_key, payload, sync_slot, manual_bucket, updated_at)
-      VALUES (?, ?, ?, 0, CURRENT_TIMESTAMP)
-      ON CONFLICT(cache_key) DO UPDATE SET payload = excluded.payload, sync_slot = excluded.sync_slot, updated_at = CURRENT_TIMESTAMP
-    `).bind(cacheKey, JSON.stringify(value), `${value.from}:${value.to}`).run();
+    await writeSyncSnapshot(cacheKey, JSON.stringify(value), `${value.from}:${value.to}`);
   } catch {
     // The live response remains valid if durable caching is temporarily unavailable.
   }
@@ -138,7 +133,7 @@ function statusLabel(status: number) {
 }
 
 export async function GET(request: Request) {
-  const { token, id: storeId } = resolveWbStore(request);
+  const { token, id: storeId } = await resolveWbStore(request, env);
   if (!token) return json({ error: "当前店铺尚未配置 WB API" }, 503);
   const url = new URL(request.url);
   const date = validDate(url.searchParams.get("date"));
