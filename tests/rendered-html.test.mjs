@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 async function render(pathname = "/") {
@@ -431,4 +432,12 @@ test("renders clickable inventory summary filters linked to the stock detail tab
   assert.match(html, /<button[^>]*aria-controls="stock-detail-table"[^>]*>.*库存偏低/s);
   assert.match(html, /<button[^>]*aria-controls="stock-detail-table"[^>]*>.*周转较慢/s);
   assert.match(html, /id="stock-detail-table"/);
+});
+
+test("keeps product cards compact with four, three, two and one-column responsive layouts", () => {
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.match(css, /\.product-card-grid\s*\{[^}]*grid-template-columns:repeat\(4,minmax\(0,1fr\)\)/);
+  assert.match(css, /@media \(max-width:1800px\)\{\.product-card-grid\{grid-template-columns:repeat\(3,minmax\(0,1fr\)\)\}\}/);
+  assert.match(css, /@media \(max-width:1250px\)\{\.product-card-grid\{grid-template-columns:repeat\(2,minmax\(0,1fr\)\)\}\}/);
+  assert.match(css, /@media \(max-width:760px\).*\.product-card-grid\{grid-template-columns:1fr/s);
 });
