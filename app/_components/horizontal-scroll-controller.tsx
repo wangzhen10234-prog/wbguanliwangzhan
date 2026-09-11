@@ -16,6 +16,7 @@ const HORIZONTAL_SCROLL_SELECTOR = [
   ".audit-table-wrap",
   ".price-table-wrap",
   ".review-table-wrap",
+  ".market-table-wrap",
 ].join(",");
 
 type ScrollState = {

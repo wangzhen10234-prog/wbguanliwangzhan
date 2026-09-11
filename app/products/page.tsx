@@ -61,6 +61,18 @@ type ProductData = {
   }>;
 };
 
+type OfficialFunnelData = {
+  syncedAt: string;
+  period: { from: string; to: string; days: number };
+  currency: string;
+  summary: {
+    openCount: number; cartCount: number; orderCount: number; orderSum: number;
+    buyoutCount: number; buyoutSum: number; cancelCount: number; cancelSum: number;
+    addToWishlist: number; addToCartPercent: number; cartToOrderPercent: number;
+    orderFromOpenPercent: number; buyoutPercent: number;
+  };
+};
+
 type SortKey = "sales" | "orders" | "netUnits" | "returnRate" | "periodAverageRating" | "periodPositiveRate" | "stock" | "stockCoverDays";
 
 const DAY_MS = 86_400_000;
@@ -106,6 +118,8 @@ export default function ProductsPage() {
   const [periodStart, setPeriodStart] = useState(() => shiftDate(today, -29));
   const [periodEnd, setPeriodEnd] = useState(today);
   const [data, setData] = useState<ProductData | null>(null);
+  const [officialFunnel, setOfficialFunnel] = useState<OfficialFunnelData | null>(null);
+  const [officialFunnelError, setOfficialFunnelError] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [dateError, setDateError] = useState("");
@@ -128,7 +142,8 @@ export default function ProductsPage() {
     const params = new URLSearchParams({ from: periodStart, to: periodEnd, view: "products" });
     if (warehouse) params.set("warehouse", warehouse);
     params.set("includeOrders", "true");
-    if (forceRefreshRef.current) params.set("refresh", "manual");
+    const manual = forceRefreshRef.current;
+    if (manual) params.set("refresh", "manual");
     forceRefreshRef.current = false;
     fetch(`/api/wb/dashboard?${params.toString()}`, {
       signal: controller.signal,
@@ -147,6 +162,15 @@ export default function ProductsPage() {
       .finally(() => {
         if (!controller.signal.aborted) setLoading(false);
       });
+
+    const funnelFrom = countDays(periodStart, periodEnd) > 90 ? shiftDate(periodEnd, -89) : periodStart;
+    const funnelParams = new URLSearchParams({ from: funnelFrom, to: periodEnd });
+    if (manual) funnelParams.set("refresh", "manual");
+    setOfficialFunnelError("");
+    fetch(`/api/wb/market?${funnelParams.toString()}`, { signal: controller.signal, headers: { Accept: "application/json" }, cache: "no-store" })
+      .then(async (response) => { const body = await response.json() as OfficialFunnelData | { error?: string }; if (!response.ok) throw new Error("error" in body && body.error ? body.error : "官方漏斗同步失败"); return body as OfficialFunnelData; })
+      .then((body) => setOfficialFunnel(body))
+      .catch((reason: Error) => { if (reason.name !== "AbortError") setOfficialFunnelError(reason.message); });
     return () => controller.abort();
   }, [periodStart, periodEnd, warehouse, reloadKey]);
 
@@ -349,9 +373,25 @@ export default function ProductsPage() {
 
       <section className="workspace product-workspace">
         <header className="topbar product-topbar">
-          <div><p className="eyebrow">PRODUCT PERFORMANCE · 真实商品数据</p><h1>综合商品分析</h1></div>
+          <div className="product-title-row"><div><p className="eyebrow">PRODUCT PERFORMANCE · 真实商品数据</p><h1>综合商品分析</h1></div><nav className="product-feature-bar" aria-label="商品分析功能"><a href="#official-store-funnel"><span>◫</span><b>店铺官方统计</b><small>浏览 · 加购 · 订单 · 购买</small></a><a href="/market"><span>⌁</span><b>产品行情</b><small>分类与单品深度分析</small></a></nav></div>
           <div className="top-actions"><button className="export-button" onClick={exportCsv} disabled={!filteredProducts.length}>↓ 导出当前表格</button><div className="avatar">Z</div></div>
         </header>
+
+        <section className="product-official-funnel" id="official-store-funnel" aria-label="店铺官方销售漏斗">
+          <header><div><h2>店铺官方销售漏斗</h2><p>来自 WB Analytics API，与下方订单签收统计口径独立；购买与取消归因到原下单日期。</p></div><div><span className="market-source-pill official">WB 官方</span><a href="/market">查看完整行情 →</a></div></header>
+          {officialFunnelError ? <div className="product-funnel-error"><b>官方漏斗暂未更新</b><span>{officialFunnelError}</span><button onClick={refresh}>重试</button></div> : <div className="product-funnel-metrics">
+            <article><span>浏览量</span><b>{officialFunnel?.summary.openCount.toLocaleString() ?? "—"}</b><small>商品卡打开次数</small></article>
+            <article><span>加购量</span><b>{officialFunnel?.summary.cartCount.toLocaleString() ?? "—"}</b><small>进卡→加购 {formatPercent(officialFunnel?.summary.addToCartPercent ?? null)}</small></article>
+            <article><span>订单量</span><b>{officialFunnel?.summary.orderCount.toLocaleString() ?? "—"}</b><small>浏览→下单 {formatPercent(officialFunnel?.summary.orderFromOpenPercent ?? null)}</small></article>
+            <article><span>订单金额</span><b>{officialFunnel ? formatMoney(officialFunnel.summary.orderSum, officialFunnel.currency === "CNY" ? "CNY" : "RUB") : "—"}</b><small>{officialFunnel?.period.from ?? "—"} 至 {officialFunnel?.period.to ?? "—"}</small></article>
+            <article className="good"><span>购买量</span><b>{officialFunnel?.summary.buyoutCount.toLocaleString() ?? "—"}</b><small>购买完成率 {formatPercent(officialFunnel?.summary.buyoutPercent ?? null)}</small></article>
+            <article className="good"><span>购买金额</span><b>{officialFunnel ? formatMoney(officialFunnel.summary.buyoutSum, officialFunnel.currency === "CNY" ? "CNY" : "RUB") : "—"}</b><small>WB 漏斗购买额</small></article>
+            <article className="bad"><span>取消量</span><b>{officialFunnel?.summary.cancelCount.toLocaleString() ?? "—"}</b><small>需结合取消原因复核</small></article>
+            <article className="bad"><span>取消金额</span><b>{officialFunnel ? formatMoney(officialFunnel.summary.cancelSum, officialFunnel.currency === "CNY" ? "CNY" : "RUB") : "—"}</b><small>WB 漏斗取消额</small></article>
+            <article><span>转化率</span><b>{formatPercent(officialFunnel?.summary.orderFromOpenPercent ?? null)}</b><small>加购→下单 {formatPercent(officialFunnel?.summary.cartToOrderPercent ?? null)}</small></article>
+            <article><span>收藏量</span><b>{officialFunnel?.summary.addToWishlist.toLocaleString() ?? "—"}</b><small>加入愿望清单</small></article>
+          </div>}
+        </section>
 
         <section className="product-period-panel" aria-label="选择分析周期">
           <div className="product-period-heading"><strong>时间筛选</strong><small>表格全部指标按所选周期重新计算</small></div>

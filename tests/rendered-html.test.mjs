@@ -34,6 +34,11 @@ test("protects business pages and APIs before login", async () => {
   const api = await requestWithoutLogin("/api/product-costs");
   assert.equal(api.status, 401);
   assert.deepEqual(await api.json(), { error: "请先登录" });
+
+  const marketPage = await requestWithoutLogin("/market");
+  assert.equal(marketPage.status, 302);
+  const marketApi = await requestWithoutLogin("/api/wb/market");
+  assert.equal(marketApi.status, 401);
 });
 
 test("keeps the login page public and security-hardened", async () => {
@@ -82,7 +87,7 @@ test("server-renders the WB Insight dashboard", async () => {
   const sidebar = html.match(/<aside[^>]*class="sidebar"[^>]*>(.*?)<\/aside>/s)?.[1] ?? "";
   assert.ok(sidebar.indexOf("store-switcher") < sidebar.indexOf("sidebar-scroll-area"), "store switcher should be the first sidebar module");
   const navigation = html.match(/<nav[^>]*aria-label="主导航"[^>]*>(.*?)<\/nav>/s)?.[1] ?? "";
-  const expectedOrder = ["经营总览", "商品优化诊断", "评价与提问", "销售状况", "综合商品分析", "产品详情", "价格管理", "库存监控", "退货", "回款与余额", "平台活动评估", "推广"];
+  const expectedOrder = ["经营总览", "商品优化诊断", "评价与提问", "销售状况", "综合商品分析", "产品行情", "产品详情", "价格管理", "库存监控", "退货", "回款与余额", "平台活动评估", "推广"];
   let previousIndex = -1;
   for (const label of expectedOrder) {
     const currentIndex = navigation.indexOf(label);
@@ -101,6 +106,25 @@ test("server-renders the product optimization audit in the second sidebar positi
   assert.match(html, /商品诊断与优化清单/);
   assert.match(html, /图片审美不伪造机器结论/);
   assert.match(html, /查看完整诊断/);
+});
+
+test("server-renders official store funnel and product market intelligence", async () => {
+  const productsResponse = await render("/products");
+  assert.equal(productsResponse.status, 200);
+  const productsHtml = await productsResponse.text();
+  assert.match(productsHtml, /店铺官方销售漏斗/);
+  assert.match(productsHtml, /浏览 · 加购 · 订单 · 购买/);
+  assert.match(productsHtml, /查看完整行情/);
+
+  const marketResponse = await render("/market");
+  assert.equal(marketResponse.status, 200);
+  const marketHtml = await marketResponse.text();
+  assert.match(marketHtml, /产品行情/);
+  assert.match(marketHtml, /店铺转化漏斗/);
+  assert.match(marketHtml, /分类经营对比/);
+  assert.match(marketHtml, /单品行情排行/);
+  assert.match(marketHtml, /官方品牌市场份额/);
+  assert.match(marketHtml, /竞品真实销量不伪造/);
 });
 
 test("server-renders the WB reviews and questions workbench", async () => {
