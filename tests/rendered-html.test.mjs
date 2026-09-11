@@ -192,8 +192,13 @@ test("server-renders editable product matching controls", async () => {
   assert.doesNotMatch(html, /主推分类/);
 
   const source = await import("node:fs/promises").then(({ readFile }) => readFile(new URL("../app/details/page.tsx", import.meta.url), "utf8"));
-  assert.match(source, /卡片完整视图/);
-  assert.match(source, /每张卡片直接展示全部产品资料、费用、售价和利润/);
+  assert.match(source, /卡片内可直接编辑/);
+  assert.match(source, /点击白色字段修改；WB 官方数据和自动计算结果保持只读/);
+  assert.match(source, /ProductCardView[^]*?onUpdate=\{updateCost\}[^]*?onEditImage=\{editImageUrl\}/);
+  assert.match(source, /product-card-edit-input/);
+  assert.match(source, /点击更换商品图片/);
+  assert.match(source, /修改毛利率后售价实时重算/);
+  assert.match(source, /点击填写备注/);
   for (const label of ["商品资料", "基础费用", "平台与售后费用", "价格与利润", "当前在售价", "当前在售总成本", "目标毛利率", "备注", "更新时间"]) {
     assert.match(source, new RegExp(label));
   }
