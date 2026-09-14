@@ -71,6 +71,28 @@ type FinanceData = {
   trend: Array<{ date: string; sales: number; orders: number }>;
 };
 
+type WithdrawalRecord = {
+  id: string;
+  amount: number;
+  currency: string;
+  requestedAt: string;
+  note: string;
+  status: "tracking" | "arrived" | "cancelled";
+  baselineCurrent: number | null;
+  baselineForWithdraw: number | null;
+  balanceChangeObservedAt: string | null;
+  completedAt: string | null;
+};
+
+type WithdrawalTrackerData = {
+  storeId: string;
+  balance: { currency: string; current: number | null; forWithdraw: number | null; fetchedAt: string; source: string };
+  active: WithdrawalRecord | null;
+  history: WithdrawalRecord[];
+  monitor: { intervalSeconds: number; balanceChangeObserved: boolean; stage: "idle" | "awaiting_wb_confirmation" | "balance_change_observed" };
+  officialCapability: { statusApiAvailable: false; balanceApiAvailable: true; source: string; limitation: string };
+};
+
 const MOVEMENT_PAGE_SIZE = 20;
 
 function toInputDate(date: Date) {
@@ -99,6 +121,11 @@ function detailTimestamp(value?: string | null) {
   if (!Number.isFinite(parsed.getTime())) return value;
   return `${new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(parsed)}（北京时间）`;
 }
+function beijingInputTimestamp(date = new Date()) {
+  return new Intl.DateTimeFormat("sv-SE", {
+    timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false,
+  }).format(date).replace(" ", "T");
+}
 function feeBreakdown(movement: FinanceMovement) {
   const labels: Array<[keyof FinanceMovement["feeBreakdown"], string]> = [
     ["logistics", "物流"], ["acquiring", "收款"], ["penalty", "罚款"], ["deduction", "其他扣款"], ["storage", "仓储"], ["acceptance", "入库"],
@@ -123,6 +150,14 @@ export default function FinancePage() {
   const [promotionTrace, setPromotionTrace] = useState<PromotionTrace | null>(null);
   const [traceLoading, setTraceLoading] = useState(false);
   const [showOtherPromotionEntries, setShowOtherPromotionEntries] = useState(false);
+  const [showWithdrawalTracker, setShowWithdrawalTracker] = useState(false);
+  const [withdrawalData, setWithdrawalData] = useState<WithdrawalTrackerData | null>(null);
+  const [withdrawalLoading, setWithdrawalLoading] = useState(false);
+  const [withdrawalError, setWithdrawalError] = useState("");
+  const [withdrawalAmount, setWithdrawalAmount] = useState("");
+  const [withdrawalRequestedAt, setWithdrawalRequestedAt] = useState(() => beijingInputTimestamp());
+  const [withdrawalNote, setWithdrawalNote] = useState("");
+  const [withdrawalReloadKey, setWithdrawalReloadKey] = useState(0);
   const forceRefreshRef = useRef(false);
   const movementPanelRef = useRef<HTMLElement>(null);
 
@@ -174,6 +209,34 @@ export default function FinancePage() {
     return () => controller.abort();
   }, [selectedMovement]);
 
+  useEffect(() => {
+    if (!data?.accountBalance?.fetchedAt) return;
+    const controller = new AbortController();
+    setWithdrawalLoading(true);
+    fetch("/api/wb/withdrawal-tracker", { signal: controller.signal, cache: "no-store", headers: { Accept: "application/json" } })
+      .then(async (response) => {
+        const body = await response.json() as WithdrawalTrackerData | { error?: string };
+        if (!response.ok) throw new Error("error" in body && body.error ? body.error : "提现进度读取失败");
+        return body as WithdrawalTrackerData;
+      })
+      .then((body) => { setWithdrawalData(body); setWithdrawalError(""); })
+      .catch((reason: Error) => { if (reason.name !== "AbortError") setWithdrawalError(reason.message); })
+      .finally(() => { if (!controller.signal.aborted) setWithdrawalLoading(false); });
+    return () => controller.abort();
+  }, [data?.accountBalance?.fetchedAt, withdrawalReloadKey]);
+
+  useEffect(() => {
+    if (!withdrawalData?.active) return;
+    const timer = window.setInterval(() => setWithdrawalReloadKey((key) => key + 1), (withdrawalData.monitor.intervalSeconds || 60) * 1_000);
+    return () => window.clearInterval(timer);
+  }, [withdrawalData?.active?.id, withdrawalData?.monitor.intervalSeconds]);
+
+  useEffect(() => {
+    if (!showWithdrawalTracker || withdrawalData?.active || withdrawalAmount) return;
+    const available = withdrawalData?.balance.forWithdraw ?? data?.accountBalance?.forWithdraw;
+    if (available !== null && available !== undefined && available > 0) setWithdrawalAmount(available.toFixed(2));
+  }, [data?.accountBalance?.forWithdraw, showWithdrawalTracker, withdrawalAmount, withdrawalData?.active, withdrawalData?.balance.forWithdraw]);
+
   const filteredMovements = useMemo(() => {
     const needle = movementQuery.trim().toLocaleLowerCase();
     return (data?.financeMovements ?? []).filter((movement) => {
@@ -200,8 +263,60 @@ export default function FinancePage() {
   const movementSummary = data?.financeMovementSummary;
   const settlementCurrency = settlement?.currency || balance?.currency || "CNY";
   const financeReady = Boolean(balance?.available && settlement?.available);
+  const activeWithdrawal = withdrawalData?.active;
+  const withdrawalCurrency = withdrawalData?.balance.currency || balance?.currency || "CNY";
+  const withdrawalStageLabel = !activeWithdrawal
+    ? "当前没有正在追踪的提现"
+    : withdrawalData?.monitor.balanceChangeObserved
+      ? "已检测到相近金额的余额变化，等待核对到账"
+      : "已记录申请，等待 WB 后台付款状态";
   function refresh() { forceRefreshRef.current = true; setLoading(true); setError(""); setReloadKey((key) => key + 1); }
   function openMovementDetail(movement: FinanceMovement) { setPromotionTrace(null); setShowOtherPromotionEntries(false); setTraceLoading(movement.isAdvertising); setSelectedMovement(movement); }
+  async function startWithdrawalTracking() {
+    const amount = Number(withdrawalAmount);
+    if (!Number.isFinite(amount) || amount <= 0) { setWithdrawalError("请输入正确的提现金额"); return; }
+    setWithdrawalLoading(true);
+    setWithdrawalError("");
+    try {
+      const response = await fetch("/api/wb/withdrawal-tracker", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({ amount, requestedAt: `${withdrawalRequestedAt}:00+08:00`, note: withdrawalNote }),
+      });
+      const body = await response.json() as WithdrawalTrackerData | { error?: string };
+      if (!response.ok) throw new Error("error" in body && body.error ? body.error : "提现追踪保存失败");
+      setWithdrawalData(body as WithdrawalTrackerData);
+      setWithdrawalAmount("");
+      setWithdrawalNote("");
+    } catch (reason) {
+      setWithdrawalError(reason instanceof Error ? reason.message : "提现追踪保存失败");
+    } finally {
+      setWithdrawalLoading(false);
+    }
+  }
+  async function closeWithdrawalTracking(action: "arrived" | "cancel") {
+    const confirmed = window.confirm(action === "arrived"
+      ? "请确认收款银行账户已经实际到账。确认后，本次提现将标记为“已确认到账”并进入历史记录。"
+      : "确认结束本次提现追踪吗？结束后会保留历史记录，但不代表款项已经到账。");
+    if (!confirmed) return;
+    setWithdrawalLoading(true);
+    setWithdrawalError("");
+    try {
+      const response = await fetch("/api/wb/withdrawal-tracker", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({ action }),
+      });
+      const body = await response.json() as WithdrawalTrackerData | { error?: string };
+      if (!response.ok) throw new Error("error" in body && body.error ? body.error : "提现追踪更新失败");
+      setWithdrawalData(body as WithdrawalTrackerData);
+      setWithdrawalRequestedAt(beijingInputTimestamp());
+    } catch (reason) {
+      setWithdrawalError(reason instanceof Error ? reason.message : "提现追踪更新失败");
+    } finally {
+      setWithdrawalLoading(false);
+    }
+  }
 
   return (
     <main className="app-shell">
@@ -212,10 +327,44 @@ export default function FinancePage() {
         <section className="finance-stat-grid">
           <article className="featured"><span>本期已结算净额</span><strong>{settlement?.available ? money(movementSummary?.netChange ?? metrics?.payoutAmount, settlementCurrency) : "—"}</strong><small>{settlement?.available ? `${movementSummary?.entries ?? 0} 条 WB 正式结算明细` : "未读取到正式财务报告，不使用预估值代替"}</small></article>
           <button type="button" className={`finance-balance-card ${showMovements ? "active" : ""}`} aria-expanded={showMovements} onClick={() => setShowMovements((value) => !value)}><span>账户当前余额</span><strong>{money(balance?.current, balance?.currency || "CNY")}</strong><small>余额读取时间：{detailTimestamp(balance?.fetchedAt)}</small><small>本期账单最新日期：{billDateLabel}</small><small>账单读取时间：{detailTimestamp(settlement?.fetchedAt)}</small><em>{showMovements ? "收起资金明细 ↑" : "点击查看逐笔资金变动 →"}</em></button>
-          <article><span>可提现余额</span><strong>{money(balance?.forWithdraw, balance?.currency || "CNY")}</strong><small>WB 字段 for_withdraw · 当前可提取金额</small></article>
+          <button type="button" className={`finance-withdrawal-card ${showWithdrawalTracker ? "active" : ""}`} aria-expanded={showWithdrawalTracker} onClick={() => setShowWithdrawalTracker((value) => !value)}><span>可提现余额</span><strong>{money(withdrawalData?.balance.forWithdraw ?? balance?.forWithdraw, withdrawalCurrency)}</strong><small>{activeWithdrawal ? `正在追踪 ${money(activeWithdrawal.amount, activeWithdrawal.currency)}` : "WB 字段 for_withdraw · 当前可提取金额"}</small><em>{showWithdrawalTracker ? "收起提现进度 ↑" : activeWithdrawal ? "查看正在提现的进度 →" : "记录并追踪本次提现 →"}</em></button>
           <article><span>本期销售额</span><strong>{money(metrics?.salesAmount, "RUB")}</strong><small>{metrics?.ordersCount ?? 0} 笔有效订单 · 销售端货币</small></article>
           <article className={(metrics?.returnsCount ?? 0) > 0 ? "attention" : ""}><span>退货与取消</span><strong>{metrics?.returnsCount ?? 0}</strong><small>比例 {(metrics?.returnRate ?? 0).toFixed(1)}%</small></article>
         </section>
+
+        {showWithdrawalTracker && <section className="withdrawal-monitor-panel" aria-labelledby="withdrawal-monitor-title">
+          <header className="withdrawal-monitor-header">
+            <div><span>WITHDRAWAL MONITOR · 每 60 秒核对</span><h2 id="withdrawal-monitor-title">提现进度监测</h2><p>自动读取当前店铺的 WB 官方余额变化；付款状态未开放 API 的阶段会明确标为“待 WB 后台确认”。</p></div>
+            <div className="withdrawal-monitor-live"><i className={withdrawalLoading ? "loading" : ""} /> <b>{withdrawalLoading ? "正在核对" : "余额实时监测已开启"}</b><small>最近核对：{detailTimestamp(withdrawalData?.balance.fetchedAt)}</small></div>
+          </header>
+
+          {withdrawalError && <div className="withdrawal-monitor-error">{withdrawalError}</div>}
+          {activeWithdrawal ? <div className="withdrawal-active-layout">
+            <div className="withdrawal-active-summary">
+              <div className="withdrawal-amount-line"><span>本次正在提现</span><strong>{money(activeWithdrawal.amount, activeWithdrawal.currency)}</strong><em>{withdrawalData?.monitor.balanceChangeObserved ? "余额变化已检测" : "等待状态确认"}</em></div>
+              <dl>
+                <div><dt>申请时间</dt><dd>{detailTimestamp(activeWithdrawal.requestedAt)}</dd></div>
+                <div><dt>记录时账户余额</dt><dd>{money(activeWithdrawal.baselineCurrent, activeWithdrawal.currency)}</dd></div>
+                <div><dt>当前账户余额</dt><dd>{money(withdrawalData?.balance.current, withdrawalCurrency)}</dd></div>
+                <div><dt>当前可提现余额</dt><dd>{money(withdrawalData?.balance.forWithdraw, withdrawalCurrency)}</dd></div>
+              </dl>
+              {activeWithdrawal.note && <p className="withdrawal-note">备注：{activeWithdrawal.note}</p>}
+              <div className="withdrawal-actions"><a href="https://seller.wildberries.ru/" target="_blank" rel="noreferrer">打开 WB 付款历史</a><button type="button" className="refresh" disabled={withdrawalLoading} onClick={() => setWithdrawalReloadKey((key) => key + 1)}>立即核对余额</button><button type="button" className="cancel" disabled={withdrawalLoading} onClick={() => closeWithdrawalTracking("cancel")}>结束追踪</button><button type="button" className="arrived" disabled={withdrawalLoading} onClick={() => closeWithdrawalTracking("arrived")}>我已确认到账</button></div>
+            </div>
+            <ol className="withdrawal-timeline">
+              <li className="done"><i>✓</i><div><b>已记录提现申请</b><span>{detailTimestamp(activeWithdrawal.requestedAt)}</span></div></li>
+              <li className={withdrawalData?.monitor.balanceChangeObserved ? "done" : "active"}><i>{withdrawalData?.monitor.balanceChangeObserved ? "✓" : "2"}</i><div><b>{withdrawalData?.monitor.balanceChangeObserved ? "检测到相近金额的余额下降" : "等待 WB 处理"}</b><span>{withdrawalData?.monitor.balanceChangeObserved ? `${detailTimestamp(activeWithdrawal.balanceChangeObservedAt)}；仅为余额侧证据` : "请在 WB 卖家后台“余额 → 付款历史”核对官方状态"}</span></div></li>
+              <li className={withdrawalData?.monitor.balanceChangeObserved ? "active" : "pending"}><i>3</i><div><b>银行入账处理中</b><span>WB 公开 API 不返回银行打款进度，系统不会用余额变化冒充已到账</span></div></li>
+              <li className="pending"><i>4</i><div><b>确认到账</b><span>收到银行款项后点击“我已确认到账”，本次记录将进入历史</span></div></li>
+            </ol>
+          </div> : <div className="withdrawal-empty-layout">
+            <div className="withdrawal-start-copy"><span>当前状态</span><h3>{withdrawalStageLabel}</h3><p>在 WB 提交提现后，在这里记录金额和时间。系统将每 60 秒核对官方余额，并把本次记录按店铺独立保存。</p><dl><div><dt>账户余额</dt><dd>{money(withdrawalData?.balance.current ?? balance?.current, withdrawalCurrency)}</dd></div><div><dt>可提现余额</dt><dd>{money(withdrawalData?.balance.forWithdraw ?? balance?.forWithdraw, withdrawalCurrency)}</dd></div></dl></div>
+            <div className="withdrawal-start-form"><label><span>本次提现金额</span><div><b>{withdrawalCurrency}</b><input type="number" min="0.01" step="0.01" value={withdrawalAmount} onChange={(event) => setWithdrawalAmount(event.target.value)} /></div></label><label><span>WB 提交时间（北京时间）</span><input type="datetime-local" value={withdrawalRequestedAt} onChange={(event) => setWithdrawalRequestedAt(event.target.value)} /></label><label><span>备注（可选）</span><input type="text" maxLength={200} placeholder="例如：提现到工商银行卡" value={withdrawalNote} onChange={(event) => setWithdrawalNote(event.target.value)} /></label><button type="button" disabled={withdrawalLoading} onClick={startWithdrawalTracking}>{withdrawalLoading ? "正在建立追踪…" : "开始追踪本次提现"}</button></div>
+          </div>}
+
+          <div className="withdrawal-capability-note"><b>官方接口能力边界</b><p>{withdrawalData?.officialCapability.limitation || "WB 公开 API 仅返回账户余额与可提现余额；提现付款状态需在 WB 卖家后台的付款历史中确认。"}</p></div>
+          {(withdrawalData?.history.length ?? 0) > 0 && <div className="withdrawal-history"><div><h3>最近提现记录</h3><span>按当前店铺独立保存</span></div><div className="withdrawal-history-list">{withdrawalData?.history.slice(0, 5).map((item) => <article key={item.id}><span>{detailTimestamp(item.requestedAt)}</span><b>{money(item.amount, item.currency)}</b><em className={item.status}>{item.status === "arrived" ? "已确认到账" : "已结束追踪"}</em><small>{item.completedAt ? `完成：${detailTimestamp(item.completedAt)}` : "—"}</small></article>)}</div></div>}
+        </section>}
 
         {showMovements && <section ref={movementPanelRef} className="finance-movement-panel">
           <div className="finance-movement-heading"><div><span>WB OFFICIAL FINANCE LEDGER</span><h2>账户资金结算明细</h2><p>每一行对应 WB 正式财务报告的一行；每笔均可查看原始类型、时间、金额组成和可追溯关联。余额与账单分别更新，最新账单日期以已返回记录为准。</p></div><div className="finance-movement-source"><b>本期账单最新日期：{billDateLabel}</b><small>{settlement?.source}<br />账单读取时间：{detailTimestamp(settlement?.fetchedAt)}</small></div></div>
