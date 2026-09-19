@@ -4,6 +4,7 @@ import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { AppSidebar } from "../_components/app-sidebar";
 import { calculateCurrentSellingCost, type CurrentSellingCostStatus } from "../_lib/current-selling-cost";
 import { findCurrentSellingPrice, type SellingPriceProduct } from "../_lib/current-selling-price";
+import { inferProductCostCurrency, switchProductCostCurrency, type ProductCostCurrency } from "../_lib/product-cost-currency";
 import { normalizeProductSku } from "../_lib/product-cost-aliases";
 import { matchesProductDeletion, type ProductDeletionMarker } from "../_lib/product-deletions";
 import { reconcileProductCosts } from "../_lib/product-matching";
@@ -238,16 +239,19 @@ type ProductCardViewProps = {
   priceData: PriceData | null;
   priceError: string;
   dirty: Set<string>;
+  costCurrencies: Record<string, ProductCostCurrency>;
   onUpdate: (key: string, field: keyof CostRow, value: string | number) => void;
+  onCurrencyChange: (key: string, currency: ProductCostCurrency) => void;
   onEditImage: (key: string, currentUrl: string) => void;
 };
 
-function ProductCardView({ rows, loading, priceData, priceError, dirty, onUpdate, onEditImage }: ProductCardViewProps) {
+function ProductCardView({ rows, loading, priceData, priceError, dirty, costCurrencies, onUpdate, onCurrencyChange, onEditImage }: ProductCardViewProps) {
   if (!loading && rows.length === 0) return <div className="product-card-empty"><b>没有找到符合条件的商品</b><span>请更换产品分类或清除搜索条件。</span></div>;
 
   return <div className="product-card-grid" aria-label="产品详情卡片">
     {rows.map(({ key, product, cost }) => {
       const value = formulas(cost);
+      const costCurrency = costCurrencies[key] ?? inferProductCostCurrency(cost);
       const imageUrl = cost.imageUrl || product?.image;
       const imageLabel = cost.imageUrl ? "自定义图片" : product?.image ? "WB 主图" : "待补图片";
       const currentSellingPrice = findCurrentSellingPrice(
@@ -277,7 +281,7 @@ function ProductCardView({ rows, loading, priceData, priceError, dirty, onUpdate
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img src={imageUrl} alt={product?.name || cost.sellerSku || "商品图片"} loading="lazy" referrerPolicy="no-referrer" />
           </> : "点击补图"}<i aria-hidden="true">✎</i></button>
-          <div className="product-card-title"><div><CardTextInput label={`${label} 产品分类`} value={cost.category} placeholder={product?.category || "输入分类"} onChange={(next) => onUpdate(key, "category", next)} /><em className={product ? "online" : "offline"} title="WB 匹配状态，只读">{product ? "已上线" : key.startsWith("draft:") ? "待登记" : "未匹配"}</em>{dirty.has(key) && <em className="dirty">待保存</em>}</div><h3 title="商品名称来自 WB API，仅供查看">{product?.name || cost.sellerSku || "未命名新产品"}</h3><label className="product-card-seller-sku"><span>卖家商品编号</span><CardTextInput mono label={`${label} 卖家商品编号`} value={cost.sellerSku} placeholder="必填商品编号" onChange={(next) => onUpdate(key, "sellerSku", next)} /></label></div>
+          <div className="product-card-title"><div><CardTextInput label={`${label} 产品分类`} value={cost.category} placeholder={product?.category || "输入分类"} onChange={(next) => onUpdate(key, "category", next)} /><em className={product ? "online" : "offline"} title="WB 匹配状态，只读">{product ? "已上线" : key.startsWith("draft:") ? "待登记" : "未匹配"}</em>{dirty.has(key) && <em className="dirty">待保存</em>}</div><h3 title="商品名称来自 WB API，仅供查看">{product?.name || cost.sellerSku || "未命名新产品"}</h3><div className="product-card-seller-sku"><span>卖家商品编号</span><CardTextInput mono label={`${label} 卖家商品编号`} value={cost.sellerSku} placeholder="必填商品编号" onChange={(next) => onUpdate(key, "sellerSku", next)} /></div></div>
           <button type="button" className={`product-card-image-state ${imageUrl ? "complete" : "missing"}`} onClick={() => onEditImage(key, cost.imageUrl)}>{imageLabel}<small>点击修改</small></button>
         </header>
 
@@ -292,10 +296,11 @@ function ProductCardView({ rows, loading, priceData, priceError, dirty, onUpdate
           <div className="editable"><dt>表内顺序</dt><dd><CardNumberInput blankZero label={`${label} 表内顺序`} value={cost.sortOrder} step="1" onChange={(next) => onUpdate(key, "sortOrder", next)} /></dd></div>
         </dl></section>
 
-        <section className="product-card-section"><h4><span>02</span>基础费用</h4><dl className="product-card-data">
-          <div className="editable"><dt>产品成本（₽）</dt><dd><CardNumberInput blankZero prefix="₽" label={`${label} 产品成本卢布`} value={cost.productCostRub} onChange={(next) => onUpdate(key, "productCostRub", next)} /></dd></div>
-          <div className={cost.productCostRub > 0 ? "editable" : "read-only"}><dt>汇率{cost.productCostRub <= 0 ? " · 不适用" : ""}</dt><dd>{cost.productCostRub > 0 ? <CardNumberInput label={`${label} 汇率`} value={cost.exchangeRate} onChange={(next) => onUpdate(key, "exchangeRate", next)} /> : "—"}</dd></div>
-          <div className={cost.productCostRub > 0 ? "read-only" : "editable"}><dt>产品成本（¥）{cost.productCostRub > 0 ? " · 自动" : ""}</dt><dd>{cost.productCostRub > 0 ? `¥${display(value.productCostCny)}` : <CardNumberInput blankZero prefix="¥" label={`${label} 人民币产品成本`} value={cost.productCostCny} onChange={(next) => onUpdate(key, "productCostCny", next)} />}</dd></div>
+        <section className="product-card-section"><h4><span>02</span>基础费用</h4><dl className="product-card-data product-card-cost-data">
+          <div className="editable currency-picker"><dt>供货商结算币种</dt><dd><select aria-label={`${label} 供货商结算币种`} value={costCurrency} onChange={(event) => onCurrencyChange(key, event.target.value as ProductCostCurrency)}><option value="CNY">人民币 ¥</option><option value="RUB">卢布 ₽</option></select></dd></div>
+          <div className={costCurrency === "RUB" ? "editable" : "read-only"}><dt>卢布成本{costCurrency === "CNY" ? " · 不使用" : ""}</dt><dd>{costCurrency === "RUB" ? <CardNumberInput blankZero prefix="₽" label={`${label} 产品成本卢布`} value={cost.productCostRub} onChange={(next) => onUpdate(key, "productCostRub", next)} /> : "—"}</dd></div>
+          <div className="editable"><dt>汇率（₽ ÷ ¥）</dt><dd><CardNumberInput label={`${label} 汇率`} value={cost.exchangeRate} onChange={(next) => onUpdate(key, "exchangeRate", next)} /></dd></div>
+          <div className={costCurrency === "RUB" ? "read-only" : "editable"}><dt>人民币成本{costCurrency === "RUB" ? " · 自动换算" : " · 直接填写"}</dt><dd>{costCurrency === "RUB" ? `¥${display(value.productCostCny)}` : <CardNumberInput blankZero prefix="¥" label={`${label} 人民币产品成本`} value={cost.productCostCny} onChange={(next) => onUpdate(key, "productCostCny", next)} />}</dd></div>
           <div className="editable"><dt>操作费</dt><dd><CardNumberInput blankZero prefix="¥" label={`${label} 操作费`} value={cost.handlingFeeCny} onChange={(next) => onUpdate(key, "handlingFeeCny", next)} /></dd></div>
           <div className="read-only" title="按商品尺寸自动计算"><dt>尾程物流费 · 自动</dt><dd>¥{display(value.lastMileFeeCny)}</dd></div>
         </dl></section>
@@ -331,6 +336,7 @@ export default function ProductDetailsPage() {
   const [priceData, setPriceData] = useState<PriceData | null>(null);
   const [priceError, setPriceError] = useState("");
   const [costs, setCosts] = useState<Record<string, CostRow>>({});
+  const [costCurrencies, setCostCurrencies] = useState<Record<string, ProductCostCurrency>>({});
   const [loading, setLoading] = useState(true);
   const [matching, setMatching] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -397,6 +403,7 @@ export default function ProductDetailsPage() {
       setPriceData(priceResult.value);
       setPriceError(priceResult.error);
       setCosts(nextCosts);
+      setCostCurrencies({});
       setDirty(new Set());
       setSelected(new Set());
       setError(dashboardResult.error ? `${dashboardResult.error}，产品记录表仍可编辑` : "");
@@ -467,6 +474,18 @@ export default function ProductDetailsPage() {
     setDirty((current) => new Set(current).add(key));
     setError("");
     setMessage("");
+  }
+
+  function changeCostCurrency(key: string, currency: ProductCostCurrency) {
+    setCosts((current) => {
+      const cost = current[key];
+      if (!cost) return current;
+      return { ...current, [key]: { ...cost, ...switchProductCostCurrency(cost, currency) } };
+    });
+    setCostCurrencies((current) => ({ ...current, [key]: currency }));
+    setDirty((current) => new Set(current).add(key));
+    setError("");
+    setMessage(currency === "CNY" ? "已切换为人民币结算，可直接填写人民币产品成本" : "已切换为卢布结算，人民币成本将按汇率自动换算");
   }
 
   function toggleRow(key: string) {
@@ -595,6 +614,11 @@ export default function ProductDetailsPage() {
         delete next[key];
         return next;
       });
+      setCostCurrencies((current) => {
+        const next = { ...current };
+        delete next[key];
+        return next;
+      });
       setDirty((current) => {
         const next = new Set(current);
         next.delete(key);
@@ -627,6 +651,11 @@ export default function ProductDetailsPage() {
       if (!response.ok || !body.deleted) throw new Error(body.error || `${label} 删除失败`);
 
       setCosts((current) => {
+        const next = { ...current };
+        delete next[key];
+        return next;
+      });
+      setCostCurrencies((current) => {
         const next = { ...current };
         delete next[key];
         return next;
@@ -706,6 +735,15 @@ export default function ProductDetailsPage() {
         }
         return next;
       });
+      setCostCurrencies((current) => {
+        const next = { ...current };
+        for (const [oldKey, newKey] of savedRows) {
+          const currency = next[oldKey];
+          if (oldKey !== newKey) delete next[oldKey];
+          if (currency) next[newKey] = currency;
+        }
+        return next;
+      });
       setDirty((current) => {
         const next = new Set(current);
         for (const [oldKey, newKey] of savedRows) {
@@ -748,7 +786,7 @@ export default function ProductDetailsPage() {
 
         <section className="pricing-panel">
           <div className="pricing-hero">
-            <div className="pricing-hero-copy"><span className="pricing-hero-icon">⌁</span><div><span className="pricing-workbench-kicker">SMART PRICING · 智能反推定价</span><h2>产品定价工作台</h2><p>修改任意成本、尺寸或费率，最终售价与全部费用立即联动更新。</p></div></div>
+            <div className="pricing-hero-copy"><span className="pricing-hero-icon">⌁</span><div><span className="pricing-workbench-kicker">SMART PRICING · 智能反推定价</span><h2>产品定价工作台</h2><p>供货商成本可选人民币直填或卢布换算，最终售价与全部费用立即联动更新。</p></div></div>
             <div className="pricing-hero-metrics"><div><span>产品记录</span><b>{rows.length}</b></div><div><span>WB 已匹配</span><b>{rows.filter((row) => row.product).length}</b></div><div className={dirty.size ? "attention" : ""}><span>待保存</span><b>{dirty.size}</b></div></div>
           </div>
 
@@ -775,22 +813,23 @@ export default function ProductDetailsPage() {
             <table className="pricing-ledger-table" aria-label="产品定价表">
               <colgroup>
                 <col className="col-a" /><col className="col-b" /><col className="col-c" /><col className="col-d" /><col className="col-e" /><col className="col-f" /><col className="col-g" />
-                <col className="col-h" /><col className="col-i" /><col className="col-j" /><col className="col-k" /><col className="col-l" /><col className="col-m" /><col className="col-n" />
+                <col className="col-h" /><col className="col-i" /><col className="col-j" /><col className="col-k" /><col className="col-cost-currency" /><col className="col-l" /><col className="col-m" /><col className="col-n" />
                 <col className="col-o" /><col className="col-p" /><col className="col-q" /><col className="col-r" /><col className="col-s" /><col className="col-t" /><col className="col-u" />
                 <col className="col-v" /><col className="col-w" /><col className="col-x" /><col className="col-y" /><col className="col-z" /><col className="col-aa" /><col className="col-ab" /><col className="col-ac" />
                 <col className="col-ad" /><col className="col-ae" /><col className="col-af" />
               </colgroup>
               <thead>
-                <tr className="pricing-group-row"><th colSpan={11}><span>01</span>商品资料</th><th colSpan={5}><span>02</span>基础费用</th><th colSpan={6}><span>03</span>平台费用</th><th colSpan={2}><span>04</span>售后费用</th><th colSpan={7} className="result-group"><span>05</span>价格与利润</th><th className="action-group"><span>06</span>操作</th></tr>
+                <tr className="pricing-group-row"><th colSpan={11}><span>01</span>商品资料</th><th colSpan={6}><span>02</span>基础费用</th><th colSpan={6}><span>03</span>平台费用</th><th colSpan={2}><span>04</span>售后费用</th><th colSpan={7} className="result-group"><span>05</span>价格与利润</th><th className="action-group"><span>06</span>操作</th></tr>
                 <tr className="pricing-heading-row">
                   <th><label className="batch-check-all"><input type="checkbox" checked={allFilteredSelected} onChange={toggleFilteredRows} aria-label={allFilteredSelected ? "取消选择当前筛选结果" : "选择当前筛选结果"} /><span>产品分类</span></label></th><th>卖家商品编号</th><th>SKU</th><th>上线状态</th><th>商品图片</th><th>图片状态</th><th>规格</th><th>长<br /><small>cm</small></th><th>宽<br /><small>cm</small></th><th>高<br /><small>cm</small></th><th>重量<br /><small>g</small></th>
-                  <th>产品成本<br /><small>₽</small></th><th>汇率</th><th>产品成本<br /><small>¥</small></th><th>操作费<br /><small>¥</small></th><th>尾程物流费<br /><small>¥ · 自动</small></th><th>平台佣金率</th><th>平台佣金<br /><small>¥ · 自动</small></th><th>广告投流率</th><th>广告费用<br /><small>¥ · 自动</small></th><th>活动折扣率</th><th>折扣费用<br /><small>¥ · 自动</small></th><th>退损率</th><th>退损费<br /><small>¥ · 自动</small></th>
+                  <th>结算币种<br /><small>供货商</small></th><th>产品成本<br /><small>₽</small></th><th>汇率<br /><small>₽ ÷ ¥</small></th><th>产品成本<br /><small>¥</small></th><th>操作费<br /><small>¥</small></th><th>尾程物流费<br /><small>¥ · 自动</small></th><th>平台佣金率</th><th>平台佣金<br /><small>¥ · 自动</small></th><th>广告投流率</th><th>广告费用<br /><small>¥ · 自动</small></th><th>活动折扣率</th><th>折扣费用<br /><small>¥ · 自动</small></th><th>退损率</th><th>退损费<br /><small>¥ · 自动</small></th>
                   <th>总成本<br /><small>¥</small></th><th>参考售价<br /><small>¥</small></th><th className="final-price-heading">最终售价<br /><small>¥ · 反推</small></th><th className="current-selling-price-heading">当前在售价<br /><small>WB API · 当前折扣价</small></th><th className="current-selling-cost-heading">当前在售总成本<br /><small>¥ · 按当前售价计算</small></th><th>毛利<br /><small>¥</small></th><th>目标毛利率</th><th className="delete-action-heading">删除</th>
                 </tr>
               </thead>
               <tbody>
                 {filteredRows.map(({ key, product, cost }) => {
                   const value = formulas(cost);
+                  const costCurrency = costCurrencies[key] ?? inferProductCostCurrency(cost);
                   const invalid = value.actualSalePriceCny === null;
                   const isDraft = key.startsWith("draft:");
                   const label = cost.sellerSku || "新产品";
@@ -819,9 +858,10 @@ export default function ProductDetailsPage() {
                         <td><NumberCell blankZero label={`${label} 宽`} value={cost.widthCm} onChange={(next) => updateCost(key, "widthCm", next)} /></td>
                         <td><NumberCell blankZero label={`${label} 高`} value={cost.heightCm} onChange={(next) => updateCost(key, "heightCm", next)} /></td>
                         <td><NumberCell blankZero label={`${label} 重量`} step="1" value={cost.weightG} onChange={(next) => updateCost(key, "weightG", next)} /></td>
-                        <td><NumberCell blankZero label={`${label} 产品成本卢布`} value={cost.productCostRub} onChange={(next) => updateCost(key, "productCostRub", next)} /></td>
-                        <td><NumberCell blankZero label={`${label} 汇率`} value={cost.productCostRub > 0 ? cost.exchangeRate : 0} onChange={(next) => updateCost(key, "exchangeRate", next)} /></td>
-                        <td className={cost.productCostRub > 0 ? "formula-cell" : "manual-cost-cell"}>{cost.productCostRub > 0 ? <span className="computed-value">{display(value.productCostCny)}</span> : <NumberCell blankZero label={`${label} 人民币产品成本`} value={cost.productCostCny} onChange={(next) => updateCost(key, "productCostCny", next)} />}</td>
+                        <td className="cost-currency-cell"><select aria-label={`${label} 供货商结算币种`} value={costCurrency} onChange={(event) => changeCostCurrency(key, event.target.value as ProductCostCurrency)}><option value="CNY">人民币 ¥</option><option value="RUB">卢布 ₽</option></select></td>
+                        <td className={costCurrency === "CNY" ? "formula-cell unused-cost-cell" : ""}>{costCurrency === "RUB" ? <NumberCell blankZero label={`${label} 产品成本卢布`} value={cost.productCostRub} onChange={(next) => updateCost(key, "productCostRub", next)} /> : <span className="computed-value">—</span>}</td>
+                        <td><NumberCell label={`${label} 汇率`} value={cost.exchangeRate} onChange={(next) => updateCost(key, "exchangeRate", next)} /></td>
+                        <td className={costCurrency === "RUB" ? "formula-cell" : "manual-cost-cell"}>{costCurrency === "RUB" ? <span className="computed-value">{display(value.productCostCny)}</span> : <NumberCell blankZero label={`${label} 人民币产品成本`} value={cost.productCostCny} onChange={(next) => updateCost(key, "productCostCny", next)} />}</td>
                         <td><NumberCell blankZero label={`${label} 操作费`} value={cost.handlingFeeCny} onChange={(next) => updateCost(key, "handlingFeeCny", next)} /></td>
                         <td className="formula-cell"><span className="computed-value">{display(value.lastMileFeeCny)}</span></td>
                         <td><NumberCell label={`${label} 平台佣金率`} suffix="%" value={cost.commissionRate} onChange={(next) => updateCost(key, "commissionRate", next)} /></td>
@@ -841,16 +881,16 @@ export default function ProductDetailsPage() {
                         <td><NumberCell label={`${label} 毛利率`} suffix="%" value={cost.targetMarginRate} onChange={(next) => updateCost(key, "targetMarginRate", next)} /></td>
                         <td className="delete-action-cell">{selected.has(key) && <button type="button" disabled={deleting.has(key)} onClick={() => deleteRow(key, product, cost)}>{deleting.has(key) ? "删除中…" : "删除本行"}</button>}</td>
                       </tr>
-                      <tr className="inline-add-row"><td colSpan={32}><button aria-label={`在 ${label} 后添加新产品`} onClick={() => addRowAfter(key)}><span>＋</span>在此处插入新产品</button></td></tr>
+                      <tr className="inline-add-row"><td colSpan={33}><button aria-label={`在 ${label} 后添加新产品`} onClick={() => addRowAfter(key)}><span>＋</span>在此处插入新产品</button></td></tr>
                     </Fragment>
                   );
                 })}
-                {!loading && filteredRows.length === 0 && <tr className="sheet-empty-row"><td colSpan={32}>{query || categoryFilter !== "all" ? "没有找到符合条件的商品" : "还没有产品记录"}</td></tr>}
+                {!loading && filteredRows.length === 0 && <tr className="sheet-empty-row"><td colSpan={33}>{query || categoryFilter !== "all" ? "没有找到符合条件的商品" : "还没有产品记录"}</td></tr>}
               </tbody>
             </table>
           </div>
           <footer className="pricing-footer"><div><b>实时定价公式</b><span>基础成本 ÷（1 − 佣金 − 广告 − 折扣 − 退损 − 目标毛利率）</span></div><button className="append-product-button" onClick={() => addRowAfter(rows.at(-1)?.key ?? null)}><span>＋</span>在末尾添加产品</button></footer>
-          </> : <><ProductCardView rows={filteredRows} loading={loading} priceData={priceData} priceError={priceError} dirty={dirty} onUpdate={updateCost} onEditImage={editImageUrl} /><footer className="product-card-view-footer"><span>当前展示 <b>{filteredRows.length}</b> / {rows.length} 个产品</span><small>白色字段可直接修改，修改后点击右上角“保存修改”；平台数据与公式结果只读。</small></footer></>}
+          </> : <><ProductCardView rows={filteredRows} loading={loading} priceData={priceData} priceError={priceError} dirty={dirty} costCurrencies={costCurrencies} onUpdate={updateCost} onCurrencyChange={changeCostCurrency} onEditImage={editImageUrl} /><footer className="product-card-view-footer"><span>当前展示 <b>{filteredRows.length}</b> / {rows.length} 个产品</span><small>白色字段可直接修改，修改后点击右上角“保存修改”；平台数据与公式结果只读。</small></footer></>}
         </section>
       </section>
     </main>
