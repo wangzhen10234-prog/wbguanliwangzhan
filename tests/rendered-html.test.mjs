@@ -73,7 +73,6 @@ test("server-renders the WB Insight dashboard", async () => {
   assert.match(html, /销售状况/);
   assert.match(html, /href="\/returns"[^>]*>.*退货/s);
   assert.match(html, /综合商品分析/);
-  assert.match(html, /全市场选品/);
   assert.match(html, /产品详情/);
   assert.match(html, /价格管理/);
   assert.match(html, /库存监控/);
@@ -88,7 +87,7 @@ test("server-renders the WB Insight dashboard", async () => {
   const sidebar = html.match(/<aside[^>]*class="sidebar"[^>]*>(.*?)<\/aside>/s)?.[1] ?? "";
   assert.ok(sidebar.indexOf("store-switcher") < sidebar.indexOf("sidebar-scroll-area"), "store switcher should be the first sidebar module");
   const navigation = html.match(/<nav[^>]*aria-label="主导航"[^>]*>(.*?)<\/nav>/s)?.[1] ?? "";
-  const expectedOrder = ["经营总览", "商品优化诊断", "评价与提问", "销售状况", "综合商品分析", "产品行情", "全市场选品", "产品详情", "价格管理", "库存监控", "退货", "回款与余额", "平台活动评估", "推广"];
+  const expectedOrder = ["经营总览", "商品优化诊断", "评价与提问", "销售状况", "综合商品分析", "产品行情", "产品详情", "价格管理", "库存监控", "退货", "回款与余额", "平台活动评估", "推广"];
   let previousIndex = -1;
   for (const label of expectedOrder) {
     const currentIndex = navigation.indexOf(label);
@@ -96,20 +95,6 @@ test("server-renders the WB Insight dashboard", async () => {
     previousIndex = currentIndex;
   }
   assert.doesNotMatch(html, /codex-preview|SkeletonPreview|Your site is taking shape/);
-});
-
-test("server-renders whole-market niche analytics without fake marketplace values", async () => {
-  const response = await render("/niches");
-  assert.equal(response.status, 200);
-  const html = await response.text();
-  assert.match(html, /WB 全市场选品/);
-  assert.match(html, /分析 Wildberries 全平台品类/);
-  assert.match(html, /WB 官方 API 自动同步/);
-  assert.match(html, /立即同步官方 API/);
-  assert.doesNotMatch(html, /导入 WB 官方报表/);
-  assert.match(html, /与自己店铺的经营数据严格隔离/);
-  assert.match(html, /<main[^>]*class="workspace niche-workspace"/);
-  assert.doesNotMatch(html, /建议囤货/);
 });
 
 test("server-renders the product optimization audit in the second sidebar position", async () => {
