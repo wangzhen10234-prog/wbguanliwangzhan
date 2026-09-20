@@ -50,3 +50,61 @@ export const wbSyncLocks = sqliteTable("wb_sync_locks", {
   cacheKey: text("cache_key").primaryKey(),
   expiresAt: integer("expires_at").notNull(),
 });
+
+export const marketDataSources = sqliteTable("market_data_sources", {
+  id: text("id").primaryKey(),
+  source: text("source").notNull(),
+  confidence: text("confidence").notNull(),
+  sourceFile: text("source_file").notNull().default(""),
+  importedAt: text("imported_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  metadata: text("metadata").notNull().default("{}"),
+});
+
+export const marketCategories = sqliteTable("market_categories", {
+  subjectId: text("subject_id").primaryKey(),
+  nameRu: text("name_ru").notNull(),
+  nameZh: text("name_zh").notNull().default(""),
+  parentId: text("parent_id").notNull().default(""),
+  parentName: text("parent_name").notNull().default(""),
+  level: integer("level").notNull().default(1),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+
+export const marketCategoryMetrics = sqliteTable("market_category_metrics", {
+  subjectId: text("subject_id").notNull(),
+  periodDays: integer("period_days").notNull(),
+  metricDate: text("metric_date").notNull(),
+  sourceId: text("source_id").notNull(),
+  metrics: text("metrics").notNull().default("{}"),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+}, (table) => [primaryKey({ name: "market_category_metrics_pk", columns: [table.subjectId, table.periodDays, table.metricDate, table.sourceId] })]);
+
+export const marketCategoryHistory = sqliteTable("market_category_history", {
+  subjectId: text("subject_id").notNull(),
+  periodDays: integer("period_days").notNull(),
+  metricDate: text("metric_date").notNull(),
+  sourceId: text("source_id").notNull(),
+  metrics: text("metrics").notNull().default("{}"),
+}, (table) => [primaryKey({ name: "market_category_history_pk", columns: [table.subjectId, table.periodDays, table.metricDate, table.sourceId] })]);
+
+export const marketProducts = sqliteTable("market_products", {
+  subjectId: text("subject_id").notNull(),
+  nmId: integer("nm_id").notNull(),
+  sourceId: text("source_id").notNull(),
+  payload: text("payload").notNull().default("{}"),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+}, (table) => [primaryKey({ name: "market_products_pk", columns: [table.subjectId, table.nmId, table.sourceId] })]);
+
+export const marketSellers = sqliteTable("market_sellers", {
+  subjectId: text("subject_id").notNull(),
+  sellerId: text("seller_id").notNull(),
+  sourceId: text("source_id").notNull(),
+  payload: text("payload").notNull().default("{}"),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+}, (table) => [primaryKey({ name: "market_sellers_pk", columns: [table.subjectId, table.sellerId, table.sourceId] })]);
+
+export const marketWatchlist = sqliteTable("market_watchlist", {
+  subjectId: text("subject_id").primaryKey(),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  note: text("note").notNull().default(""),
+});
