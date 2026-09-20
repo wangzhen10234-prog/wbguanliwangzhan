@@ -1,4 +1,5 @@
 import type { MarketCategoryMetric } from "./market-niche-types.ts";
+import { strFromU8, unzipSync } from "fflate";
 
 const ALIASES: Record<keyof MarketCategoryMetric, string[]> = {
   id: [],
@@ -119,4 +120,42 @@ export function parseMarketCsv(text: string, fileName: string, periodDays = 30) 
   });
   if (!rows.length) throw new Error("报表中没有识别到品类数据");
   return { rows, fileName, recognizedHeaders: recognized, totalHeaders: headers.length };
+}
+
+function decodeXml(value: string) {
+  return value.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, "&")
+    .replace(/&#(\d+);/g, (_, code: string) => String.fromCodePoint(Number(code)))
+    .replace(/&#x([\da-f]+);/gi, (_, code: string) => String.fromCodePoint(Number.parseInt(code, 16)));
+}
+
+function columnIndex(reference: string) {
+  const letters = reference.match(/^[A-Z]+/i)?.[0].toUpperCase() || "A";
+  return [...letters].reduce((value, letter) => value * 26 + letter.charCodeAt(0) - 64, 0) - 1;
+}
+
+/** Reads the first worksheet of a standards-compliant XLSX without evaluating formulas or macros. */
+export function parseMarketXlsx(buffer: ArrayBuffer, fileName: string, periodDays = 30) {
+  let files: Record<string, Uint8Array>;
+  try { files = unzipSync(new Uint8Array(buffer)); } catch { throw new Error("Excel 文件结构损坏或不是有效的 XLSX"); }
+  const sharedXml = files["xl/sharedStrings.xml"] ? strFromU8(files["xl/sharedStrings.xml"]) : "";
+  const shared = [...sharedXml.matchAll(/<si\b[^>]*>([\s\S]*?)<\/si>/g)].map((match) => decodeXml([...match[1].matchAll(/<t\b[^>]*>([\s\S]*?)<\/t>/g)].map((text) => text[1]).join("")));
+  const sheetName = Object.keys(files).filter((name) => /^xl\/worksheets\/sheet\d+\.xml$/i.test(name)).sort()[0];
+  if (!sheetName) throw new Error("Excel 文件中没有可读取的工作表");
+  const sheetXml = strFromU8(files[sheetName]);
+  const rows = [...sheetXml.matchAll(/<row\b[^>]*>([\s\S]*?)<\/row>/g)].map((rowMatch) => {
+    const cells: string[] = [];
+    for (const cellMatch of rowMatch[1].matchAll(/<c\b([^>]*)>([\s\S]*?)<\/c>/g)) {
+      const attributes = cellMatch[1];
+      const body = cellMatch[2];
+      const reference = attributes.match(/\br="([A-Z]+\d+)"/i)?.[1] || `A${cells.length + 1}`;
+      const type = attributes.match(/\bt="([^"]+)"/)?.[1] || "";
+      const raw = body.match(/<v\b[^>]*>([\s\S]*?)<\/v>/)?.[1] ?? "";
+      const inline = [...body.matchAll(/<t\b[^>]*>([\s\S]*?)<\/t>/g)].map((text) => text[1]).join("");
+      const value = type === "s" ? shared[Number(raw)] || "" : type === "inlineStr" ? decodeXml(inline) : decodeXml(raw);
+      cells[columnIndex(reference)] = value.replace(/[\t\r\n]+/g, " ").trim();
+    }
+    return cells.map((value) => value || "").join("\t");
+  }).filter((row) => row.trim());
+  if (rows.length < 2) throw new Error("Excel 工作表中没有可读取的数据行");
+  return parseMarketCsv(rows.join("\n"), fileName, periodDays);
 }

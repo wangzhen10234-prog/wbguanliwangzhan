@@ -125,7 +125,7 @@ export default function NichesPage() {
   return <div className="app-shell">
     <AppSidebar active="niches" syncedAt={data?.importedAt} loading={loading} error={error} onRefresh={load} />
     <main className="main niche-workspace">
-      <header className="topbar niche-topbar"><div><p className="eyebrow">MARKET-WIDE ANALYTICS · Анализ ниш</p><h1>WB 全市场选品</h1><p>分析 Wildberries 全平台品类；与自己店铺的经营数据严格隔离。</p></div><div className="niche-import-tools"><input ref={fileRef} type="file" accept=".csv,.tsv,.txt,.xlsx,.xls" hidden onChange={(event) => event.target.files?.[0] && void importFile(event.target.files[0])}/><button onClick={() => fileRef.current?.click()} disabled={importing}>{importing ? "正在校验导入…" : "导入 WB 官方报表"}</button><small>《Анализ ниш》另存为 UTF-8 CSV</small></div></header>
+      <header className="topbar niche-topbar"><div><p className="eyebrow">MARKET-WIDE ANALYTICS · Анализ ниш</p><h1>WB 全市场选品</h1><p>分析 Wildberries 全平台品类；与自己店铺的经营数据严格隔离。</p></div><div className="niche-import-tools"><input ref={fileRef} type="file" accept=".csv,.tsv,.txt,.xlsx,.xls" hidden onChange={(event) => event.target.files?.[0] && void importFile(event.target.files[0])}/><button onClick={() => fileRef.current?.click()} disabled={importing}>{importing ? "正在校验导入…" : "导入 WB 官方报表"}</button><small>支持《Анализ ниш》XLSX、UTF-8 CSV / TSV</small></div></header>
 
       <section className="niche-boundary-banner"><div><b>数据边界已锁定</b><p>公开 API 没有已验证的“全市场分析”接口。页面只展示 WB 官方报表真实导入的数据；缺失字段统一显示“—”。</p></div><span>WB_EXPORT · 官方导出</span></section>
       {importMessage && <div className={`niche-import-message ${importMessage.startsWith("已") ? "success" : "error"}`}>{importMessage}</div>}

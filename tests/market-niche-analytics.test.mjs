@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseMarketCsv } from "../app/_lib/market-import.ts";
+import { parseMarketCsv, parseMarketXlsx } from "../app/_lib/market-import.ts";
+import { strToU8, zipSync } from "fflate";
 import { scoreMarketCategories } from "../app/_lib/market-niche-score.ts";
 
 const base = {
@@ -26,6 +27,17 @@ test("imports only explicit official export values and preserves absent fields a
 
 test("rejects unrelated spreadsheets instead of guessing market fields", () => {
   assert.throws(() => parseMarketCsv("name;value\nfoo;123", "random.csv", 30), /未识别为 WB/);
+});
+
+test("reads the first worksheet of an official XLSX export", () => {
+  const shared = `<?xml version="1.0"?><sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><si><t>ID предмета</t></si><si><t>Предмет</t></si><si><t>Выручка</t></si><si><t>Поводки</t></si></sst>`;
+  const sheet = `<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c><c r="C1" t="s"><v>2</v></c></row><row r="2"><c r="A2"><v>123</v></c><c r="B2" t="s"><v>3</v></c><c r="C2"><v>12500000</v></c></row></sheetData></worksheet>`;
+  const archive = zipSync({ "xl/sharedStrings.xml": strToU8(shared), "xl/worksheets/sheet1.xml": strToU8(sheet) });
+  const buffer = archive.buffer.slice(archive.byteOffset, archive.byteOffset + archive.byteLength);
+  const { rows } = parseMarketXlsx(buffer, "niches.xlsx", 30);
+  assert.equal(rows[0].subjectId, "123");
+  assert.equal(rows[0].nameRu, "Поводки");
+  assert.equal(rows[0].revenueRub, 12500000);
 });
 
 test("normalizes opportunity score within the current data set", () => {
