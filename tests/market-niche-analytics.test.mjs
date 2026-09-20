@@ -3,6 +3,7 @@ import test from "node:test";
 import { parseMarketCsv, parseMarketXlsx } from "../app/_lib/market-import.ts";
 import { strToU8, zipSync } from "fflate";
 import { scoreMarketCategories } from "../app/_lib/market-niche-score.ts";
+import { WbOfficialProvider } from "../app/_lib/providers/wb-official-provider.ts";
 
 const base = {
   id: "", nameZh: "", parentId: "", parentName: "", level: 1, periodDays: 30, metricDate: "2026-09-20",
@@ -54,4 +55,21 @@ test("does not invent a score when fewer than three real factors exist", () => {
   const [row] = scoreMarketCategories([{ ...base, id: "a", subjectId: "a", nameRu: "A", revenueRub: 100, sellerCount: 10 }]);
   assert.equal(row.opportunityScore, null);
   assert.match(row.opportunityReasons[0], /少于 3 项/);
+});
+
+test("automatically reads the documented WB subject catalog without inventing market metrics", async () => {
+  const calls = [];
+  const provider = new WbOfficialProvider("secret", async (input, init) => {
+    calls.push({ url: String(input), authorization: new Headers(init?.headers).get("Authorization") });
+    return new Response(JSON.stringify({ data: [{ subjectID: 2560, parentID: 479, subjectName: "3D очки", parentName: "Электроника" }] }), { status: 200, headers: { "Content-Type": "application/json" } });
+  });
+  const dataset = await provider.load();
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].url, /content\/v2\/object\/all/);
+  assert.equal(calls[0].authorization, "secret");
+  assert.equal(dataset.categories[0].subjectId, "2560");
+  assert.equal(dataset.categories[0].parentName, "Электроника");
+  assert.equal(dataset.categories[0].revenueRub, null);
+  assert.equal(dataset.categories[0].source, "WB_OFFICIAL");
+  assert.equal(dataset.categories[0].confidence, "OFFICIAL_API");
 });

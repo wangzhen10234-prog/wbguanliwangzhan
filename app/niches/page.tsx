@@ -17,6 +17,7 @@ type ApiData = {
 
 type SortKey = MarketMetricKey | "opportunityScore" | "nameRu";
 const PERIODS = [7, 30, 90, 180, 365];
+const PAGE_SIZE = 100;
 const NUMERIC_KEYS: SortKey[] = ["revenueRub", "salesUnits", "revenueGrowth", "salesGrowth", "sellerCount", "productCount", "averagePriceRub", "buyoutRate", "turnoverDays", "concentration", "opportunityScore"];
 
 function numberLabel(value: number | null | undefined, suffix = "") {
@@ -24,7 +25,7 @@ function numberLabel(value: number | null | undefined, suffix = "") {
   return `${new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 1 }).format(value)}${suffix}`;
 }
 function money(value: number | null | undefined) { return typeof value === "number" ? `₽ ${new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 0 }).format(value)}` : "—"; }
-function timeLabel(value: string) { return value ? new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", dateStyle: "medium", timeStyle: "short" }).format(new Date(value)) : "尚未导入"; }
+function timeLabel(value: string) { return value ? new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", dateStyle: "medium", timeStyle: "short" }).format(new Date(value)) : "尚未同步"; }
 
 export default function NichesPage() {
   const [period, setPeriod] = useState(30);
@@ -45,9 +46,10 @@ export default function NichesPage() {
   const [scoreSettingsOpen, setScoreSettingsOpen] = useState(false);
   const [weights, setWeights] = useState<ScoreWeights>(DEFAULT_SCORE_WEIGHTS);
   const [selected, setSelected] = useState<string[]>([]);
-  const [importing, setImporting] = useState(false);
-  const [importMessage, setImportMessage] = useState("");
-  const fileRef = useRef<HTMLInputElement>(null);
+  const [syncing, setSyncing] = useState(false);
+  const [syncMessage, setSyncMessage] = useState("");
+  const [page, setPage] = useState(1);
+  const didAutoSync = useRef(false);
 
   const load = useCallback(async () => {
     setLoading(true); setError("");
@@ -60,6 +62,22 @@ export default function NichesPage() {
     finally { setLoading(false); }
   }, [period]);
   useEffect(() => { queueMicrotask(() => void load()); }, [load]);
+  const syncOfficial = useCallback(async (force: boolean) => {
+    setSyncing(true); setSyncMessage("");
+    try {
+      const response = await fetch(`/api/market/sync${force ? "?force=1" : ""}`, { method: "POST", cache: "no-store" });
+      const body = await response.json() as { subjects?: number; cached?: boolean; error?: string };
+      if (!response.ok) throw new Error(body.error || "WB 官方 API 同步失败");
+      setSyncMessage(body.cached ? "官方类目已是最新数据" : `已从 WB 官方 API 同步 ${body.subjects || 0} 个类目`);
+      await load();
+    } catch (caught) { setSyncMessage(caught instanceof Error ? caught.message : "WB 官方 API 同步失败"); }
+    finally { setSyncing(false); }
+  }, [load]);
+  useEffect(() => {
+    if (didAutoSync.current) return;
+    didAutoSync.current = true;
+    queueMicrotask(() => void syncOfficial(false));
+  }, [syncOfficial]);
   useEffect(() => {
     try { const saved = window.localStorage.getItem("wb-market-score-weights"); if (saved) queueMicrotask(() => setWeights({ ...DEFAULT_SCORE_WEIGHTS, ...JSON.parse(saved) })); } catch { /* keep verified defaults */ }
   }, []);
@@ -92,19 +110,9 @@ export default function NichesPage() {
   }, [scoredRows, query, sort, descending, minimumRevenue, minimumGrowth, maximumSellers, minimumBuyout, maximumConcentration, parentFilter, levelFilter]);
 
   const potentials = useMemo(() => filtered.filter((row) => (row.opportunityScore ?? 0) >= 65).slice(0, 4), [filtered]);
-
-  async function importFile(file: File) {
-    setImporting(true); setImportMessage("");
-    const form = new FormData(); form.set("file", file); form.set("periodDays", String(period));
-    try {
-      const response = await fetch("/api/market/import", { method: "POST", body: form });
-      const body = await response.json() as { imported?: number; error?: string };
-      if (!response.ok) throw new Error(body.error || "导入失败");
-      setImportMessage(`已导入 ${body.imported || 0} 个品类；数据源已标记为 WB 官方导出`);
-      await load();
-    } catch (caught) { setImportMessage(caught instanceof Error ? caught.message : "导入失败"); }
-    finally { setImporting(false); if (fileRef.current) fileRef.current.value = ""; }
-  }
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const visibleRows = filtered.slice((Math.min(page, totalPages) - 1) * PAGE_SIZE, Math.min(page, totalPages) * PAGE_SIZE);
+  useEffect(() => { setPage(1); }, [period, query, sort, descending, minimumRevenue, minimumGrowth, maximumSellers, minimumBuyout, maximumConcentration, parentFilter, levelFilter]);
 
   async function toggleWatch(row: MarketCategoryMetric) {
     const watched = !(data?.watchedIds || []).includes(row.subjectId);
@@ -125,10 +133,10 @@ export default function NichesPage() {
   return <div className="app-shell">
     <AppSidebar active="niches" syncedAt={data?.importedAt} loading={loading} error={error} onRefresh={load} />
     <main className="workspace niche-workspace">
-      <header className="topbar niche-topbar"><div><p className="eyebrow">MARKET-WIDE ANALYTICS · Анализ ниш</p><h1>WB 全市场选品</h1><p>分析 Wildberries 全平台品类；与自己店铺的经营数据严格隔离。</p></div><div className="niche-import-tools"><input ref={fileRef} type="file" accept=".csv,.tsv,.txt,.xlsx,.xls" hidden onChange={(event) => event.target.files?.[0] && void importFile(event.target.files[0])}/><button onClick={() => fileRef.current?.click()} disabled={importing}>{importing ? "正在校验导入…" : "导入 WB 官方报表"}</button><small>支持《Анализ ниш》XLSX、UTF-8 CSV / TSV</small></div></header>
+      <header className="topbar niche-topbar"><div><p className="eyebrow">MARKET-WIDE ANALYTICS · Анализ ниш</p><h1>WB 全市场选品</h1><p>分析 Wildberries 全平台品类；与自己店铺的经营数据严格隔离。</p></div><div className="niche-import-tools"><button onClick={() => void syncOfficial(true)} disabled={syncing}>{syncing ? "正在同步 WB API…" : "立即同步官方 API"}</button><small>打开页面自动更新；官方类目缓存 6 小时</small></div></header>
 
-      <section className="niche-boundary-banner"><div><b>数据边界已锁定</b><p>公开 API 没有已验证的“全市场分析”接口。页面只展示 WB 官方报表真实导入的数据；缺失字段统一显示“—”。</p></div><span>WB_EXPORT · 官方导出</span></section>
-      {importMessage && <div className={`niche-import-message ${importMessage.startsWith("已") ? "success" : "error"}`}>{importMessage}</div>}
+      <section className="niche-boundary-banner"><div><b>WB 官方 API 自动同步</b><p>系统自动读取官方类目与 Subject ID。WB 公开 API 尚未开放“Анализ ниш”全市场经营指标，相关字段显示“—”；绝不使用本店数据冒充全市场数据。</p></div><span>WB_OFFICIAL · 官方 API</span></section>
+      {syncMessage && <div className={`niche-import-message ${syncMessage.startsWith("已") || syncMessage.includes("最新") ? "success" : "error"}`}>{syncMessage}</div>}
 
       <section className="niche-filter-card">
         <div className="niche-periods"><b>时间范围</b>{PERIODS.map((days) => <button key={days} className={period === days ? "active" : ""} onClick={() => setPeriod(days)}>{days} 天</button>)}</div>
@@ -147,13 +155,13 @@ export default function NichesPage() {
 
       {!!data?.watchlist?.length && <section className="niche-watch-section"><header><div><h2>选品观察列表</h2><p>对比当前官方快照与上一份同周期快照，判断需求与竞争是否同步变化。</p></div><span>{data.watchlist.length} 个品类</span></header><div className="niche-watch-grid">{data.watchlist.map(({ current, previous }) => <a href={`/market/category/${encodeURIComponent(current.subjectId)}?period=${period}`} key={current.subjectId}><b>{current.nameZh || current.nameRu}</b><small>{current.nameRu} · WB {current.subjectId}</small><dl><div><dt>销售额</dt><dd>{money(previous?.revenueRub)} → {money(current.revenueRub)}</dd></div><div><dt>卖家</dt><dd>{numberLabel(previous?.sellerCount)} → {numberLabel(current.sellerCount)}</dd></div><div><dt>商品卡</dt><dd>{numberLabel(previous?.productCount)} → {numberLabel(current.productCount)}</dd></div><div><dt>平均价</dt><dd>{money(previous?.averagePriceRub)} → {money(current.averagePriceRub)}</dd></div><div><dt>机会评分变化</dt><dd>—</dd></div></dl><em>{previous ? `上一快照 ${previous.metricDate}` : "等待下一份不同日期快照"}</em></a>)}</div></section>}
 
-      <section className="niche-potential-section"><header><div><h2>潜力品类</h2><p>基于当前筛选集归一化评分，只用于缩小研究范围，不构成囤货建议。</p></div><span>值得进一步研究</span></header>{potentials.length ? <div className="niche-potential-grid">{potentials.map((row) => <a href={`/market/category/${encodeURIComponent(row.subjectId)}?period=${period}`} key={row.subjectId}><i>{row.opportunityScore}</i><b>{row.nameZh || row.nameRu}</b><small>{row.nameRu}</small><p>{row.opportunityReasons?.slice(0, 2).join("；")}</p></a>)}</div> : <div className="niche-empty-inline">当前没有足够真实指标生成潜力品类。导入 WB 官方报表后系统才会评分。</div>}</section>
+      <section className="niche-potential-section"><header><div><h2>潜力品类</h2><p>基于当前筛选集归一化评分，只用于缩小研究范围，不构成囤货建议。</p></div><span>值得进一步研究</span></header>{potentials.length ? <div className="niche-potential-grid">{potentials.map((row) => <a href={`/market/category/${encodeURIComponent(row.subjectId)}?period=${period}`} key={row.subjectId}><i>{row.opportunityScore}</i><b>{row.nameZh || row.nameRu}</b><small>{row.nameRu}</small><p>{row.opportunityReasons?.slice(0, 2).join("；")}</p></a>)}</div> : <div className="niche-empty-inline">WB 公开 API 暂未提供生成机会评分所需的全市场经营指标，因此系统不会伪造评分。</div>}</section>
 
-      <section className="niche-table-panel"><header><div><h2>全市场品类总览</h2><p>{data?.sourceFile ? `来源：${data.sourceFile} · 更新于 ${timeLabel(data.importedAt)}` : "尚未导入全市场报表"}</p></div><div className="niche-table-actions"><select value={sort} onChange={(e) => setSort(e.target.value as SortKey)}>{NUMERIC_KEYS.map((key) => <option key={key} value={key}>{({revenueRub:"销售额",salesUnits:"销量",revenueGrowth:"销售增长",salesGrowth:"销量增长",sellerCount:"卖家数量",productCount:"商品卡数量",averagePriceRub:"平均价格",buyoutRate:"购买率",turnoverDays:"周转天数",concentration:"集中度",opportunityScore:"机会评分"} as Record<string,string>)[key]}</option>)}</select><button onClick={() => setDescending((value) => !value)}>{descending ? "从高到低 ↓" : "从低到高 ↑"}</button>{selected.length > 1 && <a href={`/niches/compare?ids=${selected.map(encodeURIComponent).join(",")}&period=${period}`}>对比 {selected.length} 个品类</a>}</div></header>
-        {!loading && !filtered.length ? <div className="niche-empty-state"><strong>暂无可展示的全市场品类数据</strong><p>{data?.availablePeriods?.length ? `已导入周期：${data.availablePeriods.join("、")} 天；当前选择 ${period} 天。` : "请从 WB 卖家后台导出《Анализ ниш》，另存为 CSV 后导入。系统不会用店铺数据填充这里。"}</p><button onClick={() => fileRef.current?.click()}>选择官方报表</button></div> : <div className="niche-table-wrap" data-horizontal-scroll><table className="niche-table"><thead><tr><th>对比</th><th>品类 / WB ID</th><th>机会评分</th><th>销售额</th><th>销量</th><th>销售增长</th><th>销量增长</th><th>卖家</th><th>商品卡</th><th>平均价格</th><th>购买率</th><th>平均库存</th><th>周转天数</th><th>集中度</th><th>季节性</th><th>供需</th><th>来源 / 更新</th><th>操作</th></tr></thead><tbody>{filtered.map((row) => <tr key={row.id}><td><input type="checkbox" checked={selected.includes(row.subjectId)} onChange={() => selectForCompare(row.subjectId)} aria-label={`对比 ${row.nameRu}`} /></td><td><a href={`/market/category/${encodeURIComponent(row.subjectId)}?period=${period}`}><b>{row.nameZh || row.nameRu}</b><span>{row.nameZh ? row.nameRu : ""}</span><small>WB {row.subjectId}</small></a></td><td><button className="niche-score" disabled={row.opportunityScore == null} onClick={() => setScoreOpen(scoreOpen === row.id ? "" : row.id)}>{row.opportunityScore ?? "—"}</button>{scoreOpen === row.id && <div className="niche-score-popover"><b>评分说明</b>{row.opportunityReasons?.map((reason) => <p key={reason}>• {reason}</p>)}<small>各指标在当前筛选结果内做百分位归一化；缺失指标不参与。</small></div>}</td><td>{money(row.revenueRub)}</td><td>{numberLabel(row.salesUnits)}</td><td>{numberLabel(row.revenueGrowth,"%")}</td><td>{numberLabel(row.salesGrowth,"%")}</td><td>{numberLabel(row.sellerCount)}</td><td>{numberLabel(row.productCount)}</td><td>{money(row.averagePriceRub)}</td><td>{numberLabel(row.buyoutRate,"%")}</td><td>{numberLabel(row.averageStock)}</td><td>{numberLabel(row.turnoverDays," 天")}</td><td>{numberLabel(row.concentration,"%")}</td><td>{numberLabel(row.seasonality)}</td><td>{numberLabel(row.supplyDemand)}</td><td><span className="niche-source">WB_EXPORT</span><small>{row.metricDate}</small><em>官方导出</em></td><td><button className={(data?.watchedIds || []).includes(row.subjectId) ? "watched" : ""} onClick={() => void toggleWatch(row)}>{(data?.watchedIds || []).includes(row.subjectId) ? "已观察" : "加入观察"}</button></td></tr>)}</tbody></table></div>}
+      <section className="niche-table-panel"><header><div><h2>全市场品类总览</h2><p>{data?.sourceFile ? `来源：${data.sourceFile} · 更新于 ${timeLabel(data.importedAt)}` : "等待 WB 官方 API 自动同步"}</p></div><div className="niche-table-actions"><select value={sort} onChange={(e) => setSort(e.target.value as SortKey)}>{NUMERIC_KEYS.map((key) => <option key={key} value={key}>{({revenueRub:"销售额",salesUnits:"销量",revenueGrowth:"销售增长",salesGrowth:"销量增长",sellerCount:"卖家数量",productCount:"商品卡数量",averagePriceRub:"平均价格",buyoutRate:"购买率",turnoverDays:"周转天数",concentration:"集中度",opportunityScore:"机会评分"} as Record<string,string>)[key]}</option>)}</select><button onClick={() => setDescending((value) => !value)}>{descending ? "从高到低 ↓" : "从低到高 ↑"}</button>{selected.length > 1 && <a href={`/niches/compare?ids=${selected.map(encodeURIComponent).join(",")}&period=${period}`}>对比 {selected.length} 个品类</a>}</div></header>
+        {!loading && !filtered.length ? <div className="niche-empty-state"><strong>尚未取得 WB 官方类目</strong><p>系统会自动使用当前店铺配置的 WB API 读取官方类目，请检查该 API 是否包含“内容”读取权限。</p><button onClick={() => void syncOfficial(true)}>重新同步 API</button></div> : <><div className="niche-table-wrap" data-horizontal-scroll><table className="niche-table"><thead><tr><th>对比</th><th>品类 / WB ID</th><th>机会评分</th><th>销售额</th><th>销量</th><th>销售增长</th><th>销量增长</th><th>卖家</th><th>商品卡</th><th>平均价格</th><th>购买率</th><th>平均库存</th><th>周转天数</th><th>集中度</th><th>季节性</th><th>供需</th><th>来源 / 更新</th><th>操作</th></tr></thead><tbody>{visibleRows.map((row) => <tr key={row.id}><td><input type="checkbox" checked={selected.includes(row.subjectId)} onChange={() => selectForCompare(row.subjectId)} aria-label={`对比 ${row.nameRu}`} /></td><td><a href={`/market/category/${encodeURIComponent(row.subjectId)}?period=${period}`}><b>{row.nameZh || row.nameRu}</b><span>{row.nameZh ? row.nameRu : ""}</span><small>WB {row.subjectId}</small></a></td><td><button className="niche-score" disabled={row.opportunityScore == null} onClick={() => setScoreOpen(scoreOpen === row.id ? "" : row.id)}>{row.opportunityScore ?? "—"}</button>{scoreOpen === row.id && <div className="niche-score-popover"><b>评分说明</b>{row.opportunityReasons?.map((reason) => <p key={reason}>• {reason}</p>)}<small>各指标在当前筛选结果内做百分位归一化；缺失指标不参与。</small></div>}</td><td>{money(row.revenueRub)}</td><td>{numberLabel(row.salesUnits)}</td><td>{numberLabel(row.revenueGrowth,"%")}</td><td>{numberLabel(row.salesGrowth,"%")}</td><td>{numberLabel(row.sellerCount)}</td><td>{numberLabel(row.productCount)}</td><td>{money(row.averagePriceRub)}</td><td>{numberLabel(row.buyoutRate,"%")}</td><td>{numberLabel(row.averageStock)}</td><td>{numberLabel(row.turnoverDays," 天")}</td><td>{numberLabel(row.concentration,"%")}</td><td>{numberLabel(row.seasonality)}</td><td>{numberLabel(row.supplyDemand)}</td><td><span className="niche-source">{row.source}</span><small>{row.metricDate}</small><em>{row.confidence === "OFFICIAL_API" ? "官方 API" : "官方历史数据"}</em></td><td><button className={(data?.watchedIds || []).includes(row.subjectId) ? "watched" : ""} onClick={() => void toggleWatch(row)}>{(data?.watchedIds || []).includes(row.subjectId) ? "已观察" : "加入观察"}</button></td></tr>)}</tbody></table></div><div className="niche-pagination"><span>共 {filtered.length} 个类目 · 每页 {PAGE_SIZE} 个</span><button disabled={page <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>上一页</button><b>{Math.min(page, totalPages)} / {totalPages}</b><button disabled={page >= totalPages} onClick={() => setPage((value) => Math.min(totalPages, value + 1))}>下一页</button></div></>}
       </section>
 
-      <section className="niche-source-matrix"><article><b>公开 API 可直接取得</b>{data?.sourceBoundary.directlyAvailable.map((item) => <p key={item}>✓ {item}</p>)}</article><article><b>需要 WB 官方报表导入</b>{data?.sourceBoundary.requiresExport.map((item) => <p key={item}>↥ {item}</p>)}</article><article><b>当前公开来源不可用</b>{data?.sourceBoundary.unavailable.map((item) => <p key={item}>— {item}</p>)}</article></section>
+      <section className="niche-source-matrix"><article><b>官方 API 自动取得</b>{data?.sourceBoundary.directlyAvailable.map((item) => <p key={item}>✓ {item}</p>)}</article><article><b>官方公开 API 尚未开放</b>{data?.sourceBoundary.requiresExport.map((item) => <p key={item}>— {item}</p>)}</article><article><b>当前公开来源不可用</b>{data?.sourceBoundary.unavailable.map((item) => <p key={item}>— {item}</p>)}</article></section>
     </main>
   </div>;
 }

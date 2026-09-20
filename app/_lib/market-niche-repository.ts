@@ -40,6 +40,18 @@ export async function importMarketRows(rows: MarketCategoryMetric[], sourceFile:
   });
 }
 
+export async function mergeOfficialMarketCatalog(rows: MarketCategoryMetric[], sourceFile: string, importedAt: string) {
+  const current = await readMarketDataset();
+  const metadata = new Map(rows.map((item) => [item.subjectId, item]));
+  const existingSubjects = new Set(current.categories.map((item) => item.subjectId));
+  const categories = current.categories.map((item) => {
+    const official = metadata.get(item.subjectId);
+    return official ? { ...item, nameRu: official.nameRu, parentId: official.parentId, parentName: official.parentName, level: official.level } : item;
+  });
+  for (const item of rows) if (!existingSubjects.has(item.subjectId)) categories.push(item);
+  return saveMarketDataset({ ...current, categories, importedAt, sourceFile });
+}
+
 export async function setMarketWatch(subjectId: string, watched: boolean) {
   const current = await readMarketDataset();
   const ids = new Set(current.watchedIds);

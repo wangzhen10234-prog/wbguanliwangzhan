@@ -104,8 +104,9 @@ test("server-renders whole-market niche analytics without fake marketplace value
   const html = await response.text();
   assert.match(html, /WB 全市场选品/);
   assert.match(html, /分析 Wildberries 全平台品类/);
-  assert.match(html, /数据边界已锁定/);
-  assert.match(html, /导入 WB 官方报表/);
+  assert.match(html, /WB 官方 API 自动同步/);
+  assert.match(html, /立即同步官方 API/);
+  assert.doesNotMatch(html, /导入 WB 官方报表/);
   assert.match(html, /与自己店铺的经营数据严格隔离/);
   assert.match(html, /<main[^>]*class="workspace niche-workspace"/);
   assert.doesNotMatch(html, /建议囤货/);
