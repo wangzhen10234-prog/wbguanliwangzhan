@@ -107,6 +107,7 @@ test("server-renders whole-market niche analytics without fake marketplace value
   assert.match(html, /数据边界已锁定/);
   assert.match(html, /导入 WB 官方报表/);
   assert.match(html, /与自己店铺的经营数据严格隔离/);
+  assert.match(html, /<main[^>]*class="workspace niche-workspace"/);
   assert.doesNotMatch(html, /建议囤货/);
 });
 
