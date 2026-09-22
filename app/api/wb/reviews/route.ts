@@ -340,7 +340,6 @@ async function fetchSnapshot(token: string, manual: boolean) {
 async function loadSnapshot(token: string, storeId: string, manual: boolean) {
   const cacheKey = scopedStoreKey(storeId, SNAPSHOT_KEY);
   const current = schedule();
-  const manualBucket = Math.floor(Date.now() / MANUAL_REFRESH_MS);
   const memory = memoryCache.get(cacheKey);
   if (!manual && memory && memory.expiresAt > Date.now()) return memory.value;
   const durable = await readSnapshot(cacheKey);
@@ -348,7 +347,6 @@ async function loadSnapshot(token: string, storeId: string, manual: boolean) {
     memoryCache.set(cacheKey, { value: durable.value, expiresAt: current.nextAt });
     return durable.value;
   }
-  if (manual && durable?.manualBucket === manualBucket) return durable.value;
   const pending = pendingLoads.get(cacheKey);
   if (pending) return pending;
   const load = fetchSnapshot(token, manual)
@@ -358,7 +356,7 @@ async function loadSnapshot(token: string, storeId: string, manual: boolean) {
       return value;
     })
     .catch((error) => {
-      if (durable?.value) return { ...durable.value, stale: true, warning: "WB 评价与提问接口本次读取失败，当前展示上一次成功同步的数据" };
+      if (!manual && durable?.value) return { ...durable.value, stale: true, warning: "WB 评价与提问接口本次读取失败，当前展示上一次成功同步的数据" };
       throw error;
     })
     .finally(() => { pendingLoads.delete(cacheKey); });

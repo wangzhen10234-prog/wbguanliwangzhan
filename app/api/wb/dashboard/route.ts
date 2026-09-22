@@ -349,10 +349,6 @@ function writeStableEdgeCache(key: string, value: unknown) {
   return writeNamedEdgeCache(STABLE_CACHE_BASE, key, value, 35 * 24 * 60 * 60);
 }
 
-function readRecentEdgeCache<T>(key: string) {
-  return readNamedEdgeCache<T>(RECENT_CACHE_BASE, key);
-}
-
 function writeRecentEdgeCache(key: string, value: unknown) {
   return writeNamedEdgeCache(RECENT_CACHE_BASE, key, value, RECENT_REFRESH_TTL_SECONDS);
 }
@@ -377,9 +373,10 @@ async function readDurableSnapshot<T>(key: string): Promise<T | null> {
 }
 
 function durableRecordIsFresh(record: DurableSnapshot<unknown> | null, forceRefresh: boolean) {
-  return forceRefresh
-    ? record?.manualBucket === manualRefreshBucket()
-    : record?.syncSlot === syncSchedule().slot;
+  // An explicit manual refresh must always reach WB. The manual bucket is kept
+  // only for backwards-compatible snapshot persistence, never as a freshness
+  // signal for a user-triggered request.
+  return !forceRefresh && record?.syncSlot === syncSchedule().slot;
 }
 
 async function writeDurableSnapshot(key: string, value: unknown, forceRefresh = false) {
@@ -483,7 +480,12 @@ async function loadStatistics(token: string, storeId: string, forceRefresh = fal
     }
     const hasLease = await acquireDurableRefreshLock(cacheKey);
     if (!hasLease) {
-      if (fallback) return fallback;
+      if (!forceRefresh && fallback) return fallback;
+      if (forceRefresh) {
+        const error = new Error("A WB synchronization is already in progress");
+        Object.assign(error, { status: 409 });
+        throw error;
+      }
       const peerValue = await waitForDurableSnapshot<{ orders: WbOrder[]; sales: WbSale[] }>(cacheKey);
       if (peerValue) return peerValue;
     }
@@ -505,7 +507,7 @@ async function loadStatistics(token: string, storeId: string, forceRefresh = fal
             return peerValue;
           }
         }
-        if (fallback) {
+        if (fallback && !forceRefresh) {
           statisticsCache.set(storeId, { value: fallback, expiresAt: cacheExpiry() });
           await Promise.all([writeEdgeCache(cacheKey, fallback), writeDurableSnapshot(cacheKey, fallback, forceRefresh)]);
           return fallback;
@@ -552,7 +554,7 @@ async function loadStocks(token: string, storeId: string, forceRefresh = false) 
       await Promise.all([writeEdgeCache(cacheKey, stocks), writeDurableSnapshot(cacheKey, stocks, forceRefresh)]);
       return stocks;
     } catch (error) {
-      if (fallback) {
+      if (fallback && !forceRefresh) {
         stockCache.set(storeId, { value: fallback, expiresAt: cacheExpiry() });
         await writeEdgeCache(cacheKey, fallback);
         return fallback;
@@ -593,7 +595,7 @@ async function loadSellerWarehouseDirectory(token: string, storeId: string, forc
       await Promise.all([writeEdgeCache(cacheKey, result), writeDurableSnapshot(cacheKey, result, forceRefresh)]);
       return result;
     } catch (error) {
-      if (fallback) {
+      if (fallback && !forceRefresh) {
         sellerWarehouseDirectoryCache.set(storeId, { value: fallback, expiresAt: cacheExpiry() });
         await writeEdgeCache(cacheKey, fallback);
         return fallback;
@@ -648,7 +650,7 @@ async function loadSellerStocks(token: string, cards: WbCard[], storeId: string,
       await Promise.all([writeEdgeCache(cacheKey, result), writeDurableSnapshot(cacheKey, result, forceRefresh)]);
       return result;
     } catch (error) {
-      if (fallback) {
+      if (fallback && !forceRefresh) {
         sellerStockCache.set(storeId, { value: fallback, expiresAt: cacheExpiry() });
         await writeEdgeCache(cacheKey, fallback);
         return fallback;
@@ -725,17 +727,14 @@ async function loadFbsOrders(token: string, storeId: string, forceRefresh = fals
       await writeEdgeCache(cacheKey, durableCached);
       return durableCached;
     }
-    if (forceRefresh) {
-      const recentCached = await readRecentEdgeCache<FbsOrderSnapshot>(cacheKey);
-      if (recentCached) {
-        fbsOrderCache.set(storeId, { value: recentCached, expiresAt: cacheExpiry() });
-        await writeDurableSnapshot(cacheKey, recentCached, true);
-        return recentCached;
-      }
-    }
     const hasLease = await acquireDurableRefreshLock(cacheKey);
     if (!hasLease) {
-      if (fallback) return fallback;
+      if (!forceRefresh && fallback) return fallback;
+      if (forceRefresh) {
+        const error = new Error("A WB synchronization is already in progress");
+        Object.assign(error, { status: 409 });
+        throw error;
+      }
       const peerValue = await waitForDurableSnapshot<FbsOrderSnapshot>(cacheKey);
       if (peerValue) return peerValue;
     }
@@ -790,7 +789,7 @@ async function loadFbsOrders(token: string, storeId: string, forceRefresh = fals
       await Promise.all([writeEdgeCache(cacheKey, result), writeStableEdgeCache(cacheKey, result), writeRecentEdgeCache(cacheKey, result), writeDurableSnapshot(cacheKey, result, forceRefresh)]);
       return result;
     } catch (error) {
-      if (fallback) {
+      if (fallback && !forceRefresh) {
         fbsOrderCache.set(storeId, { value: fallback, expiresAt: cacheExpiry() });
         await Promise.all([writeEdgeCache(cacheKey, fallback), writeDurableSnapshot(cacheKey, fallback, forceRefresh)]);
         return fallback;
@@ -873,7 +872,7 @@ async function loadBalance(token: string, storeId: string, forceRefresh = false)
       await Promise.all([writeEdgeCache(cacheKey, balance), writeDurableSnapshot(cacheKey, balance, forceRefresh)]);
       return balance;
     } catch (error) {
-      if (fallback) {
+      if (fallback && !forceRefresh) {
         balanceCache.set(storeId, { value: fallback, expiresAt: cacheExpiry() });
         await writeEdgeCache(cacheKey, fallback);
         return fallback;
@@ -930,7 +929,7 @@ async function loadCards(token: string, storeId: string, forceRefresh = false) {
       await Promise.all([writeEdgeCache(cacheKey, cards), writeDurableSnapshot(cacheKey, cards, forceRefresh)]);
       return cards;
     } catch (error) {
-      if (fallback) {
+      if (fallback && !forceRefresh) {
         cardsCache.set(storeId, { value: fallback, expiresAt: cacheExpiry() });
         await writeEdgeCache(cacheKey, fallback);
         return fallback;
@@ -976,7 +975,7 @@ async function loadFeedbacks(token: string, storeId: string, forceRefresh = fals
       await Promise.all([writeEdgeCache(cacheKey, feedbacks), writeDurableSnapshot(cacheKey, feedbacks, forceRefresh)]);
       return feedbacks;
     } catch (error) {
-      if (fallback) {
+      if (fallback && !forceRefresh) {
         feedbacksCache.set(storeId, { value: fallback, expiresAt: cacheExpiry() });
         await writeEdgeCache(cacheKey, fallback);
         return fallback;
@@ -1024,17 +1023,14 @@ async function loadFinanceRows(token: string, storeId: string, forceRefresh = fa
       await writeEdgeCache(cacheKey, durableCached);
       return durableCached;
     }
-    if (forceRefresh) {
-      const recentCached = await readRecentEdgeCache<FinanceRowsSnapshot>(cacheKey);
-      if (recentCached) {
-        financeRowsCache.set(storeId, { value: recentCached, expiresAt: cacheExpiry() });
-        await writeDurableSnapshot(cacheKey, recentCached, true);
-        return recentCached;
-      }
-    }
     const hasLease = await acquireDurableRefreshLock(cacheKey, 60_000);
     if (!hasLease) {
-      if (fallback) return fallback;
+      if (!forceRefresh && fallback) return fallback;
+      if (forceRefresh) {
+        const error = new Error("A WB synchronization is already in progress");
+        Object.assign(error, { status: 409 });
+        throw error;
+      }
       const peerValue = await waitForDurableSnapshot<FinanceRowsSnapshot>(cacheKey);
       if (peerValue) return peerValue;
     }
@@ -1059,7 +1055,7 @@ async function loadFinanceRows(token: string, storeId: string, forceRefresh = fa
           signal: AbortSignal.timeout(25_000),
         });
       } catch (error) {
-        if (fallback) {
+        if (fallback && !forceRefresh) {
           financeRowsCache.set(storeId, { value: fallback, expiresAt: cacheExpiry() });
           await Promise.all([writeEdgeCache(cacheKey, fallback), writeDurableSnapshot(cacheKey, fallback, forceRefresh)]);
           return fallback;
@@ -1068,7 +1064,7 @@ async function loadFinanceRows(token: string, storeId: string, forceRefresh = fa
       }
 
       if (!response.ok) {
-        if (fallback) {
+        if (fallback && !forceRefresh) {
           financeRowsCache.set(storeId, { value: fallback, expiresAt: cacheExpiry() });
           await Promise.all([writeEdgeCache(cacheKey, fallback), writeDurableSnapshot(cacheKey, fallback, forceRefresh)]);
           return fallback;
@@ -1972,6 +1968,7 @@ export async function GET(request: Request) {
     });
   } catch (error) {
     const status = Number((error as { status?: number }).status || 0);
+    if (status === 409) return json({ error: "已有一次 WB 同步正在进行，请等待完成后再试" }, 409);
     if (status === 401 || status === 403) return json({ error: "WB 密钥无效或权限不足" }, 502);
     if (status === 429) return json({ error: "WB 接口请求过于频繁，请稍后重试" }, 429);
     return json({ error: "暂时无法同步 WB 数据，请稍后重试" }, 502);

@@ -296,7 +296,7 @@ async function loadPromotions(token: string, storeId: string, forceRefresh: bool
       return snapshot;
     })
     .catch((error) => {
-      if (durable?.value) return durable.value;
+      if (!forceRefresh && durable?.value) return durable.value;
       throw error;
     })
     .finally(() => { pendingLoads.delete(cacheKey); });

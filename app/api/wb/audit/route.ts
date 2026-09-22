@@ -240,7 +240,6 @@ async function fetchSnapshot(token: string, period: { from: string; to: string; 
 async function loadAudit(token: string, storeId: string, period: { from: string; to: string; days: number }, manual: boolean) {
   const key = scopedStoreKey(storeId, `product-audit-v1-${period.from}-${period.to}`);
   const schedule = syncSchedule();
-  const manualBucket = Math.floor(Date.now() / MANUAL_REFRESH_MS);
   const memory = memoryCache.get(key);
   if (!manual && memory && memory.expiresAt > Date.now()) return memory.value;
   const durable = await readSnapshot(key);
@@ -248,7 +247,6 @@ async function loadAudit(token: string, storeId: string, period: { from: string;
     memoryCache.set(key, { value: durable.value, expiresAt: schedule.nextAt });
     return durable.value;
   }
-  if (manual && durable?.manualBucket === manualBucket) return durable.value;
   const pendingKey = `${key}-${manual ? "manual" : schedule.slot}`;
   const pending = pendingLoads.get(pendingKey);
   if (pending) return pending;
@@ -259,7 +257,7 @@ async function loadAudit(token: string, storeId: string, period: { from: string;
       return value;
     })
     .catch((error) => {
-      if (durable?.value) return durable.value;
+      if (!manual && durable?.value) return durable.value;
       throw error;
     })
     .finally(() => pendingLoads.delete(pendingKey));

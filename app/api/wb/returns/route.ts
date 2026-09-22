@@ -68,7 +68,6 @@ const AUTO_SYNC_HOURS = [8, 14, 19, 23] as const;
 const MAX_DAYS = 180;
 const REPORT_CHUNK_DAYS = 31;
 const MAX_CLAIMS = 1_000;
-const MANUAL_REFRESH_COOLDOWN_MS = 60_000;
 const SNAPSHOT_VERSION = "returns-v1";
 
 const memoryCache = new Map<string, CacheEntry>();
@@ -344,8 +343,6 @@ async function loadReturns(token: string, storeId: string, window: { from: strin
   const memory = memoryCache.get(cacheKey);
   if (!forceRefresh && memory && memory.expiresAt > now) return memory.value;
   const durable = await readSnapshot(cacheKey);
-  const durableAge = durable?.value?.syncedAt ? now - new Date(durable.value.syncedAt).getTime() : Number.POSITIVE_INFINITY;
-  if (forceRefresh && durable?.value && durableAge < MANUAL_REFRESH_COOLDOWN_MS) return durable.value;
   if (!forceRefresh && durable?.syncSlot === schedule.slot) {
     memoryCache.set(cacheKey, { value: durable.value, expiresAt: schedule.nextAt });
     return durable.value;
@@ -359,7 +356,7 @@ async function loadReturns(token: string, storeId: string, window: { from: strin
       return snapshot;
     })
     .catch((error) => {
-      if (durable?.value) return { ...durable.value, warnings: [...durable.value.warnings, "WB 退货接口本次刷新失败，当前显示最近一次完整快照。"] };
+      if (!forceRefresh && durable?.value) return { ...durable.value, warnings: [...durable.value.warnings, "WB 退货接口本次刷新失败，当前显示最近一次完整快照。"] };
       throw error;
     })
     .finally(() => pendingLoads.delete(cacheKey));

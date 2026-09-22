@@ -17,7 +17,6 @@ type MarketSnapshot = Awaited<ReturnType<typeof fetchSnapshot>>;
 
 const DAY_MS = 86_400_000;
 const BEIJING_OFFSET_MS = 8 * 60 * 60_000;
-const MANUAL_REFRESH_MS = 5 * 60_000;
 const JSON_HEADERS = { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "private, no-store, max-age=0", "X-Content-Type-Options": "nosniff" };
 const memoryCache = new Map<string, { value: MarketSnapshot; expiresAt: number }>();
 const pendingLoads = new Map<string, Promise<MarketSnapshot>>();
@@ -131,7 +130,6 @@ async function fetchSnapshot(token: string, period: { from: string; to: string; 
 }
 
 async function loadMarket(token: string, storeId: string, period: { from: string; to: string; days: number }, brand: string, parentId: number, manual: boolean) {
-  const manualBucket = Math.floor(Date.now() / MANUAL_REFRESH_MS);
   const hourBucket = Math.floor(Date.now() / 3_600_000);
   const key = scopedStoreKey(storeId, `market-v1-${period.from}-${period.to}-${brand || "all"}-${parentId || 0}`);
   const hourlySlot = `hour-${hourBucket}`;
@@ -139,14 +137,14 @@ async function loadMarket(token: string, storeId: string, period: { from: string
   if (!manual && memory && memory.expiresAt > Date.now()) return memory.value;
   let durable: { value: MarketSnapshot; syncSlot: string; manualBucket: number } | null = null;
   try { const saved = await readSyncSnapshot(key); if (saved?.payload) durable = { value: JSON.parse(saved.payload) as MarketSnapshot, syncSlot: saved.syncSlot || "", manualBucket: saved.manualBucket || 0 }; } catch { durable = null; }
-  if ((!manual && durable?.syncSlot === hourlySlot) || (manual && durable?.manualBucket === manualBucket)) return durable.value;
-  const pendingKey = `${key}-${manual ? `manual-${manualBucket}` : hourlySlot}`;
+  if (!manual && durable?.syncSlot === hourlySlot) return durable.value;
+  const pendingKey = `${key}-${manual ? "manual" : hourlySlot}`;
   const pending = pendingLoads.get(pendingKey); if (pending) return pending;
   const load = fetchSnapshot(token, period, brand, parentId, manual).then(async (value) => {
     memoryCache.set(key, { value, expiresAt: Date.now() + 3_600_000 });
-    try { await writeSyncSnapshot(key, JSON.stringify(value), hourlySlot, manual ? manualBucket : 0, { preserveManualBucket: !manual }); } catch { /* Fresh API data remains usable without persistence. */ }
+    try { await writeSyncSnapshot(key, JSON.stringify(value), hourlySlot, 0, { preserveManualBucket: !manual }); } catch { /* Fresh API data remains usable without persistence. */ }
     return value;
-  }).catch((error) => { if (durable?.value) return durable.value; throw error; }).finally(() => pendingLoads.delete(pendingKey));
+  }).catch((error) => { if (!manual && durable?.value) return durable.value; throw error; }).finally(() => pendingLoads.delete(pendingKey));
   pendingLoads.set(pendingKey, load); return load;
 }
 
