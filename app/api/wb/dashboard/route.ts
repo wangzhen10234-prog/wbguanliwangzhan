@@ -354,6 +354,17 @@ function writeRecentEdgeCache(key: string, value: unknown) {
 }
 
 type DurableSnapshot<T> = { value: T; syncSlot: string; manualBucket: number };
+type SyncDiagnostics = { fresh: Set<string>; stale: Set<string> };
+
+function markFresh(diagnostics: SyncDiagnostics | undefined, source: string) {
+  diagnostics?.stale.delete(source);
+  diagnostics?.fresh.add(source);
+}
+
+function markStale(diagnostics: SyncDiagnostics | undefined, source: string) {
+  diagnostics?.fresh.delete(source);
+  diagnostics?.stale.add(source);
+}
 
 function manualRefreshBucket() {
   return Math.floor(Date.now() / (RECENT_REFRESH_TTL_SECONDS * 1000));
@@ -459,7 +470,7 @@ async function wbRequest<T>(url: string, token: string, init?: RequestInit): Pro
   return response.json() as Promise<T>;
 }
 
-async function loadStatistics(token: string, storeId: string, forceRefresh = false) {
+async function loadStatistics(token: string, storeId: string, forceRefresh = false, diagnostics?: SyncDiagnostics) {
   const cacheKey = scopedStoreKey(storeId, "statistics");
   const memory = statisticsCache.get(storeId);
   if (!forceRefresh && memory && memory.expiresAt > Date.now()) return memory.value;
@@ -480,11 +491,9 @@ async function loadStatistics(token: string, storeId: string, forceRefresh = fal
     }
     const hasLease = await acquireDurableRefreshLock(cacheKey);
     if (!hasLease) {
-      if (!forceRefresh && fallback) return fallback;
-      if (forceRefresh) {
-        const error = new Error("A WB synchronization is already in progress");
-        Object.assign(error, { status: 409 });
-        throw error;
+      if (fallback) {
+        if (forceRefresh) markStale(diagnostics, "订单与销售统计");
+        return fallback;
       }
       const peerValue = await waitForDurableSnapshot<{ orders: WbOrder[]; sales: WbSale[] }>(cacheKey);
       if (peerValue) return peerValue;
@@ -507,14 +516,16 @@ async function loadStatistics(token: string, storeId: string, forceRefresh = fal
             return peerValue;
           }
         }
-        if (fallback && !forceRefresh) {
+        if (fallback) {
+          if (forceRefresh) markStale(diagnostics, "订单与销售统计");
           statisticsCache.set(storeId, { value: fallback, expiresAt: cacheExpiry() });
-          await Promise.all([writeEdgeCache(cacheKey, fallback), writeDurableSnapshot(cacheKey, fallback, forceRefresh)]);
+          await Promise.all([writeEdgeCache(cacheKey, fallback), writeDurableSnapshot(cacheKey, fallback)]);
           return fallback;
         }
         throw error;
       }
       const value = { orders, sales };
+      if (forceRefresh) markFresh(diagnostics, "订单与销售统计");
       statisticsCache.set(storeId, { value, expiresAt: cacheExpiry() });
       await Promise.all([writeEdgeCache(cacheKey, value), writeDurableSnapshot(cacheKey, value, forceRefresh)]);
       return value;
@@ -524,7 +535,7 @@ async function loadStatistics(token: string, storeId: string, forceRefresh = fal
   });
 }
 
-async function loadStocks(token: string, storeId: string, forceRefresh = false) {
+async function loadStocks(token: string, storeId: string, forceRefresh = false, diagnostics?: SyncDiagnostics) {
   const cacheKey = scopedStoreKey(storeId, "stocks");
   const memory = stockCache.get(storeId);
   if (!forceRefresh && memory && memory.expiresAt > Date.now()) return memory.value;
@@ -550,11 +561,13 @@ async function loadStocks(token: string, storeId: string, forceRefresh = false) 
         { method: "POST", body: JSON.stringify({ nmIds: [], limit: 250000, offset: 0 }) },
       );
       const stocks = response.data?.items ?? [];
+      if (forceRefresh) markFresh(diagnostics, "库存统计");
       stockCache.set(storeId, { value: stocks, expiresAt: cacheExpiry() });
       await Promise.all([writeEdgeCache(cacheKey, stocks), writeDurableSnapshot(cacheKey, stocks, forceRefresh)]);
       return stocks;
     } catch (error) {
-      if (fallback && !forceRefresh) {
+      if (fallback) {
+        if (forceRefresh) markStale(diagnostics, "库存统计");
         stockCache.set(storeId, { value: fallback, expiresAt: cacheExpiry() });
         await writeEdgeCache(cacheKey, fallback);
         return fallback;
@@ -564,7 +577,7 @@ async function loadStocks(token: string, storeId: string, forceRefresh = false) 
   });
 }
 
-async function loadSellerWarehouseDirectory(token: string, storeId: string, forceRefresh = false) {
+async function loadSellerWarehouseDirectory(token: string, storeId: string, forceRefresh = false, diagnostics?: SyncDiagnostics) {
   const memory = sellerWarehouseDirectoryCache.get(storeId);
   if (!forceRefresh && memory && memory.expiresAt > Date.now()) return memory.value;
   const cacheKey = scopedStoreKey(storeId, "seller-warehouses");
@@ -591,11 +604,13 @@ async function loadSellerWarehouseDirectory(token: string, storeId: string, forc
       ]);
       const officeNames = new Map(offices.map((office) => [Number(office.id || 0), office.name || ""]));
       const result = { warehouses: warehouses.map((warehouse) => ({ ...warehouse, officeName: officeNames.get(Number(warehouse.officeId || 0)) || "", stocks: [] })) };
+      if (forceRefresh) markFresh(diagnostics, "仓库目录");
       sellerWarehouseDirectoryCache.set(storeId, { value: result, expiresAt: cacheExpiry() });
       await Promise.all([writeEdgeCache(cacheKey, result), writeDurableSnapshot(cacheKey, result, forceRefresh)]);
       return result;
     } catch (error) {
-      if (fallback && !forceRefresh) {
+      if (fallback) {
+        if (forceRefresh) markStale(diagnostics, "仓库目录");
         sellerWarehouseDirectoryCache.set(storeId, { value: fallback, expiresAt: cacheExpiry() });
         await writeEdgeCache(cacheKey, fallback);
         return fallback;
@@ -605,7 +620,7 @@ async function loadSellerWarehouseDirectory(token: string, storeId: string, forc
   });
 }
 
-async function loadSellerStocks(token: string, cards: WbCard[], storeId: string, forceRefresh = false) {
+async function loadSellerStocks(token: string, cards: WbCard[], storeId: string, forceRefresh = false, diagnostics?: SyncDiagnostics) {
   const cacheKey = scopedStoreKey(storeId, "seller-stocks");
   const memory = sellerStockCache.get(storeId);
   if (!forceRefresh && memory && memory.expiresAt > Date.now()) return memory.value;
@@ -626,7 +641,7 @@ async function loadSellerStocks(token: string, cards: WbCard[], storeId: string,
     }
     try {
       const base = "https://marketplace-api.wildberries.ru/api/v3";
-      const directory = await loadSellerWarehouseDirectory(token, storeId, forceRefresh);
+      const directory = await loadSellerWarehouseDirectory(token, storeId, forceRefresh, diagnostics);
       const chrtIds = [...new Set(cards.flatMap((card) => card.sizes?.map((size) => Number(size.chrtID || 0)) ?? []).filter(Boolean))];
       const result: SellerStockSnapshot = { warehouses: [] };
 
@@ -647,10 +662,12 @@ async function loadSellerStocks(token: string, cards: WbCard[], storeId: string,
       }
 
       sellerStockCache.set(storeId, { value: result, expiresAt: cacheExpiry() });
+      if (forceRefresh) markFresh(diagnostics, "卖家仓库存");
       await Promise.all([writeEdgeCache(cacheKey, result), writeDurableSnapshot(cacheKey, result, forceRefresh)]);
       return result;
     } catch (error) {
-      if (fallback && !forceRefresh) {
+      if (fallback) {
+        if (forceRefresh) markStale(diagnostics, "卖家仓库存");
         sellerStockCache.set(storeId, { value: fallback, expiresAt: cacheExpiry() });
         await writeEdgeCache(cacheKey, fallback);
         return fallback;
@@ -707,7 +724,7 @@ async function fetchFbsOrders(token: string, start: Date, end: Date) {
   return orders;
 }
 
-async function loadFbsOrders(token: string, storeId: string, forceRefresh = false) {
+async function loadFbsOrders(token: string, storeId: string, forceRefresh = false, diagnostics?: SyncDiagnostics) {
   const memory = fbsOrderCache.get(storeId);
   if (!forceRefresh && memory && memory.expiresAt > Date.now()) return memory.value;
   const cacheKey = scopedStoreKey(storeId, "fbs-orders-all-v3");
@@ -729,11 +746,9 @@ async function loadFbsOrders(token: string, storeId: string, forceRefresh = fals
     }
     const hasLease = await acquireDurableRefreshLock(cacheKey);
     if (!hasLease) {
-      if (!forceRefresh && fallback) return fallback;
-      if (forceRefresh) {
-        const error = new Error("A WB synchronization is already in progress");
-        Object.assign(error, { status: 409 });
-        throw error;
+      if (fallback) {
+        if (forceRefresh) markStale(diagnostics, "订单实时状态");
+        return fallback;
       }
       const peerValue = await waitForDurableSnapshot<FbsOrderSnapshot>(cacheKey);
       if (peerValue) return peerValue;
@@ -786,12 +801,14 @@ async function loadFbsOrders(token: string, storeId: string, forceRefresh = fals
         coverageStart: coverageStart.toISOString().slice(0, 10),
       };
       fbsOrderCache.set(storeId, { value: result, expiresAt: cacheExpiry() });
+      if (forceRefresh) markFresh(diagnostics, "订单实时状态");
       await Promise.all([writeEdgeCache(cacheKey, result), writeStableEdgeCache(cacheKey, result), writeRecentEdgeCache(cacheKey, result), writeDurableSnapshot(cacheKey, result, forceRefresh)]);
       return result;
     } catch (error) {
-      if (fallback && !forceRefresh) {
+      if (fallback) {
+        if (forceRefresh) markStale(diagnostics, "订单实时状态");
         fbsOrderCache.set(storeId, { value: fallback, expiresAt: cacheExpiry() });
-        await Promise.all([writeEdgeCache(cacheKey, fallback), writeDurableSnapshot(cacheKey, fallback, forceRefresh)]);
+        await Promise.all([writeEdgeCache(cacheKey, fallback), writeDurableSnapshot(cacheKey, fallback)]);
         return fallback;
       }
       throw error;
@@ -843,7 +860,7 @@ function resolveSellerWarehouseName(warehouse: SellerWarehouse & { officeName?: 
   return partial || warehouse.name?.trim() || `仓库 ${warehouse.id}`;
 }
 
-async function loadBalance(token: string, storeId: string, forceRefresh = false) {
+async function loadBalance(token: string, storeId: string, forceRefresh = false, diagnostics?: SyncDiagnostics) {
   const memory = balanceCache.get(storeId);
   if (!forceRefresh && memory && memory.expiresAt > Date.now()) return memory.value;
   const cacheKey = scopedStoreKey(storeId, "balance-v2");
@@ -868,11 +885,13 @@ async function loadBalance(token: string, storeId: string, forceRefresh = false)
         token,
       );
       const balance = { ...response, fetchedAt: new Date().toISOString() };
+      if (forceRefresh) markFresh(diagnostics, "账户余额");
       balanceCache.set(storeId, { value: balance, expiresAt: cacheExpiry() });
       await Promise.all([writeEdgeCache(cacheKey, balance), writeDurableSnapshot(cacheKey, balance, forceRefresh)]);
       return balance;
     } catch (error) {
-      if (fallback && !forceRefresh) {
+      if (fallback) {
+        if (forceRefresh) markStale(diagnostics, "账户余额");
         balanceCache.set(storeId, { value: fallback, expiresAt: cacheExpiry() });
         await writeEdgeCache(cacheKey, fallback);
         return fallback;
@@ -882,7 +901,7 @@ async function loadBalance(token: string, storeId: string, forceRefresh = false)
   });
 }
 
-async function loadCards(token: string, storeId: string, forceRefresh = false) {
+async function loadCards(token: string, storeId: string, forceRefresh = false, diagnostics?: SyncDiagnostics) {
   const cacheKey = scopedStoreKey(storeId, "cards");
   const memory = cardsCache.get(storeId);
   if (!forceRefresh && memory && memory.expiresAt > Date.now()) return memory.value;
@@ -926,10 +945,12 @@ async function loadCards(token: string, storeId: string, forceRefresh = false) {
         cursor = { updatedAt: response.cursor.updatedAt, nmID: response.cursor.nmID };
       }
       cardsCache.set(storeId, { value: cards, expiresAt: cacheExpiry() });
+      if (forceRefresh) markFresh(diagnostics, "商品卡片");
       await Promise.all([writeEdgeCache(cacheKey, cards), writeDurableSnapshot(cacheKey, cards, forceRefresh)]);
       return cards;
     } catch (error) {
-      if (fallback && !forceRefresh) {
+      if (fallback) {
+        if (forceRefresh) markStale(diagnostics, "商品卡片");
         cardsCache.set(storeId, { value: fallback, expiresAt: cacheExpiry() });
         await writeEdgeCache(cacheKey, fallback);
         return fallback;
@@ -939,7 +960,7 @@ async function loadCards(token: string, storeId: string, forceRefresh = false) {
   });
 }
 
-async function loadFeedbacks(token: string, storeId: string, forceRefresh = false) {
+async function loadFeedbacks(token: string, storeId: string, forceRefresh = false, diagnostics?: SyncDiagnostics) {
   const cacheKey = scopedStoreKey(storeId, "feedbacks");
   const memory = feedbacksCache.get(storeId);
   if (!forceRefresh && memory && memory.expiresAt > Date.now()) return memory.value;
@@ -971,11 +992,13 @@ async function loadFeedbacks(token: string, storeId: string, forceRefresh = fals
         byId.set(key, feedback);
       }
       const feedbacks = [...byId.values()];
+      if (forceRefresh) markFresh(diagnostics, "评价数据");
       feedbacksCache.set(storeId, { value: feedbacks, expiresAt: cacheExpiry() });
       await Promise.all([writeEdgeCache(cacheKey, feedbacks), writeDurableSnapshot(cacheKey, feedbacks, forceRefresh)]);
       return feedbacks;
     } catch (error) {
-      if (fallback && !forceRefresh) {
+      if (fallback) {
+        if (forceRefresh) markStale(diagnostics, "评价数据");
         feedbacksCache.set(storeId, { value: fallback, expiresAt: cacheExpiry() });
         await writeEdgeCache(cacheKey, fallback);
         return fallback;
@@ -1003,7 +1026,7 @@ function financeRowKey(row: WbFinanceRow) {
   return String(row.rrdId || `${row.srid || row.orderUid || ""}|${row.nmId || 0}|${row.rrDate || row.saleDt || row.orderDt || ""}|${row.sellerOperName || row.docTypeName || ""}`);
 }
 
-async function loadFinanceRows(token: string, storeId: string, forceRefresh = false): Promise<FinanceRowsSnapshot> {
+async function loadFinanceRows(token: string, storeId: string, forceRefresh = false, diagnostics?: SyncDiagnostics): Promise<FinanceRowsSnapshot> {
   const memory = financeRowsCache.get(storeId);
   if (!forceRefresh && memory && memory.expiresAt > Date.now()) return memory.value;
   const cacheKey = scopedStoreKey(storeId, "finance-details-all-v5");
@@ -1025,11 +1048,9 @@ async function loadFinanceRows(token: string, storeId: string, forceRefresh = fa
     }
     const hasLease = await acquireDurableRefreshLock(cacheKey, 60_000);
     if (!hasLease) {
-      if (!forceRefresh && fallback) return fallback;
-      if (forceRefresh) {
-        const error = new Error("A WB synchronization is already in progress");
-        Object.assign(error, { status: 409 });
-        throw error;
+      if (fallback) {
+        if (forceRefresh) markStale(diagnostics, "财务结算明细");
+        return fallback;
       }
       const peerValue = await waitForDurableSnapshot<FinanceRowsSnapshot>(cacheKey);
       if (peerValue) return peerValue;
@@ -1055,18 +1076,20 @@ async function loadFinanceRows(token: string, storeId: string, forceRefresh = fa
           signal: AbortSignal.timeout(25_000),
         });
       } catch (error) {
-        if (fallback && !forceRefresh) {
+        if (fallback) {
+          if (forceRefresh) markStale(diagnostics, "财务结算明细");
           financeRowsCache.set(storeId, { value: fallback, expiresAt: cacheExpiry() });
-          await Promise.all([writeEdgeCache(cacheKey, fallback), writeDurableSnapshot(cacheKey, fallback, forceRefresh)]);
+          await Promise.all([writeEdgeCache(cacheKey, fallback), writeDurableSnapshot(cacheKey, fallback)]);
           return fallback;
         }
         throw error;
       }
 
       if (!response.ok) {
-        if (fallback && !forceRefresh) {
+        if (fallback) {
+          if (forceRefresh) markStale(diagnostics, "财务结算明细");
           financeRowsCache.set(storeId, { value: fallback, expiresAt: cacheExpiry() });
-          await Promise.all([writeEdgeCache(cacheKey, fallback), writeDurableSnapshot(cacheKey, fallback, forceRefresh)]);
+          await Promise.all([writeEdgeCache(cacheKey, fallback), writeDurableSnapshot(cacheKey, fallback)]);
           return fallback;
         } else if (response.status === 429) {
           const peerValue = await waitForPeerCache<FinanceRowsSnapshot>(cacheKey);
@@ -1089,6 +1112,7 @@ async function loadFinanceRows(token: string, storeId: string, forceRefresh = fa
       }
       for (const row of refreshedRows) byRow.set(financeRowKey(row), row);
       const snapshot = { available: true, rows: [...byRow.values()], fetchedAt: new Date().toISOString() };
+      if (forceRefresh) markFresh(diagnostics, "财务结算明细");
       financeRowsCache.set(storeId, { value: snapshot, expiresAt: cacheExpiry() });
       await Promise.all([writeEdgeCache(cacheKey, snapshot), writeStableEdgeCache(cacheKey, snapshot), writeRecentEdgeCache(cacheKey, snapshot), writeDurableSnapshot(cacheKey, snapshot, forceRefresh)]);
       return snapshot;
@@ -1291,26 +1315,51 @@ export async function GET(request: Request) {
   if (toValue > Date.now() + DAY_MS) return json({ error: "不能查询未来日期" }, 400);
 
   try {
+    const syncDiagnostics: SyncDiagnostics = { fresh: new Set<string>(), stale: new Set<string>() };
     const cardsPromise = needsCards
-      ? loadCards(token, store.id, forceRefresh).catch(() => [] as WbCard[])
+      ? loadCards(token, store.id, forceRefresh, syncDiagnostics).catch(() => {
+          if (forceRefresh) markStale(syncDiagnostics, "商品卡片");
+          return [] as WbCard[];
+        })
       : Promise.resolve([] as WbCard[]);
     const fbsOrdersPromise = includeOrderDetails
-      ? loadFbsOrders(token, store.id, forceRefresh).catch(() => ({ available: false, orders: [] } as FbsOrderSnapshot))
+      ? loadFbsOrders(token, store.id, forceRefresh, syncDiagnostics).catch(() => {
+          if (forceRefresh) markStale(syncDiagnostics, "订单实时状态");
+          return { available: false, orders: [] } as FbsOrderSnapshot;
+        })
       : Promise.resolve({ available: false, orders: [] } as FbsOrderSnapshot);
     const financeRowsPromise = includeFinanceDetails
-      ? loadFinanceRows(token, store.id, forceRefresh)
-          .catch(() => ({ available: false, rows: [] } as FinanceRowsSnapshot))
+      ? loadFinanceRows(token, store.id, forceRefresh, syncDiagnostics)
+          .catch(() => {
+            if (forceRefresh) markStale(syncDiagnostics, "财务结算明细");
+            return { available: false, rows: [] } as FinanceRowsSnapshot;
+          })
       : Promise.resolve({ available: false, rows: [] } as FinanceRowsSnapshot);
     const [statistics, stockResult, balanceResult, cardsResult, feedbacksResult, sellerStockResult, fbsOrderResult, financeRowsResult] = await Promise.all([
-      loadStatistics(token, store.id, forceRefresh),
-      needsStockReport ? loadStocks(token, store.id, forceRefresh).catch(() => [] as WbStock[]) : Promise.resolve([] as WbStock[]),
-      needsBalance ? loadBalance(token, store.id, forceRefresh).catch(() => ({} as WbBalance)) : Promise.resolve({} as WbBalance),
+      loadStatistics(token, store.id, forceRefresh, syncDiagnostics),
+      needsStockReport ? loadStocks(token, store.id, forceRefresh, syncDiagnostics).catch(() => {
+        if (forceRefresh) markStale(syncDiagnostics, "库存统计");
+        return [] as WbStock[];
+      }) : Promise.resolve([] as WbStock[]),
+      needsBalance ? loadBalance(token, store.id, forceRefresh, syncDiagnostics).catch(() => {
+        if (forceRefresh) markStale(syncDiagnostics, "账户余额");
+        return {} as WbBalance;
+      }) : Promise.resolve({} as WbBalance),
       cardsPromise,
-      needsFeedbacks ? loadFeedbacks(token, store.id, forceRefresh).catch(() => [] as WbFeedback[]) : Promise.resolve([] as WbFeedback[]),
+      needsFeedbacks ? loadFeedbacks(token, store.id, forceRefresh, syncDiagnostics).catch(() => {
+        if (forceRefresh) markStale(syncDiagnostics, "评价数据");
+        return [] as WbFeedback[];
+      }) : Promise.resolve([] as WbFeedback[]),
       needsSellerStocks
-        ? cardsPromise.then((cards) => loadSellerStocks(token, cards, store.id, forceRefresh)).catch(() => ({ warehouses: [] } as SellerStockSnapshot))
+        ? cardsPromise.then((cards) => loadSellerStocks(token, cards, store.id, forceRefresh, syncDiagnostics)).catch(() => {
+            if (forceRefresh) markStale(syncDiagnostics, "卖家仓库存");
+            return { warehouses: [] } as SellerStockSnapshot;
+          })
         : needsSellerWarehouseDirectory
-          ? loadSellerWarehouseDirectory(token, store.id, forceRefresh).catch(() => ({ warehouses: [] } as SellerStockSnapshot))
+          ? loadSellerWarehouseDirectory(token, store.id, forceRefresh, syncDiagnostics).catch(() => {
+              if (forceRefresh) markStale(syncDiagnostics, "仓库目录");
+              return { warehouses: [] } as SellerStockSnapshot;
+            })
           : Promise.resolve({ warehouses: [] } as SellerStockSnapshot),
       fbsOrdersPromise,
       financeRowsPromise,
@@ -1888,6 +1937,11 @@ export async function GET(request: Request) {
         currentSlot: schedule.slot,
         nextAt: new Date(schedule.nextAt).toISOString(),
         mode: forceRefresh ? "manual" : "scheduled",
+      },
+      syncStatus: {
+        partial: syncDiagnostics.stale.size > 0,
+        freshSources: [...syncDiagnostics.fresh],
+        staleSources: [...syncDiagnostics.stale],
       },
       period: { from, to, days },
       currency: useDetailedMetrics && days > 90 ? "CNY" : "RUB",

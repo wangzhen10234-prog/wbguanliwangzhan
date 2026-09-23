@@ -59,6 +59,7 @@ type CostRow = {
 type SalesData = {
   syncedAt: string;
   syncSchedule: { nextAt: string };
+  syncStatus?: { partial: boolean; freshSources: string[]; staleSources: string[] };
   warehouses: Array<{ name: string; orders: number; stock: number }>;
   products: Product[];
   orderDetails: Order[];
@@ -251,7 +252,12 @@ export default function SalesPage() {
           return [] as CostRow[];
         }),
     ])
-      .then(([dashboard, costs]) => { setData(dashboard); setCostRows(costs); })
+      .then(([dashboard, costs]) => {
+        setData(dashboard);
+        setCostRows(costs);
+        const staleSources = dashboard.syncStatus?.staleSources ?? [];
+        setError(staleSources.length > 0 ? `部分数据暂未更新：${staleSources.join("、")}；已保留上次有效数据` : "");
+      })
       .catch((reason: Error) => { if (reason.name !== "AbortError") setError(reason.message); })
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
