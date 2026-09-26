@@ -1299,6 +1299,10 @@ export async function GET(request: Request) {
   const needsFeedbacks = view === "overview" || view === "products";
   const needsSellerStocks = view === "overview" || view === "products" || view === "stock";
   const needsSellerWarehouseDirectory = view === "sales";
+  // Sales synchronization prioritizes volatile order/settlement sources. Product
+  // cards and the warehouse directory change infrequently and are served from
+  // the scheduled snapshot so they cannot make a live order refresh look broken.
+  const forceSupportingDataRefresh = forceRefresh && view !== "sales";
   if (!DATE_PATTERN.test(from) || !DATE_PATTERN.test(to)) return json({ error: "日期格式无效" }, 400);
   if (requestedWarehouse.length > 160) return json({ error: "仓库名称无效" }, 400);
 
@@ -1317,8 +1321,8 @@ export async function GET(request: Request) {
   try {
     const syncDiagnostics: SyncDiagnostics = { fresh: new Set<string>(), stale: new Set<string>() };
     const cardsPromise = needsCards
-      ? loadCards(token, store.id, forceRefresh, syncDiagnostics).catch(() => {
-          if (forceRefresh) markStale(syncDiagnostics, "商品卡片");
+      ? loadCards(token, store.id, forceSupportingDataRefresh, syncDiagnostics).catch(() => {
+          if (forceSupportingDataRefresh) markStale(syncDiagnostics, "商品卡片");
           return [] as WbCard[];
         })
       : Promise.resolve([] as WbCard[]);
@@ -1356,8 +1360,8 @@ export async function GET(request: Request) {
             return { warehouses: [] } as SellerStockSnapshot;
           })
         : needsSellerWarehouseDirectory
-          ? loadSellerWarehouseDirectory(token, store.id, forceRefresh, syncDiagnostics).catch(() => {
-              if (forceRefresh) markStale(syncDiagnostics, "仓库目录");
+          ? loadSellerWarehouseDirectory(token, store.id, forceSupportingDataRefresh, syncDiagnostics).catch(() => {
+              if (forceSupportingDataRefresh) markStale(syncDiagnostics, "仓库目录");
               return { warehouses: [] } as SellerStockSnapshot;
             })
           : Promise.resolve({ warehouses: [] } as SellerStockSnapshot),

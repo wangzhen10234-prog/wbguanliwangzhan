@@ -195,6 +195,7 @@ export default function SalesPage() {
   const [costRows, setCostRows] = useState<CostRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [syncWarning, setSyncWarning] = useState("");
   const [dateError, setDateError] = useState("");
   const [reloadKey, setReloadKey] = useState(0);
   const [query, setQuery] = useState("");
@@ -256,9 +257,14 @@ export default function SalesPage() {
         setData(dashboard);
         setCostRows(costs);
         const staleSources = dashboard.syncStatus?.staleSources ?? [];
-        setError(staleSources.length > 0 ? `部分数据暂未更新：${staleSources.join("、")}；已保留上次有效数据` : "");
+        setError("");
+        setSyncWarning(staleSources.length > 0 ? `${staleSources.join("、")}暂未更新，已保留上次有效数据` : "");
       })
-      .catch((reason: Error) => { if (reason.name !== "AbortError") setError(reason.message); })
+      .catch((reason: Error) => {
+        if (reason.name === "AbortError") return;
+        setSyncWarning("");
+        setError(reason.message);
+      })
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
   }, [periodStart, periodEnd, warehouse, reloadKey]);
@@ -392,7 +398,7 @@ export default function SalesPage() {
   const visibleOrders = filteredOrders.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
   const statusProduct = statusOrder ? productById.get(statusOrder.nmId) : null;
 
-  function beginLoad() { setLoading(true); setError(""); setPage(1); }
+  function beginLoad() { setLoading(true); setError(""); setSyncWarning(""); setPage(1); }
   function choosePreset(days: number) {
     const start = shiftDate(today, -(days - 1));
     beginLoad(); setDraftStart(start); setDraftEnd(today); setPeriodStart(start); setPeriodEnd(today); setDateError("");
@@ -474,7 +480,7 @@ export default function SalesPage() {
 
   return (
     <main className="app-shell">
-      <AppSidebar active="sales" syncedAt={data?.syncedAt} nextSyncAt={data?.syncSchedule?.nextAt} loading={loading} error={error} onRefresh={refresh}>
+      <AppSidebar active="sales" syncedAt={data?.syncedAt} nextSyncAt={data?.syncSchedule?.nextAt} loading={loading} error={error} warning={syncWarning} onRefresh={refresh}>
         <div className="nav-section">当前查询</div>
         <div className="product-side-summary"><span>订单周期</span><b>{periodStart}</b><i>至</i><b>{periodEnd}</b><small>{warehouse || "全部仓库"}</small></div>
       </AppSidebar>
