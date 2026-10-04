@@ -176,10 +176,9 @@ export default function PromotionsPage() {
   useEffect(() => {
     const controller = new AbortController();
     const today = beijingDateKey();
-    const productParams = new URLSearchParams({ from: shiftDate(today, -89), to: today, view: "products" });
+    const productParams = new URLSearchParams({ from: shiftDate(today, -89), to: today, view: "catalog" });
     const promotionParams = new URLSearchParams();
     if (forceRefreshRef.current) {
-      productParams.set("refresh", "manual");
       promotionParams.set("refresh", "manual");
     }
     forceRefreshRef.current = false;

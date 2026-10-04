@@ -1293,6 +1293,10 @@ export async function GET(request: Request) {
   const includeFinanceDetails = url.searchParams.get("includeFinance") === "true";
   const forceRefresh = url.searchParams.get("refresh") === "manual";
   const view = url.searchParams.get("view") || "overview";
+  // Keep manual refreshes page-scoped. The lightweight `catalog` view is used
+  // by pages that only need product names/images and must not fan out into the
+  // order, stock, feedback and finance APIs.
+  const needsStatistics = view === "overview" || view === "sales" || view === "products" || view === "stock";
   const needsStockReport = view === "overview" || view === "products" || view === "stock";
   const needsBalance = view === "overview" || view === "finance";
   const needsCards = view !== "finance";
@@ -1340,7 +1344,9 @@ export async function GET(request: Request) {
           })
       : Promise.resolve({ available: false, rows: [] } as FinanceRowsSnapshot);
     const [statistics, stockResult, balanceResult, cardsResult, feedbacksResult, sellerStockResult, fbsOrderResult, financeRowsResult] = await Promise.all([
-      loadStatistics(token, store.id, forceRefresh, syncDiagnostics),
+      needsStatistics
+        ? loadStatistics(token, store.id, forceRefresh, syncDiagnostics)
+        : Promise.resolve({ orders: [] as WbOrder[], sales: [] as WbSale[] }),
       needsStockReport ? loadStocks(token, store.id, forceRefresh, syncDiagnostics).catch(() => {
         if (forceRefresh) markStale(syncDiagnostics, "库存统计");
         return [] as WbStock[];

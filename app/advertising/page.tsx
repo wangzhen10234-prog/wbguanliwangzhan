@@ -253,10 +253,9 @@ export default function AdvertisingPage() {
   useEffect(() => {
     const controller = new AbortController();
     const advertisingParams = new URLSearchParams({ from: periodFrom, to: periodTo });
-    const productParams = new URLSearchParams({ from: shiftDate(periodTo, -89), to: periodTo, view: "products" });
+    const productParams = new URLSearchParams({ from: shiftDate(periodTo, -89), to: periodTo, view: "catalog" });
     if (forceRefreshRef.current) {
       advertisingParams.set("refresh", "manual");
-      productParams.set("refresh", "manual");
     }
     forceRefreshRef.current = false;
     Promise.all([

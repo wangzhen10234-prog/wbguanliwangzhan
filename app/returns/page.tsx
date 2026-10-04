@@ -128,10 +128,9 @@ export default function ReturnsPage() {
     const controller = new AbortController();
     const returnParams = new URLSearchParams({ from: periodFrom, to: periodTo });
     const productTo = beijingDateKey();
-    const productParams = new URLSearchParams({ from: shiftDate(productTo, -89), to: productTo, view: "products" });
+    const productParams = new URLSearchParams({ from: shiftDate(productTo, -89), to: productTo, view: "catalog" });
     if (forceRefreshRef.current) {
       returnParams.set("refresh", "manual");
-      productParams.set("refresh", "manual");
     }
     forceRefreshRef.current = false;
     Promise.all([

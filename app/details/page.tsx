@@ -359,7 +359,7 @@ export default function ProductDetailsPage() {
     const controller = new AbortController();
     const today = new Date();
     const start = new Date(today.getTime() - 6 * DAY_MS);
-    const params = new URLSearchParams({ from: inputDate(start), to: inputDate(today), view: "details" });
+    const params = new URLSearchParams({ from: inputDate(start), to: inputDate(today), view: "catalog" });
     const manualMatch = forceRefreshRef.current;
     if (manualMatch) params.set("refresh", "manual");
     forceRefreshRef.current = false;
