@@ -2,8 +2,9 @@ import {
   DEFAULT_STOREFRONT_ID,
   STOREFRONT_COOKIE_KEY,
   storefrontById,
+  STOREFRONTS,
 } from "./storefronts.ts";
-import { decodeWbToken, decryptWbToken, managedStoreKey, safeStoreId, type ManagedStoreRecord } from "./wb-store-management.ts";
+import { decodeWbToken, decryptWbToken, managedStoreKey, safeStoreId, MANAGED_STORE_PREFIX, type ManagedStoreRecord } from "./wb-store-management.ts";
 
 type RuntimeEnvironment = {
   AUTH_KV?: KVNamespace;
@@ -76,4 +77,23 @@ export async function resolveWbStore(
 
 export function scopedStoreKey(storeId: string, key: string) {
   return storeId === DEFAULT_STOREFRONT_ID ? key : `${storeId}:${key}`;
+}
+
+/** Discover the registry on every request, including stores added after deployment. */
+export async function allEnabledWbStores(runtime: RuntimeEnvironment) {
+  const stores = new Map(STOREFRONTS.map((store) => [store.id, store]));
+  if (runtime.AUTH_KV) {
+    let cursor: string | undefined;
+    do {
+      const page = await runtime.AUTH_KV.list({ prefix: MANAGED_STORE_PREFIX, limit: 100, cursor });
+      const records = await Promise.all(page.keys.map((key) => runtime.AUTH_KV!.get<ManagedStoreRecord>(key.name, "json")));
+      for (const record of records) {
+        if (!record) continue;
+        if (!record.enabled) stores.delete(record.id);
+        else stores.set(record.id, { id: record.id, name: record.name, badge: record.badge, description: record.description, enabled: true, connected: !record.tokenDisabled });
+      }
+      cursor = page.list_complete ? undefined : page.cursor;
+    } while (cursor);
+  }
+  return [...stores.values()];
 }

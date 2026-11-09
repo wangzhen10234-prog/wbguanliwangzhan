@@ -6,6 +6,7 @@
   "compatibility_flags": ["nodejs_compat"],
   "no_bundle": true,
   "workers_dev": false,
+  "triggers": { "crons": ["10 6,8,14 * * *"] },
   "routes": [
     { "pattern": "wbwork.duoduolink.com", "zone_name": "duoduolink.com", "custom_domain": true }
   ],

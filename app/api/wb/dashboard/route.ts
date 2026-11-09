@@ -56,7 +56,7 @@ type SellerStockSnapshot = {
   warehouses: Array<SellerWarehouse & { officeName?: string; stocks: SellerStock[] }>;
 };
 
-type FbsOrder = {
+export type FbsOrder = {
   id?: number;
   orderUid?: string;
   rid?: string;
@@ -70,12 +70,13 @@ type FbsOrder = {
   wbStatus?: string;
 };
 
-type FbsOrderSnapshot = {
+export type FbsOrderSnapshot = {
   available: boolean;
   orders: FbsOrder[];
   completionObservations?: Record<string, FbsCompletionObservation>;
   /** Oldest order date already rebuilt in this persistence backend. */
   coverageStart?: string;
+  fetchedAt?: string;
 };
 
 type WbCard = {
@@ -741,7 +742,7 @@ async function fetchFbsOrders(token: string, start: Date, end: Date) {
   return orders;
 }
 
-async function loadFbsOrders(token: string, storeId: string, forceRefresh = false, diagnostics?: SyncDiagnostics) {
+export async function loadFbsOrders(token: string, storeId: string, forceRefresh = false, diagnostics?: SyncDiagnostics) {
   const memory = fbsOrderCache.get(storeId);
   if (!forceRefresh && memory && memory.expiresAt > Date.now()) return memory.value;
   const cacheKey = scopedStoreKey(storeId, "fbs-orders-all-v3");
@@ -816,6 +817,7 @@ async function loadFbsOrders(token: string, storeId: string, forceRefresh = fals
         orders,
         completionObservations,
         coverageStart: coverageStart.toISOString().slice(0, 10),
+        fetchedAt: new Date().toISOString(),
       };
       fbsOrderCache.set(storeId, { value: result, expiresAt: cacheExpiry() });
       if (forceRefresh) markFresh(diagnostics, "订单实时状态");

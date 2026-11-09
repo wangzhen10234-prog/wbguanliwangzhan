@@ -560,6 +560,28 @@ async function handleAuthApi(request: Request, env: Env, url: URL) {
 // const imageConfig: ImageConfig = { dangerouslyAllowSVG: true };
 
 const worker = {
+  async scheduled(_event: unknown, env: Env, ctx: ExecutionContext) {
+    // Internal scheduled requests use the same loaders as the protected screen.
+    // This does not expose an unauthenticated HTTP endpoint or session token.
+    ctx.waitUntil((async () => {
+      const today = new Date(Date.now() + 8 * 3_600_000).toISOString().slice(0, 10);
+      const from = new Date(Date.parse(`${today}T00:00:00Z`) - 7 * 86_400_000).toISOString().slice(0, 10);
+      const manifestResponse = await handler.fetch(new Request("https://wbwork.duoduolink.com/api/all-stores"), env, ctx);
+      if (!manifestResponse.ok) throw new Error("ALL_STORES_SCHEDULE_REGISTRY_FAILED");
+      const manifest = await manifestResponse.json() as { stores: Array<{ id: string }> };
+      for (const store of manifest.stores) {
+        try {
+          const params = new URLSearchParams({ storeId: store.id, from, to: today });
+          const response = await handler.fetch(new Request(`https://wbwork.duoduolink.com/api/all-stores?${params}`), env, ctx);
+          if (!response.ok) console.warn("ALL_STORES_SCHEDULE_STORE_FAILED", store.id, response.status);
+          else {
+            const result = await response.json() as { ordersState?: string; returnsState?: string; suppliesState?: string; catalogState?: string };
+            if ([result.ordersState, result.returnsState, result.suppliesState, result.catalogState].some((state) => state !== "fresh")) console.warn("ALL_STORES_SCHEDULE_PARTIAL", store.id);
+          }
+        } catch { console.warn("ALL_STORES_SCHEDULE_STORE_FAILED", store.id); }
+      }
+    })());
+  },
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 

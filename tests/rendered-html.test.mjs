@@ -39,6 +39,21 @@ test("protects business pages and APIs before login", async () => {
   assert.equal(marketPage.status, 302);
   const marketApi = await requestWithoutLogin("/api/wb/market");
   assert.equal(marketApi.status, 401);
+  assert.equal((await requestWithoutLogin("/all-stores")).status, 302);
+  assert.equal((await requestWithoutLogin("/api/all-stores")).status, 401);
+});
+
+test("renders the all-store quantity ledger with the agreed supply-date basis", async () => {
+  const response = await render("/all-stores");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /所有店铺综合经营总览/);
+  assert.match(html, /href="\/all-stores"/);
+  assert.match(html, /按供货单创建日期归档/);
+  assert.match(html, /每周 SKU 汇总/);
+  assert.match(html, /退货数量/);
+  assert.match(html, /SKU 对应设置/);
+  assert.doesNotMatch(html, /配送费|商品单价|取货费/);
 });
 
 test("keeps the login page public and security-hardened", async () => {
