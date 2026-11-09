@@ -95,6 +95,30 @@ type RestorePayload = {
   nmId?: unknown;
 };
 
+type ImportProductPayload = {
+  sellerSku?: unknown;
+  nmId?: unknown;
+  imageUrl?: unknown;
+};
+
+type ImportMatchedPayload = {
+  action?: unknown;
+  sourceStoreId?: unknown;
+  products?: unknown;
+};
+
+const STORE_PRODUCT_IMPORT_ALIASES: Record<string, string> = {
+  xb: "xzhiwujiab",
+  xw: "xzhiwujiaw",
+  yijiab: "yib",
+  yijiabl: "yic",
+  yijiah: "yig",
+  "810b": "810h",
+  "603w": "603",
+  "806": "8006",
+  sbd5: "cwljd",
+};
+
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: JSON_HEADERS });
 }
@@ -119,6 +143,107 @@ function imageUrlField(value: unknown) {
   } catch {
     throw new Error("IMAGE_URL_INVALID");
   }
+}
+
+function importProductKey(value: unknown) {
+  return stringField(value, 120)
+    .toLocaleLowerCase()
+    .replace(/^(cl|wz)/, "")
+    .replace(/[^a-z0-9\u4e00-\u9fff]+/g, "");
+}
+
+function importSourceKey(value: unknown) {
+  const key = importProductKey(value);
+  return STORE_PRODUCT_IMPORT_ALIASES[key] ?? key;
+}
+
+function normalizeImportProducts(value: unknown) {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 500) throw new Error("IMPORT_PRODUCTS_INVALID");
+  const seen = new Set<string>();
+  return value.map((entry) => {
+    const product = (entry && typeof entry === "object" ? entry : {}) as ImportProductPayload;
+    const sellerSku = stringField(product.sellerSku, 120);
+    const nmId = Math.trunc(numericField(product.nmId, Number.MAX_SAFE_INTEGER));
+    const imageUrl = imageUrlField(product.imageUrl);
+    const key = normalizeProductSku(sellerSku);
+    if (!sellerSku || !key || !nmId || seen.has(key)) throw new Error("IMPORT_PRODUCTS_INVALID");
+    seen.add(key);
+    return { sellerSku, nmId, imageUrl };
+  });
+}
+
+function hasEnteredProductDetails(row: ProductCostRow) {
+  return Boolean(
+    row.internalSku
+    || row.category
+    || row.specification
+    || row.notes
+    || row.lengthCm
+    || row.widthCm
+    || row.heightCm
+    || row.weightG
+    || row.productCostRub
+    || row.productCostCny
+    || row.handlingFeeCny
+    || row.lastMileFeeCny
+    || row.commissionRate
+    || row.adRate
+    || row.activityDiscountRate
+    || row.returnLossRate
+    || row.referencePriceCny
+    || row.targetMarginRate
+  );
+}
+
+function buildMatchedImport(
+  sourceRows: ProductCostRow[],
+  targetRows: ProductCostRow[],
+  targetProducts: ReturnType<typeof normalizeImportProducts>,
+  targetStoreId: string,
+  sourceStoreId: string,
+) {
+  const existingBySku = new Map(targetRows.map((row) => [normalizeProductSku(row.sellerSku), row]));
+  const existingByNmId = new Map(targetRows.filter((row) => row.nmId).map((row) => [row.nmId as number, row]));
+  const sourcePrefix = sourceStoreId.toLocaleLowerCase();
+  const now = new Date().toISOString();
+  const values: ProductCostValue[] = [];
+  const matches: Array<{ sellerSku: string; nmId: number; sourceSellerSku: string }> = [];
+  const unmatched: Array<{ sellerSku: string; nmId: number }> = [];
+  const skipped: Array<{ sellerSku: string; nmId: number; reason: string }> = [];
+
+  for (const product of targetProducts) {
+    const existing = existingBySku.get(normalizeProductSku(product.sellerSku)) ?? existingByNmId.get(product.nmId);
+    if (existing && hasEnteredProductDetails(existing)) {
+      skipped.push({ sellerSku: product.sellerSku, nmId: product.nmId, reason: "目标商品已有详情" });
+      continue;
+    }
+
+    const wantedKey = importSourceKey(product.sellerSku);
+    const candidates = sourceRows.filter((row) => importProductKey(row.sellerSku) === wantedKey);
+    candidates.sort((left, right) => {
+      const leftPreferred = left.sellerSku.toLocaleLowerCase().startsWith(sourcePrefix) ? 1 : 0;
+      const rightPreferred = right.sellerSku.toLocaleLowerCase().startsWith(sourcePrefix) ? 1 : 0;
+      return rightPreferred - leftPreferred || left.sortOrder - right.sortOrder;
+    });
+    const source = candidates[0];
+    if (!source) {
+      unmatched.push({ sellerSku: product.sellerSku, nmId: product.nmId });
+      continue;
+    }
+
+    values.push({
+      ...source,
+      storeId: targetStoreId,
+      sellerSku: product.sellerSku,
+      nmId: product.nmId,
+      imageUrl: product.imageUrl || source.imageUrl,
+      createdAt: existing?.createdAt || now,
+      updatedAt: now,
+    });
+    matches.push({ sellerSku: product.sellerSku, nmId: product.nmId, sourceSellerSku: source.sellerSku });
+  }
+
+  return { values, matches, unmatched, skipped };
 }
 
 function normalizePayload(payload: CostPayload, storeId: string): typeof productCosts.$inferInsert {
@@ -450,6 +575,95 @@ async function supabaseRestore(request: Request, body: RestorePayload) {
   );
   for (const marker of matches) await supabaseDeleteMarker(store.id, marker.identityKey);
   return json({ restored: true, restoredMarkers: matches.length });
+}
+
+async function supabaseImportMatched(request: Request, body: ImportMatchedPayload) {
+  if (body.action !== "importMatchedProducts") return json({ error: "不支持的产品导入操作" }, 400);
+  const store = await requestedStorefront(request, env);
+  const sourceStoreId = stringField(body.sourceStoreId, 80);
+  if (!sourceStoreId || sourceStoreId === store.id) return json({ error: "来源店铺与目标店铺无效" }, 400);
+  const targetProducts = normalizeImportProducts(body.products);
+  await separateSecondarySupabaseProductRegister(sourceStoreId);
+  const [sourceRows, targetRows] = await Promise.all([
+    supabaseProductRows(sourceStoreId),
+    supabaseProductRows(store.id),
+  ]);
+  if (sourceRows.length === 0) return json({ error: "来源店铺没有可对应的产品详情" }, 404);
+  const result = buildMatchedImport(sourceRows, targetRows, targetProducts, store.id, sourceStoreId);
+  const rows = await supabaseUpsertProducts(result.values);
+  return json({
+    imported: rows.length,
+    matched: result.matches,
+    unmatched: result.unmatched,
+    skipped: result.skipped,
+    activeStoreId: store.id,
+    sourceStoreId,
+  });
+}
+
+function d1UpsertProduct(db: ReturnType<typeof getDb>, value: ProductCostValue) {
+  return db.insert(productCosts).values(value).onConflictDoUpdate({
+    target: [productCosts.storeId, productCosts.sellerSku],
+    set: {
+      nmId: value.nmId,
+      imageUrl: value.imageUrl,
+      internalSku: value.internalSku,
+      category: value.category,
+      specification: value.specification,
+      lengthCm: value.lengthCm,
+      widthCm: value.widthCm,
+      heightCm: value.heightCm,
+      weightG: value.weightG,
+      productCostRub: value.productCostRub,
+      exchangeRate: value.exchangeRate,
+      productCostCny: value.productCostCny,
+      handlingFeeCny: value.handlingFeeCny,
+      lastMileFeeCny: value.lastMileFeeCny,
+      commissionRate: value.commissionRate,
+      adRate: value.adRate,
+      activityDiscountRate: value.activityDiscountRate,
+      returnLossRate: value.returnLossRate,
+      referencePriceCny: value.referencePriceCny,
+      targetMarginRate: value.targetMarginRate,
+      sortOrder: value.sortOrder,
+      notes: value.notes,
+      updatedAt: value.updatedAt,
+    },
+  });
+}
+
+export async function POST(request: Request) {
+  try {
+    const body = await request.json() as ImportMatchedPayload;
+    if (persistenceBackend() === "supabase") return await supabaseImportMatched(request, body);
+    if (body.action !== "importMatchedProducts") return json({ error: "不支持的产品导入操作" }, 400);
+    const store = await requestedStorefront(request, env);
+    const sourceStoreId = stringField(body.sourceStoreId, 80);
+    if (!sourceStoreId || sourceStoreId === store.id) return json({ error: "来源店铺与目标店铺无效" }, 400);
+    const targetProducts = normalizeImportProducts(body.products);
+    const db = getDb();
+    await separateSecondaryProductRegister(db, sourceStoreId);
+    const [sourceRows, targetRows] = await Promise.all([
+      db.select().from(productCosts).where(eq(productCosts.storeId, sourceStoreId)).orderBy(asc(productCosts.sortOrder), asc(productCosts.sellerSku)),
+      db.select().from(productCosts).where(eq(productCosts.storeId, store.id)).orderBy(asc(productCosts.sortOrder), asc(productCosts.sellerSku)),
+    ]);
+    if (sourceRows.length === 0) return json({ error: "来源店铺没有可对应的产品详情" }, 404);
+    const result = buildMatchedImport(sourceRows, targetRows, targetProducts, store.id, sourceStoreId);
+    if (result.values.length > 0) await db.batch(result.values.map((value) => d1UpsertProduct(db, value)));
+    return json({
+      imported: result.values.length,
+      matched: result.matches,
+      unmatched: result.unmatched,
+      skipped: result.skipped,
+      activeStoreId: store.id,
+      sourceStoreId,
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message === "IMPORT_PRODUCTS_INVALID") return json({ error: "目标店铺商品列表无效，未执行导入" }, 400);
+    if (error instanceof Error && error.message === "IMAGE_URL_INVALID") return json({ error: "目标商品图片链接无效，未执行导入" }, 400);
+    if (error instanceof Error && error.message === "NUMERIC_FIELD_INVALID") return json({ error: "目标商品 ID 无效，未执行导入" }, 400);
+    return databaseError(error);
+  }
 }
 
 export async function GET(request: Request) {

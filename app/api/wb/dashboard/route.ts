@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { withSyncDeadline } from "../../../_lib/sync-deadline";
 import { buildOrderCompletionIndex, completionForOrder, normalizeWbStatisticsTime } from "../../../_lib/order-completion";
 import { fbsStatusOutcome, updateFbsCompletionObservations, type FbsCompletionObservation } from "../../../_lib/fbs-completion-observations";
 import { fbsOrderKey } from "../../../_lib/fbs-order-identity";
@@ -297,8 +298,10 @@ async function readEdgeCache<T>(key: string): Promise<T | null> {
   try {
     const cache = edgeCache();
     if (!cache) return null;
-    const response = await cache.match(new Request(`${EDGE_CACHE_BASE}/${syncSchedule().slot}/${key}`));
-    return response ? await response.json() as T : null;
+    return await withSyncDeadline((async () => {
+      const response = await cache.match(new Request(`${EDGE_CACHE_BASE}/${syncSchedule().slot}/${key}`));
+      return response ? await response.json() as T : null;
+    })(), 2000, `edge-read:${key}`);
   } catch {
     return null;
   }
@@ -310,9 +313,9 @@ async function writeEdgeCache(key: string, value: unknown) {
     if (!cache) return;
     const schedule = syncSchedule();
     const maxAge = Math.max(60, Math.floor((schedule.nextAt - Date.now()) / 1000));
-    await cache.put(new Request(`${EDGE_CACHE_BASE}/${schedule.slot}/${key}`), new Response(JSON.stringify(value), {
+    await withSyncDeadline(cache.put(new Request(`${EDGE_CACHE_BASE}/${schedule.slot}/${key}`), new Response(JSON.stringify(value), {
       headers: { "Content-Type": "application/json", "Cache-Control": `public, max-age=${maxAge}` },
-    }));
+    })), 2000, `edge-write:${key}`);
   } catch {
     // Local development runtimes may not expose the Cloudflare default cache.
   }
@@ -322,8 +325,10 @@ async function readNamedEdgeCache<T>(base: string, key: string): Promise<T | nul
   try {
     const cache = edgeCache();
     if (!cache) return null;
-    const response = await cache.match(new Request(`${base}/${key}`));
-    return response ? await response.json() as T : null;
+    return await withSyncDeadline((async () => {
+      const response = await cache.match(new Request(`${base}/${key}`));
+      return response ? await response.json() as T : null;
+    })(), 2000, `edge-read:${key}`);
   } catch {
     return null;
   }
@@ -333,9 +338,9 @@ async function writeNamedEdgeCache(base: string, key: string, value: unknown, ma
   try {
     const cache = edgeCache();
     if (!cache) return;
-    await cache.put(new Request(`${base}/${key}`), new Response(JSON.stringify(value), {
+    await withSyncDeadline(cache.put(new Request(`${base}/${key}`), new Response(JSON.stringify(value), {
       headers: { "Content-Type": "application/json", "Cache-Control": `public, max-age=${maxAge}` },
-    }));
+    })), 2000, `edge-write:${key}`);
   } catch {
     // Local development runtimes may not expose the Cloudflare default cache.
   }
@@ -372,7 +377,7 @@ function manualRefreshBucket() {
 
 async function readDurableRecord<T>(key: string): Promise<DurableSnapshot<T> | null> {
   try {
-    const row = await readSyncSnapshot(key);
+    const row = await withSyncDeadline(readSyncSnapshot(key), 5000, `snapshot-read:${key}`);
     return row?.payload ? { value: JSON.parse(row.payload) as T, syncSlot: row.syncSlot || "", manualBucket: Number(row.manualBucket || 0) } : null;
   } catch {
     return null;
@@ -381,6 +386,11 @@ async function readDurableRecord<T>(key: string): Promise<DurableSnapshot<T> | n
 
 async function readDurableSnapshot<T>(key: string): Promise<T | null> {
   return (await readDurableRecord<T>(key))?.value ?? null;
+}
+
+async function recoverSyncSource<T>(storeId: string, key: string, source: string, diagnostics: SyncDiagnostics, empty: T): Promise<T> {
+  markStale(diagnostics, source);
+  return (await readDurableSnapshot<T>(scopedStoreKey(storeId, key))) ?? empty;
 }
 
 function durableRecordIsFresh(record: DurableSnapshot<unknown> | null, forceRefresh: boolean) {
@@ -392,13 +402,13 @@ function durableRecordIsFresh(record: DurableSnapshot<unknown> | null, forceRefr
 
 async function writeDurableSnapshot(key: string, value: unknown, forceRefresh = false) {
   try {
-    await writeSyncSnapshot(
+    await withSyncDeadline(writeSyncSnapshot(
       key,
       JSON.stringify(value),
       syncSchedule().slot,
       forceRefresh ? manualRefreshBucket() : 0,
       { preserveManualBucket: true },
-    );
+    ), 3000, `snapshot-write:${key}`);
   } catch {
     // A cache write must never make a successful WB response fail.
   }
@@ -406,7 +416,7 @@ async function writeDurableSnapshot(key: string, value: unknown, forceRefresh = 
 
 async function acquireDurableRefreshLock(key: string, ttlMs = 45_000) {
   try {
-    return await acquireSyncLock(key, ttlMs);
+    return await withSyncDeadline(acquireSyncLock(key, ttlMs), 2000, `lock:${key}`);
   } catch {
     return true;
   }
@@ -414,7 +424,7 @@ async function acquireDurableRefreshLock(key: string, ttlMs = 45_000) {
 
 async function releaseDurableRefreshLock(key: string) {
   try {
-    await releaseSyncLock(key);
+    await withSyncDeadline(releaseSyncLock(key), 2000, `unlock:${key}`);
   } catch {
     // Local development may not have a D1 binding.
   }
@@ -432,10 +442,17 @@ async function waitForDurableSnapshot<T>(key: string): Promise<T | null> {
 async function dedupe<T>(key: string, loader: () => Promise<T>): Promise<T> {
   const existing = pendingLoads.get(key) as Promise<T> | undefined;
   if (existing) return existing;
-  const pending = loader();
+  const started = Date.now();
+  console.info("WB_SYNC_START", { source: key });
+  const pending = withSyncDeadline(loader(), 45_000, key);
   pendingLoads.set(key, pending);
   try {
-    return await pending;
+    const result = await pending;
+    console.info("WB_SYNC_DONE", { source: key, elapsedMs: Date.now() - started });
+    return result;
+  } catch (error) {
+    console.warn("WB_SYNC_FAILED", { source: key, elapsedMs: Date.now() - started, status: Number((error as { status?: number }).status || 0), timeout: error instanceof Error && error.message.startsWith("SYNC_TIMEOUT:") });
+    throw error;
   } finally {
     if (pendingLoads.get(key) === pending) pendingLoads.delete(key);
   }
@@ -1325,27 +1342,18 @@ export async function GET(request: Request) {
   try {
     const syncDiagnostics: SyncDiagnostics = { fresh: new Set<string>(), stale: new Set<string>() };
     const cardsPromise = needsCards
-      ? loadCards(token, store.id, forceSupportingDataRefresh, syncDiagnostics).catch(() => {
-          if (forceSupportingDataRefresh) markStale(syncDiagnostics, "商品卡片");
-          return [] as WbCard[];
-        })
+      ? loadCards(token, store.id, forceSupportingDataRefresh, syncDiagnostics).catch(() => recoverSyncSource(store.id, "cards", "商品卡片", syncDiagnostics, [] as WbCard[]))
       : Promise.resolve([] as WbCard[]);
     const fbsOrdersPromise = includeOrderDetails
-      ? loadFbsOrders(token, store.id, forceRefresh, syncDiagnostics).catch(() => {
-          if (forceRefresh) markStale(syncDiagnostics, "订单实时状态");
-          return { available: false, orders: [] } as FbsOrderSnapshot;
-        })
+      ? loadFbsOrders(token, store.id, forceRefresh, syncDiagnostics).catch(() => recoverSyncSource(store.id, "fbs-orders-all-v3", "订单实时状态", syncDiagnostics, { available: false, orders: [] } as FbsOrderSnapshot))
       : Promise.resolve({ available: false, orders: [] } as FbsOrderSnapshot);
     const financeRowsPromise = includeFinanceDetails
       ? loadFinanceRows(token, store.id, forceRefresh, syncDiagnostics)
-          .catch(() => {
-            if (forceRefresh) markStale(syncDiagnostics, "财务结算明细");
-            return { available: false, rows: [] } as FinanceRowsSnapshot;
-          })
+          .catch(() => recoverSyncSource(store.id, "finance-details-all-v5", "财务结算明细", syncDiagnostics, { available: false, rows: [] } as FinanceRowsSnapshot))
       : Promise.resolve({ available: false, rows: [] } as FinanceRowsSnapshot);
     const [statistics, stockResult, balanceResult, cardsResult, feedbacksResult, sellerStockResult, fbsOrderResult, financeRowsResult] = await Promise.all([
       needsStatistics
-        ? loadStatistics(token, store.id, forceRefresh, syncDiagnostics)
+        ? loadStatistics(token, store.id, forceRefresh, syncDiagnostics).catch(() => recoverSyncSource(store.id, "statistics", "订单与销售统计", syncDiagnostics, { orders: [] as WbOrder[], sales: [] as WbSale[] }))
         : Promise.resolve({ orders: [] as WbOrder[], sales: [] as WbSale[] }),
       needsStockReport ? loadStocks(token, store.id, forceRefresh, syncDiagnostics).catch(() => {
         if (forceRefresh) markStale(syncDiagnostics, "库存统计");
@@ -1366,14 +1374,14 @@ export async function GET(request: Request) {
             return { warehouses: [] } as SellerStockSnapshot;
           })
         : needsSellerWarehouseDirectory
-          ? loadSellerWarehouseDirectory(token, store.id, forceSupportingDataRefresh, syncDiagnostics).catch(() => {
-              if (forceSupportingDataRefresh) markStale(syncDiagnostics, "仓库目录");
-              return { warehouses: [] } as SellerStockSnapshot;
-            })
+          ? loadSellerWarehouseDirectory(token, store.id, forceSupportingDataRefresh, syncDiagnostics).catch(() => recoverSyncSource(store.id, "seller-warehouses", "仓库目录", syncDiagnostics, { warehouses: [] } as SellerStockSnapshot))
           : Promise.resolve({ warehouses: [] } as SellerStockSnapshot),
       fbsOrdersPromise,
       financeRowsPromise,
     ]);
+    if (includeOrderDetails && !fbsOrderResult.available && statistics.orders.length === 0 && statistics.sales.length === 0) {
+      return json({ error: "订单接口本次未返回且暂无可用历史数据，请稍后重新同步" }, 503);
+    }
     const financeDetailsResult = aggregateFinanceRows(financeRowsResult, from, to);
 
     const inPeriod = (row: { date?: string }) => {

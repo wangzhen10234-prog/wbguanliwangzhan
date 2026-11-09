@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AppSidebar } from "../_components/app-sidebar";
+import { OrderNoteButton, OrderNotesProvider, type OrderNotesState } from "../_components/order-notes";
 import { normalizeProductSku, productCostSourceKey } from "../_lib/product-cost-aliases";
 import { calculateOrderFinancial, isCurrentValidNewOrder, isUnprocessedClientCancellation, returnRateSummary, waitingFinancial, type OrderFinancial } from "../_lib/sales-financials";
 import { sortSalesOrders, type SalesOrderSortDirection, type SalesOrderSortKey } from "../_lib/sales-order-sort";
@@ -205,6 +206,8 @@ export default function SalesPage() {
   const [financialFilter, setFinancialFilter] = useState<"all" | "profit" | "cost">("all");
   const [orderSort, setOrderSort] = useState<{ key: SalesOrderSortKey; direction: SalesOrderSortDirection }>({ key: "createdAt", direction: "desc" });
   const [page, setPage] = useState(1);
+  const [markedOnly, setMarkedOnly] = useState(false);
+  const [orderNotes, setOrderNotes] = useState<OrderNotesState>({ notes: {}, ready: false });
   const [statusOrder, setStatusOrder] = useState<Order | null>(null);
   const [liveStatus, setLiveStatus] = useState<LiveOrderStatus | null>(null);
   const [liveStatusLoading, setLiveStatusLoading] = useState(false);
@@ -231,18 +234,20 @@ export default function SalesPage() {
 
   useEffect(() => {
     const controller = new AbortController();
+    const dashboardSignal = AbortSignal.any([controller.signal, AbortSignal.timeout(60_000)]);
+    const costsSignal = AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)]);
     const params = new URLSearchParams({ from: periodStart, to: periodEnd, includeOrders: "true", includeFinance: "true", view: "sales" });
     if (warehouse) params.set("warehouse", warehouse);
     if (forceRefreshRef.current) params.set("refresh", "manual");
     forceRefreshRef.current = false;
     Promise.all([
-      fetch(`/api/wb/dashboard?${params.toString()}`, { signal: controller.signal, headers: { Accept: "application/json" }, cache: "no-store" })
+      fetch(`/api/wb/dashboard?${params.toString()}`, { signal: dashboardSignal, headers: { Accept: "application/json" }, cache: "no-store" })
         .then(async (response) => {
           const body = await response.json() as SalesData | { error?: string };
           if (!response.ok) throw new Error("error" in body && body.error ? body.error : "同步失败，请稍后重试");
           return body as SalesData;
         }),
-      fetch("/api/product-costs", { signal: controller.signal, headers: { Accept: "application/json" }, cache: "no-store" })
+      fetch("/api/product-costs", { signal: costsSignal, headers: { Accept: "application/json" }, cache: "no-store" })
         .then(async (response) => {
           const body = await response.json() as { rows?: CostRow[]; error?: string };
           if (!response.ok) throw new Error(body.error || "产品成本读取失败");
@@ -250,20 +255,20 @@ export default function SalesPage() {
         })
         .catch((reason: Error) => {
           if (reason.name === "AbortError") throw reason;
-          return [] as CostRow[];
+          return null;
         }),
     ])
       .then(([dashboard, costs]) => {
         setData(dashboard);
-        setCostRows(costs);
+        if (costs) setCostRows(costs);
         const staleSources = dashboard.syncStatus?.staleSources ?? [];
         setError("");
-        setSyncWarning(staleSources.length > 0 ? `${staleSources.join("、")}暂未更新，已保留上次有效数据` : "");
+        setSyncWarning([staleSources.length > 0 ? `${staleSources.join("、")}暂未更新，已保留上次有效数据` : "", costs === null ? "产品成本暂未更新，保留已有成本；缺少成本的订单不计算利润" : ""].filter(Boolean).join("；"));
       })
       .catch((reason: Error) => {
         if (reason.name === "AbortError") return;
         setSyncWarning("");
-        setError(reason.message);
+        setError(reason.name === "TimeoutError" ? "本次同步等待超时，已结束等待并保留页面已有数据，请点击重新同步" : reason.message);
       })
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
@@ -390,11 +395,14 @@ export default function SalesPage() {
         || (financialFilter === "profit" && finance?.profit !== null && finance?.profit !== undefined)
         || (financialFilter === "cost" && finance?.costExpense !== null && finance?.costExpense !== undefined);
       const matchesQuery = !needle || [order.orderNumber, order.article, product?.name || "", order.warehouseName, order.statusLabel].some((value) => value.toLocaleLowerCase().includes(needle));
-      return matchesStatus && matchesWbStatus && matchesTodayActive && matchesFinancial && matchesQuery;
+      const matchesMarked = !markedOnly || Boolean(orderNotes.notes[order.id]?.trim());
+      return matchesStatus && matchesWbStatus && matchesTodayActive && matchesFinancial && matchesQuery && matchesMarked;
     });
     return sortSalesOrders(filtered, orderSort.key, orderSort.direction);
-  }, [data?.orderSummary?.todayActiveOrderIds, dateFilter, financialByOrder, financialFilter, orders, orderSort, productById, query, statusFilter, wbStatusFilter]);
+  }, [data?.orderSummary?.todayActiveOrderIds, dateFilter, financialByOrder, financialFilter, orders, orderSort, productById, query, statusFilter, wbStatusFilter, markedOnly, orderNotes.notes]);
   const pageCount = Math.max(1, Math.ceil(filteredOrders.length / PAGE_SIZE));
+  const markedCount = orders.filter((order) => Boolean(orderNotes.notes[order.id]?.trim())).length;
+  useEffect(() => { setPage((current) => Math.min(current, pageCount)); }, [pageCount]);
   const visibleOrders = filteredOrders.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
   const statusProduct = statusOrder ? productById.get(statusOrder.nmId) : null;
 
@@ -479,7 +487,7 @@ export default function SalesPage() {
   }
 
   return (
-    <main className="app-shell">
+    <OrderNotesProvider orderIds={orders.map((order) => order.id)} revision={reloadKey} onStateChange={setOrderNotes}><main className="app-shell">
       <AppSidebar active="sales" syncedAt={data?.syncedAt} nextSyncAt={data?.syncSchedule?.nextAt} loading={loading} error={error} warning={syncWarning} onRefresh={refresh}>
         <div className="nav-section">当前查询</div>
         <div className="product-side-summary"><span>订单周期</span><b>{periodStart}</b><i>至</i><b>{periodEnd}</b><small>{warehouse || "全部仓库"}</small></div>
@@ -532,7 +540,7 @@ export default function SalesPage() {
             <table className="order-detail-table">
               <thead><tr><th aria-sort={orderSort.key === "createdAt" ? orderSort.direction === "desc" ? "descending" : "ascending" : "none"}><button type="button" className={`order-sort-button ${orderSort.key === "createdAt" ? "active" : ""}`} onClick={() => changeOrderSort("createdAt")} aria-label={`按订单时间${orderSort.key === "createdAt" && orderSort.direction === "desc" ? "升序" : "降序"}排列`}>订单时间 <span aria-hidden="true">{orderSortMark("createdAt")}</span></button></th><th>订单号</th><th>SKU 编码</th><th>仓库</th><th>成交价</th><th>供应商状态</th><th>WB 状态</th><th aria-sort={orderSort.key === "completionAt" ? orderSort.direction === "desc" ? "descending" : "ascending" : "none"}><button type="button" className={`order-sort-button outcome ${orderSort.key === "completionAt" ? "active" : ""}`} onClick={() => changeOrderSort("completionAt")} aria-label={`按签收完结时间${orderSort.key === "completionAt" && orderSort.direction === "desc" ? "升序" : "降序"}排列`}><span>签收结果 <i aria-hidden="true">{orderSortMark("completionAt")}</i></span><small>完结日期 · 北京时间</small></button></th><th>结账状态</th><th>平台结账/预估<small>佣金＋物流＋账单费用扣除后</small></th><th>平台总扣费<small>佣金＋物流＋收款/罚款/仓储等</small></th><th>商品成本<small>拿货成本＋操作费</small></th><th>预估成本支出<small>平台净扣费＋商品成本</small></th><th>单笔利润</th><th>利润率</th></tr></thead>
               <tbody>
-                <tr className="order-rollup-row"><td><b>综合统计</b><small>{periodStart} 至 {periodEnd}</small></td><td><b>{rollup.orders} 笔订单</b></td><td><b>{new Set(orders.map((order) => order.article)).size} 个 SKU</b></td><td><b>{warehouse || "全部仓库"}</b></td><td><b>{formatMoney(rollup.amount)}</b><small>平台成交价合计</small></td><td><b className="value-good">正常 {rollup.success}</b><small className="supplier-new-count">当前新订单 {rollup.supplierNew}</small></td><td><b>待签 {rollup.pending}</b></td><td><b className={rollup.abnormal ? "value-bad" : "value-good"}>非正常 {rollup.abnormal} · 退货率 {rollup.abnormalRate.toFixed(1)}%</b><small>计入退货率 {rollup.rateAbnormal} · 无效排除 {rollup.invalid}</small></td><td><b className="value-good">已结 {financeRollup.settled}</b><small>待结账预估 {financeRollup.estimated} · 异常实扣 {financeRollup.actualAbnormal} · 异常预估 {financeRollup.estimatedAbnormal} · 零支出 {financeRollup.zeroCostAbnormal}</small></td><td><b>{formatFinanceMoney(financeRollup.platformPayout)}</b><small className="finance-breakdown">含已结实款与待结账预估；佣金后货款 {formatFinanceNumber(financeRollup.postCommissionPayout)}</small></td><td><b>{formatFinanceMoney(financeRollup.platformDeduction)}</b><small className="finance-breakdown">{platformFeeBreakdown(financeRollup)}</small></td><td><b>{formatFinanceMoney(financeRollup.productCost)}</b><small className="finance-breakdown">{productCostBreakdown(financeRollup)} · {financeRollup.costReady} 笔</small></td><td><b>{formatFinanceMoney(financeRollup.costExpense)}</b><small className="finance-breakdown">正常 {formatFinanceNumber(financeRollup.normalCostExpense)}＋异常 {formatFinanceNumber(financeRollup.abnormalCostExpense)}</small></td><td><b className={financeRollup.profit >= 0 ? "value-good" : "value-bad"}>{formatFinanceMoney(financeRollup.profit)}</b><small>已结 {formatFinanceMoney(financeRollup.actualProfit)} · 待结账 {formatFinanceMoney(financeRollup.estimatedProfit)} · 异常 {formatFinanceMoney(financeRollup.abnormalProfit)}</small></td><td><b className={financeRollup.profitRate >= 0 ? "value-good" : "value-bad"}>{financeRollup.profitRate.toFixed(1)}%</b></td></tr>
+                <tr className="order-rollup-row"><td><b>综合统计</b><small>{periodStart} 至 {periodEnd}</small></td><td><div className="order-rollup-with-mark"><b>{rollup.orders} 笔订单</b><button type="button" className={`order-mark-filter ${markedOnly ? "active" : ""}`} disabled={!orderNotes.ready} aria-pressed={markedOnly} title={markedOnly ? "点击恢复全部订单" : "仅查看有备注的订单"} onClick={() => { setMarkedOnly((value) => !value); setPage(1); }}><span aria-hidden="true">✎</span> 已标记{orderNotes.ready ? ` ${markedCount}` : "…"}</button></div></td><td><b>{new Set(orders.map((order) => order.article)).size} 个 SKU</b></td><td><b>{warehouse || "全部仓库"}</b></td><td><b>{formatMoney(rollup.amount)}</b><small>平台成交价合计</small></td><td><b className="value-good">正常 {rollup.success}</b><small className="supplier-new-count">当前新订单 {rollup.supplierNew}</small></td><td><b>待签 {rollup.pending}</b></td><td><b className={rollup.abnormal ? "value-bad" : "value-good"}>非正常 {rollup.abnormal} · 退货率 {rollup.abnormalRate.toFixed(1)}%</b><small>计入退货率 {rollup.rateAbnormal} · 无效排除 {rollup.invalid}</small></td><td><b className="value-good">已结 {financeRollup.settled}</b><small>待结账预估 {financeRollup.estimated} · 异常实扣 {financeRollup.actualAbnormal} · 异常预估 {financeRollup.estimatedAbnormal} · 零支出 {financeRollup.zeroCostAbnormal}</small></td><td><b>{formatFinanceMoney(financeRollup.platformPayout)}</b><small className="finance-breakdown">含已结实款与待结账预估；佣金后货款 {formatFinanceNumber(financeRollup.postCommissionPayout)}</small></td><td><b>{formatFinanceMoney(financeRollup.platformDeduction)}</b><small className="finance-breakdown">{platformFeeBreakdown(financeRollup)}</small></td><td><b>{formatFinanceMoney(financeRollup.productCost)}</b><small className="finance-breakdown">{productCostBreakdown(financeRollup)} · {financeRollup.costReady} 笔</small></td><td><b>{formatFinanceMoney(financeRollup.costExpense)}</b><small className="finance-breakdown">正常 {formatFinanceNumber(financeRollup.normalCostExpense)}＋异常 {formatFinanceNumber(financeRollup.abnormalCostExpense)}</small></td><td><b className={financeRollup.profit >= 0 ? "value-good" : "value-bad"}>{formatFinanceMoney(financeRollup.profit)}</b><small>已结 {formatFinanceMoney(financeRollup.actualProfit)} · 待结账 {formatFinanceMoney(financeRollup.estimatedProfit)} · 异常 {formatFinanceMoney(financeRollup.abnormalProfit)}</small></td><td><b className={financeRollup.profitRate >= 0 ? "value-good" : "value-bad"}>{financeRollup.profitRate.toFixed(1)}%</b></td></tr>
                 {visibleOrders.map((order) => {
                   const product = productById.get(order.nmId);
                   const finance = financialByOrder.get(order.id) ?? waitingFinancial();
@@ -542,7 +550,7 @@ export default function SalesPage() {
                   const completionDate = formatBeijingCompletionDate(order.completionAt);
                   const invalidOrder = isUnprocessedClientCancellation(order);
                   const costExpenseBreakdown = finance.zeroCostReason ? "新订单客户取消，未处理" : finance.kind === "settled" ? `平台净扣费 ${formatFinanceNumber(finance.platformDeduction ?? 0)}＋商品成本 ${formatFinanceNumber(finance.productCost ?? 0)}` : finance.kind === "estimated" ? `预估佣金/物流 ${formatFinanceNumber(finance.platformDeduction ?? 0)}＋商品成本 ${formatFinanceNumber(finance.productCost ?? 0)}` : finance.kind === "abnormal" ? `尾程物流 ${formatFinanceNumber(finance.logisticsFee)}＋操作费 ${formatFinanceNumber(finance.handlingFee)}` : "等待订单完结/账单";
-                  return <tr key={order.id} className={financeClass}><td><b>{formatDateTime(order.createdAt)}</b><small>{order.createdAt.slice(0, 10)}</small></td><td><div className="order-id-with-photo">{product?.image ? <span className="order-photo" style={{ backgroundImage: `url(${product.image})` }} aria-hidden="true" /> : <span className="order-photo placeholder">W</span>}<div><b className="order-number" title={order.orderNumber}>{order.orderNumber}</b><small>WB {order.nmId}</small></div></div></td><td><b className="order-sku-code">{order.article || product?.sku || "—"}</b></td><td><span>{order.warehouseName}</span></td><td><b>{formatMoney(order.amount)}</b></td><td><span className={`supplier-status ${isCurrentValidNewOrder(order) ? "new" : ""}`}>{supplierStatusLabel(order.supplierStatus)}</span><small>{order.supplierStatus || "—"}</small></td><td><button type="button" className="wb-live-status-button" title="点击通过 WB API 读取实时状态" onClick={() => readLiveOrderStatus(order)}><span>{wbStatusLabel(order.wbStatus, order.supplierStatus)}</span><small>{order.wbStatus || "—"} · 查看实时状态</small></button></td><td><span className={`order-outcome ${invalidOrder ? "invalid" : order.outcome}`}>{invalidOrder ? "无效订单" : order.outcome === "success" ? "正常签收" : order.outcome === "abnormal" ? "非正常签收" : "待签收"}</span>{invalidOrder && <small className="invalid-order-note">新订单阶段客户取消 · 不计退货率</small>}{order.outcome !== "pending" && <small className={`order-completion-date ${completionDate ? "matched" : "unavailable"}`}>{completionDate ? `${order.completionSource === "status_detected" ? "检测完结" : "完结"}：${completionDate}` : "完结：WB API 未返回"}</small>}{order.completionSource === "status_detected" && <small className="order-completion-date unavailable">实时状态已计入 · 官方时间待校准</small>}</td><td className="finance-cell"><span className={`finance-status ${finance.kind}`}>{settlementLabel}</span>{finance.kind === "estimated" && <small>WB 账单未出，到账后自动替换</small>}{finance.zeroCostReason && <small>未进入备货，无拿货/操作/物流支出</small>}</td><td className="finance-cell"><b>{finance.platformPayout === null ? finance.kind === "abnormal" ? "账单未出" : "待结账" : formatFinanceMoney(finance.platformPayout)}</b>{finance.kind === "settled" && finance.postCommissionPayout !== null && <small className="finance-breakdown">佣金后货款 {formatFinanceNumber(finance.postCommissionPayout)}；再扣账单费 {formatFinanceNumber(finance.postCommissionPayout - (finance.platformPayout ?? 0))}</small>}{finance.kind === "estimated" && <small className="finance-breakdown">成交价－预估佣金－尾程物流</small>}{finance.kind === "abnormal" && finance.platformPayout !== null && <small className="finance-breakdown">{finance.zeroCostReason ? "未处理订单，无平台扣款" : "异常单物流扣款"}</small>}</td><td className="finance-cell"><b>{finance.platformDeduction === null ? finance.kind === "abnormal" ? "待录成本" : "待结账" : formatFinanceMoney(finance.platformDeduction)}</b>{finance.platformDeduction !== null && <small className="finance-breakdown">{platformFeeBreakdown(finance)}</small>}{finance.kind === "estimated" && <small>按产品详情佣金率及尾程物流预估</small>}{finance.kind === "abnormal" && <small>{finance.billingSource === "actual" ? "WB 账单实扣" : finance.billingSource === "zero" ? "新订单取消，支出为 0" : "按尾程费预估"}</small>}</td><td className="finance-cell"><b>{finance.productCost === null ? costPendingCopy : formatFinanceMoney(finance.productCost)}</b>{finance.productCost !== null && <small className="finance-breakdown">{finance.zeroCostReason ? "拿货 0.00＋操作 0.00" : productCostBreakdown(finance)}</small>}</td><td className="finance-cell"><b>{finance.costExpense === null ? costPendingCopy : formatFinanceMoney(finance.costExpense)}</b>{finance.costExpense !== null && <small className="finance-breakdown">{costExpenseBreakdown}</small>}</td><td className="finance-cell"><b>{finance.profit === null ? costPendingCopy : formatFinanceMoney(finance.profit)}</b>{finance.profit !== null && <small>{finance.kind === "estimated" ? "待结算预估：" : ""}收入 {formatFinanceNumber(finance.incomeEstimate ?? 0)}－支出 {formatFinanceNumber(finance.costExpense ?? 0)}</small>}</td><td className="finance-cell"><b>{finance.profitRate === null ? costPendingCopy : `${finance.profitRate.toFixed(1)}%`}</b></td></tr>;
+                  return <tr key={order.id} className={financeClass}><td><b>{formatDateTime(order.createdAt)}</b><small>{order.createdAt.slice(0, 10)}</small></td><td><div className="order-id-with-photo">{product?.image ? <span className="order-photo" style={{ backgroundImage: `url(${product.image})` }} aria-hidden="true" /> : <span className="order-photo placeholder">W</span>}<div><b className="order-number" title={order.orderNumber}>{order.orderNumber}</b><small>WB {order.nmId}</small></div><OrderNoteButton orderId={order.id} orderNumber={order.orderNumber} /></div></td><td><b className="order-sku-code">{order.article || product?.sku || "—"}</b></td><td><span>{order.warehouseName}</span></td><td><b>{formatMoney(order.amount)}</b></td><td><span className={`supplier-status ${isCurrentValidNewOrder(order) ? "new" : ""}`}>{supplierStatusLabel(order.supplierStatus)}</span><small>{order.supplierStatus || "—"}</small></td><td><button type="button" className="wb-live-status-button" title="点击通过 WB API 读取实时状态" onClick={() => readLiveOrderStatus(order)}><span>{wbStatusLabel(order.wbStatus, order.supplierStatus)}</span><small>{order.wbStatus || "—"} · 查看实时状态</small></button></td><td><span className={`order-outcome ${invalidOrder ? "invalid" : order.outcome}`}>{invalidOrder ? "无效订单" : order.outcome === "success" ? "正常签收" : order.outcome === "abnormal" ? "非正常签收" : "待签收"}</span>{invalidOrder && <small className="invalid-order-note">新订单阶段客户取消 · 不计退货率</small>}{order.outcome !== "pending" && <small className={`order-completion-date ${completionDate ? "matched" : "unavailable"}`}>{completionDate ? `${order.completionSource === "status_detected" ? "检测完结" : "完结"}：${completionDate}` : "完结：WB API 未返回"}</small>}{order.completionSource === "status_detected" && <small className="order-completion-date unavailable">实时状态已计入 · 官方时间待校准</small>}</td><td className="finance-cell"><span className={`finance-status ${finance.kind}`}>{settlementLabel}</span>{finance.kind === "estimated" && <small>WB 账单未出，到账后自动替换</small>}{finance.zeroCostReason && <small>未进入备货，无拿货/操作/物流支出</small>}</td><td className="finance-cell"><b>{finance.platformPayout === null ? finance.kind === "abnormal" ? "账单未出" : "待结账" : formatFinanceMoney(finance.platformPayout)}</b>{finance.kind === "settled" && finance.postCommissionPayout !== null && <small className="finance-breakdown">佣金后货款 {formatFinanceNumber(finance.postCommissionPayout)}；再扣账单费 {formatFinanceNumber(finance.postCommissionPayout - (finance.platformPayout ?? 0))}</small>}{finance.kind === "estimated" && <small className="finance-breakdown">成交价－预估佣金－尾程物流</small>}{finance.kind === "abnormal" && finance.platformPayout !== null && <small className="finance-breakdown">{finance.zeroCostReason ? "未处理订单，无平台扣款" : "异常单物流扣款"}</small>}</td><td className="finance-cell"><b>{finance.platformDeduction === null ? finance.kind === "abnormal" ? "待录成本" : "待结账" : formatFinanceMoney(finance.platformDeduction)}</b>{finance.platformDeduction !== null && <small className="finance-breakdown">{platformFeeBreakdown(finance)}</small>}{finance.kind === "estimated" && <small>按产品详情佣金率及尾程物流预估</small>}{finance.kind === "abnormal" && <small>{finance.billingSource === "actual" ? "WB 账单实扣" : finance.billingSource === "zero" ? "新订单取消，支出为 0" : "按尾程费预估"}</small>}</td><td className="finance-cell"><b>{finance.productCost === null ? costPendingCopy : formatFinanceMoney(finance.productCost)}</b>{finance.productCost !== null && <small className="finance-breakdown">{finance.zeroCostReason ? "拿货 0.00＋操作 0.00" : productCostBreakdown(finance)}</small>}</td><td className="finance-cell"><b>{finance.costExpense === null ? costPendingCopy : formatFinanceMoney(finance.costExpense)}</b>{finance.costExpense !== null && <small className="finance-breakdown">{costExpenseBreakdown}</small>}</td><td className="finance-cell"><b>{finance.profit === null ? costPendingCopy : formatFinanceMoney(finance.profit)}</b>{finance.profit !== null && <small>{finance.kind === "estimated" ? "待结算预估：" : ""}收入 {formatFinanceNumber(finance.incomeEstimate ?? 0)}－支出 {formatFinanceNumber(finance.costExpense ?? 0)}</small>}</td><td className="finance-cell"><b>{finance.profitRate === null ? costPendingCopy : `${finance.profitRate.toFixed(1)}%`}</b></td></tr>;
                 })}
                 {!loading && visibleOrders.length === 0 && <tr className="empty-row"><td colSpan={15}>{data?.dataAvailability.orderDetails ? "没有符合当前筛选条件的订单" : "WB 订单状态暂时无法读取，请稍后手动同步"}</td></tr>}
               </tbody>
@@ -593,6 +601,6 @@ export default function SalesPage() {
           </>}
         </section>
       </div>}
-    </main>
+    </main></OrderNotesProvider>
   );
 }

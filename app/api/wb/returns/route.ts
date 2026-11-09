@@ -2,29 +2,9 @@ import { env } from "cloudflare:workers";
 import { readSyncSnapshot, writeSyncSnapshot } from "../../../_lib/server-persistence";
 import { classifyReturnTracking, returnStatusLabel } from "../../../_lib/return-tracking";
 import { resolveWbStore, scopedStoreKey } from "../../../_lib/server-storefront";
+import { loadReturnsReport, type ItemReturnsPage, type GoodsReturnRow } from "../../../_lib/returns-report";
 
 type WorkerError = Error & { status?: number };
-type GoodsReturnRow = {
-  barcode?: string;
-  brand?: string;
-  completedDt?: string | null;
-  dstOfficeAddress?: string;
-  dstOfficeId?: number;
-  expiredDt?: string | null;
-  isStatusActive?: number;
-  nmId?: number;
-  orderDt?: string;
-  orderId?: number;
-  readyToReturnDt?: string | null;
-  reason?: string;
-  returnType?: string;
-  shkId?: number;
-  srid?: string;
-  status?: string;
-  stickerId?: string | number;
-  subjectName?: string;
-  techSize?: string;
-};
 type ReturnClaim = {
   id?: string;
   claim_type?: number;
@@ -42,7 +22,7 @@ type ReturnClaim = {
   [key: string]: unknown;
 };
 type ReturnsSnapshot = {
-  source: "WB Analytics Goods Return + Buyers Returns API";
+  source: string;
   syncedAt: string;
   window: { from: string; to: string; maxDays: number };
   returns: Array<Record<string, unknown>>;
@@ -50,10 +30,6 @@ type ReturnsSnapshot = {
   summary: Record<string, number>;
   dataAvailability: { logisticsReport: boolean; buyerClaims: boolean };
   warnings: string[];
-};
-type ReturnReportChunkSnapshot = {
-  rows: GoodsReturnRow[];
-  syncedAt: string;
 };
 type CacheEntry = { value: ReturnsSnapshot; expiresAt: number };
 
@@ -66,9 +42,8 @@ const DAY_MS = 86_400_000;
 const BEIJING_OFFSET_MS = 8 * 60 * 60_000;
 const AUTO_SYNC_HOURS = [8, 14, 19, 23] as const;
 const MAX_DAYS = 180;
-const REPORT_CHUNK_DAYS = 31;
 const MAX_CLAIMS = 1_000;
-const SNAPSHOT_VERSION = "returns-v1";
+const SNAPSHOT_VERSION = "returns-v2";
 
 const memoryCache = new Map<string, CacheEntry>();
 const pendingLoads = new Map<string, Promise<ReturnsSnapshot>>();
@@ -114,14 +89,6 @@ function requestWindow(url: URL) {
   return { from, to, maxDays: MAX_DAYS };
 }
 
-function dateChunks(from: string, to: string) {
-  const chunks: Array<{ from: string; to: string }> = [];
-  for (let cursor = from; dateStamp(cursor) <= dateStamp(to); cursor = shiftDate(chunks[chunks.length - 1].to, 1)) {
-    const chunkTo = shiftDate(cursor, REPORT_CHUNK_DAYS - 1);
-    chunks.push({ from: cursor, to: dateStamp(chunkTo) < dateStamp(to) ? chunkTo : to });
-  }
-  return chunks;
-}
 
 function syncSchedule(now = Date.now()) {
   const beijingNow = new Date(now + BEIJING_OFFSET_MS);
@@ -142,17 +109,26 @@ function syncSchedule(now = Date.now()) {
 
 async function wbRequest<T>(url: string, token: string) {
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const response = await fetch(url, {
-      headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
-      cache: "no-store",
-      signal: AbortSignal.timeout(25_000),
-    });
-    if (response.status === 204) return null as T;
-    if (response.ok) return response.json() as Promise<T>;
-    if (response.status === 429 && attempt < 2) {
-      const retrySeconds = Math.max(1, Math.min(30, number(response.headers.get("X-RateLimit-Retry") || response.headers.get("Retry-After") || 10)));
-      await new Promise((resolve) => setTimeout(resolve, retrySeconds * 1_000 + 500));
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+        cache: "no-store",
+        signal: AbortSignal.timeout(12_000),
+      });
+      if (response.ok && response.status !== 204) return await response.json() as T;
+    } catch (error) {
+      if (attempt === 2) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
       continue;
+    }
+    if (response.status === 204) return null as T;
+    if ((response.status === 429 || response.status >= 500) && attempt < 2) {
+      const retrySeconds = Math.max(1, number(response.headers.get("X-RateLimit-Retry") || response.headers.get("Retry-After") || (response.status >= 500 ? 1 : 10)));
+      if (retrySeconds <= 5) {
+        await new Promise((resolve) => setTimeout(resolve, retrySeconds * 1_000 + 500));
+        continue;
+      }
     }
     const error = new Error(`WB returns request failed: ${response.status}`) as WorkerError;
     error.status = response.status;
@@ -178,22 +154,6 @@ async function writeSnapshot(cacheKey: string, value: ReturnsSnapshot) {
   }
 }
 
-async function readReportChunk(cacheKey: string) {
-  try {
-    const row = await readSyncSnapshot(cacheKey);
-    return row?.payload ? { value: JSON.parse(row.payload) as ReturnReportChunkSnapshot, syncSlot: row.syncSlot || "" } : null;
-  } catch {
-    return null;
-  }
-}
-
-async function writeReportChunk(cacheKey: string, value: ReturnReportChunkSnapshot, syncSlot: string) {
-  try {
-    await writeSyncSnapshot(cacheKey, JSON.stringify(value), syncSlot);
-  } catch {
-    // A successful WB response can still be used for this request when D1 is temporarily unavailable.
-  }
-}
 
 async function loadClaims(token: string, isArchive: boolean) {
   const claims: ReturnClaim[] = [];
@@ -212,37 +172,9 @@ async function loadClaims(token: string, isArchive: boolean) {
   return { claims, total };
 }
 
-async function fetchReturnsSnapshot(token: string, storeId: string, window: { from: string; to: string; maxDays: number }, forceRefresh = false) {
+async function fetchReturnsSnapshot(token: string, window: { from: string; to: string; maxDays: number }) {
   const warnings: string[] = [];
-  const chunks = dateChunks(window.from, window.to);
-  const reportsPromise = (async () => {
-    const reports: GoodsReturnRow[][] = [];
-    const schedule = syncSchedule();
-    let usedStaleChunk = false;
-    for (const chunk of chunks) {
-      const chunkKey = scopedStoreKey(storeId, `wb-returns-report:${SNAPSHOT_VERSION}:${chunk.from}:${chunk.to}`);
-      const persisted = await readReportChunk(chunkKey);
-      if (persisted && persisted.syncSlot === schedule.slot && !forceRefresh) {
-        reports.push(persisted.value.rows);
-        continue;
-      }
-      const url = new URL("https://seller-analytics-api.wildberries.ru/api/v1/analytics/goods-return");
-      url.searchParams.set("dateFrom", chunk.from);
-      url.searchParams.set("dateTo", chunk.to);
-      try {
-        const response = await wbRequest<{ report?: GoodsReturnRow[] }>(url.toString(), token);
-        const rows = response?.report || [];
-        reports.push(rows);
-        await writeReportChunk(chunkKey, { rows, syncedAt: new Date().toISOString() }, schedule.slot);
-      } catch (error) {
-        if (!persisted) throw error;
-        reports.push(persisted.value.rows);
-        usedStaleChunk = true;
-      }
-    }
-    if (usedStaleChunk) warnings.push("WB 本次限流，部分历史区间沿用上次成功同步数据；系统未用不完整结果覆盖缓存。");
-    return reports;
-  })();
+  const reportsPromise = loadReturnsReport(window, (url) => wbRequest<ItemReturnsPage | null>(url, token));
   const [reports, activeClaimsResult, archivedClaimsResult] = await Promise.all([
     reportsPromise,
     loadClaims(token, false).catch((error) => ({ error: error as WorkerError, claims: [] as ReturnClaim[], total: 0 })),
@@ -325,7 +257,7 @@ async function fetchReturnsSnapshot(token: string, storeId: string, window: { fr
   if (activeClaimsResult.total > MAX_CLAIMS || archivedClaimsResult.total > MAX_CLAIMS) warnings.push(`退货申请超过 ${MAX_CLAIMS} 条，本次仅展示最近 ${MAX_CLAIMS} 条。`);
 
   return {
-    source: "WB Analytics Goods Return + Buyers Returns API" as const,
+    source: "WB Analytics Item Returns + Buyers Returns API" as const,
     syncedAt: new Date().toISOString(),
     window,
     returns,
@@ -342,21 +274,25 @@ async function loadReturns(token: string, storeId: string, window: { from: strin
   const schedule = syncSchedule(now);
   const memory = memoryCache.get(cacheKey);
   if (!forceRefresh && memory && memory.expiresAt > now) return memory.value;
-  const durable = await readSnapshot(cacheKey);
-  if (!forceRefresh && durable?.syncSlot === schedule.slot) {
-    memoryCache.set(cacheKey, { value: durable.value, expiresAt: schedule.nextAt });
-    return durable.value;
+  const currentDurable = await readSnapshot(cacheKey);
+  const durable = currentDurable ?? await readSnapshot(scopedStoreKey(storeId, `returns-v1:${window.from}:${window.to}`));
+  if (!forceRefresh && currentDurable?.syncSlot === schedule.slot) {
+    memoryCache.set(cacheKey, { value: currentDurable.value, expiresAt: schedule.nextAt });
+    return currentDurable.value;
   }
   const pending = pendingLoads.get(cacheKey);
   if (pending) return pending;
-  const load = fetchReturnsSnapshot(token, storeId, window, forceRefresh)
+  const load = fetchReturnsSnapshot(token, window)
     .then(async (snapshot) => {
       memoryCache.set(cacheKey, { value: snapshot, expiresAt: syncSchedule().nextAt });
       await writeSnapshot(cacheKey, snapshot);
       return snapshot;
     })
     .catch((error) => {
-      if (!forceRefresh && durable?.value) return { ...durable.value, warnings: [...durable.value.warnings, "WB 退货接口本次刷新失败，当前显示最近一次完整快照。"] };
+      const status = number((error as WorkerError).status);
+      const reason = status === 429 ? "WB 退货接口限频" : status ? `WB 退货接口返回 ${status}` : "退货接口连接超时或响应异常";
+      console.warn("WB_RETURNS_REFRESH_FAILED", { storeId, status, name: error instanceof Error ? error.name : "Error", code: error instanceof Error && error.message.startsWith("WB_RETURNS_") ? error.message : undefined });
+      if (durable?.value) return { ...durable.value, warnings: [...durable.value.warnings, `${reason}，本次刷新未成功；当前保留上次成功数据及同步时间，请稍后重试。`] };
       throw error;
     })
     .finally(() => pendingLoads.delete(cacheKey));
@@ -386,8 +322,9 @@ export async function GET(request: Request) {
     });
   } catch (error) {
     const status = number((error as WorkerError).status);
-    if (status === 401 || status === 403) return json({ error: "WB 密钥缺少“分析”权限，无法读取退货物流报告" }, 403);
-    if (status === 429) return json({ error: "WB 退货接口已限频，系统将使用缓存并在下个同步点重试" }, 429);
+    if (status === 401) return json({ error: "WB 密钥无效或已过期，请在系统设置中检查当前店铺 API" }, 401);
+    if (status === 403) return json({ error: "WB 密钥缺少“分析”权限，无法读取退货物流报告" }, 403);
+    if (status === 429) return json({ error: "WB 退货接口已限频，尚无可用缓存，请稍后再同步" }, 429);
     return json({ error: "WB 退货数据暂时无法读取，请稍后重试" }, 502);
   }
 }

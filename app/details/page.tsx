@@ -339,6 +339,7 @@ export default function ProductDetailsPage() {
   const [costCurrencies, setCostCurrencies] = useState<Record<string, ProductCostCurrency>>({});
   const [loading, setLoading] = useState(true);
   const [matching, setMatching] = useState(false);
+  const [importing, setImporting] = useState(false);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState<Set<string>>(new Set());
   const [dirty, setDirty] = useState<Set<string>>(new Set());
@@ -351,6 +352,7 @@ export default function ProductDetailsPage() {
   const [batchField, setBatchField] = useState<BatchEditableField>("commissionRate");
   const [batchValue, setBatchValue] = useState("");
   const [reloadKey, setReloadKey] = useState(0);
+  const [activeStoreId, setActiveStoreId] = useState("");
   const forceRefreshRef = useRef(false);
   const draftSequenceRef = useRef(0);
   const persistedSellerSkuRef = useRef<Record<string, string>>({});
@@ -371,9 +373,9 @@ export default function ProductDetailsPage() {
         return { value: body as DashboardData, error: "" };
       }).catch((reason: Error) => ({ value: null, error: reason.name === "AbortError" ? "" : reason.message })),
       fetch("/api/product-costs", { signal: controller.signal, cache: "no-store" }).then(async (response) => {
-        const body = await response.json() as { rows?: CostRow[]; deletedProducts?: ProductDeletionMarker[]; error?: string };
+        const body = await response.json() as { rows?: CostRow[]; deletedProducts?: ProductDeletionMarker[]; activeStoreId?: string; error?: string };
         if (!response.ok) throw new Error(body.error || "产品记录表读取失败");
-        return { rows: body.rows ?? [], deletedProducts: body.deletedProducts ?? [] };
+        return { rows: body.rows ?? [], deletedProducts: body.deletedProducts ?? [], activeStoreId: body.activeStoreId ?? "" };
       }),
       fetch(`/api/wb/prices${manualMatch ? "?refresh=manual" : ""}`, { signal: controller.signal, cache: "no-store" }).then(async (response) => {
         const body = await response.json() as PriceData | { error?: string };
@@ -400,6 +402,7 @@ export default function ProductDetailsPage() {
       }
       persistedSellerSkuRef.current = nextPersistedSellerSkus;
       setData(dashboardResult.value ? { ...dashboardResult.value, products: visibleProducts } : null);
+      setActiveStoreId(productRegister.activeStoreId);
       setPriceData(priceResult.value);
       setPriceError(priceResult.error);
       setCosts(nextCosts);
@@ -467,6 +470,53 @@ export default function ProductDetailsPage() {
     setError("");
     setMessage("正在从 WB 获取最新商品并重新匹配…");
     setReloadKey((key) => key + 1);
+  }
+
+  async function importMatchedProductsFromStore2() {
+    if (dirty.size) {
+      setError("请先保存当前修改，再从2号店对应填入产品详情");
+      return;
+    }
+    const products = data?.products ?? [];
+    if (!products.length) {
+      setError("当前店铺还没有可对应的 WB 商品列表");
+      return;
+    }
+    setImporting(true);
+    setError("");
+    setMessage("正在逐个核对3号店商品编码，并从2号店填入对应详情…");
+    try {
+      const response = await fetch("/api/product-costs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "importMatchedProducts",
+          sourceStoreId: "cl",
+          products: products.map((product) => ({
+            sellerSku: product.sku,
+            nmId: product.nmId,
+            imageUrl: product.image ?? "",
+          })),
+        }),
+      });
+      const body = await response.json() as {
+        imported?: number;
+        unmatched?: Array<{ sellerSku: string }>;
+        skipped?: Array<{ sellerSku: string }>;
+        error?: string;
+      };
+      if (!response.ok) throw new Error(body.error || "对应填入失败");
+      const imported = body.imported ?? 0;
+      const unmatched = body.unmatched?.length ?? 0;
+      const skipped = body.skipped?.length ?? 0;
+      setMessage(`对应填入完成：已写入 ${imported} 个商品${skipped ? `，保留已有详情 ${skipped} 个` : ""}${unmatched ? `，待人工核对 ${unmatched} 个` : ""}`);
+      setReloadKey((key) => key + 1);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "对应填入失败");
+      setMessage("");
+    } finally {
+      setImporting(false);
+    }
   }
 
   function updateCost(key: string, field: keyof CostRow, value: string | number) {
@@ -793,6 +843,7 @@ export default function ProductDetailsPage() {
           <div className="pricing-commandbar">
             {viewMode === "table" ? <div className="pricing-legend"><span><i className="editable" />白色为可编辑数据</span><span><i className="calculated" />淡紫色为自动计算</span><span><i className="price" />最终售价实时反推</span><span className="independent-product-register-note"><i>店</i>当前店铺独立产品表</span></div> : <div className="product-card-view-copy"><b>卡片内可直接编辑</b><span>点击白色字段修改；WB 官方数据和自动计算结果保持只读。</span></div>}
             <div className="sheet-actions">
+              {activeStoreId && activeStoreId !== "primary" && activeStoreId !== "cl" && <button className="product-match-button" type="button" disabled={loading || saving || importing} onClick={importMatchedProductsFromStore2}>{importing ? "对应填入中…" : "从2号店对应填入"}</button>}
               <button className="product-match-button" type="button" disabled={loading || saving} onClick={refresh}>{matching ? "匹配中…" : "↻ 匹配 WB 产品"}</button>
               <label className="product-category-filter"><span>产品分类</span><select value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)} aria-label="按产品分类筛选"><option value="all">全部产品分类（{rows.length}）</option>{categories.map((category) => <option key={category} value={category}>{category}（{rows.filter((row) => productCategory(row) === category).length}）</option>)}</select></label>
               <label className="sheet-search"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索商品编码、SKU、分类或规格" /></label>

@@ -223,12 +223,12 @@ export default function ReturnsPage() {
         <div className="period-custom"><label><span>开始</span><input type="date" value={draftFrom} max={draftTo} onChange={(event) => setDraftFrom(event.target.value)} /></label><b>→</b><label><span>结束</span><input type="date" value={draftTo} min={draftFrom} max={today} onChange={(event) => setDraftTo(event.target.value)} /></label><button type="button" onClick={applyCustomPeriod}>查询</button></div>
       </section>
 
-      <section className="returns-notice"><span>↩</span><div><strong>退货订单与物流均来自 WB 官方 API</strong><p>退货物流读取 Goods Return Report；买家退货申请读取 Buyers Returns API。物流状态、取货地址和时间均按平台原始字段展示。</p></div><small>{data ? `${data.window.from} — ${data.window.to}` : "正在读取退货接口"}</small></section>
+      <section className="returns-notice"><span>↩</span><div><strong>退货订单与物流均来自 WB 官方 API</strong><p>退货物流读取 WB 新版退货与商品移动报表；买家退货申请读取 Buyers Returns API。物流状态、取货地址和时间均按平台原始字段展示。</p></div><small>{data ? `${data.window.from} — ${data.window.to}` : loading ? "正在读取退货接口" : "等待成功同步"}</small></section>
       {(error || messages.length) ? <section className={`returns-message ${error ? "error" : "warning"}`} role={error ? "alert" : undefined}><strong>{error ? "退货数据暂不可用" : "数据提示"}</strong><span>{error || messages.join("；")}</span></section> : null}
 
       <section className="returns-summary-grid" aria-label="退货物流汇总">
         <button type="button" className={stageFilter === "all" ? "active" : ""} onClick={() => chooseStage("all")}><span>全部退货</span><strong>{data?.summary.total ?? "—"}</strong><small>所选周期退货物流记录</small></button>
-        <button type="button" className={`processing ${stageFilter === "active" ? "active" : ""}`} onClick={() => chooseStage("active")}><span>物流处理中</span><strong>{data?.summary.active ?? "—"}</strong><small>WB isStatusActive = 1</small></button>
+        <button type="button" className={`processing ${stageFilter === "active" ? "active" : ""}`} onClick={() => chooseStage("active")}><span>物流处理中</span><strong>{data?.summary.active ?? "—"}</strong><small>WB 当前活跃退货</small></button>
         <button type="button" className={`transit ${stageFilter === "transit" ? "active" : ""}`} onClick={() => chooseStage("transit")}><span>运输至取货点</span><strong>{data?.summary.transit ?? "—"}</strong><small>正在退回途中</small></button>
         <button type="button" className={`ready ${stageFilter === "ready" ? "active" : ""}`} onClick={() => chooseStage("ready")}><span>已到达，可取回</span><strong>{data?.summary.ready ?? "—"}</strong><small>请关注取货地址和期限</small></button>
         <button type="button" className={`completed ${stageFilter === "completed" ? "active" : ""}`} onClick={() => chooseStage("completed")}><span>退货已完成</span><strong>{data?.summary.completed ?? "—"}</strong><small>已取回或平台已完成</small></button>

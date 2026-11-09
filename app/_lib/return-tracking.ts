@@ -32,7 +32,7 @@ export function classifyReturnTracking(status: string, isStatusActive: boolean, 
   const normalized = status.trim().toLocaleLowerCase("ru");
   if (normalized.includes("выдано")) return "completed";
   if (normalized.includes("готов к выдаче")) return "ready";
-  if (normalized.includes("в пути")) return "transit";
+  if (normalized.includes("в пути") || normalized.includes("погружен в машину")) return "transit";
   if (isStatusActive) return "unknown";
   return completedAt ? "completed" : "unknown";
 }
@@ -40,6 +40,8 @@ export function classifyReturnTracking(status: string, isStatusActive: boolean, 
 export function returnStatusLabel(status: string, stage: ReturnTrackingStage) {
   const known: Record<string, string> = {
     "В пути в пвз": "运输至取货点",
+    "Погружен в машину до СЦ/РЦ": "已装车，运往分拣/配送中心",
+    "Отмена по задержке": "因延迟取消",
     "Готов к выдаче": "已到达，可取回",
     "Выдано": "已取回",
     "Статус не определен": "平台状态未明确",
