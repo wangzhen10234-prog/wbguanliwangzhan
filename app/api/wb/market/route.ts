@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { marketToday, marketShiftDate, marketPeriod, marketComparisonPeriod, marketHistoryPeriod } from "../../../_lib/market-period";
 import { addMetrics, conversionsFor, emptyMetrics, groupMarketProducts, marketRecommendations, summarizeMarketProducts, type FunnelMetrics, type MarketProduct } from "../../../_lib/market-analytics";
 import { readSyncSnapshot, writeSyncSnapshot } from "../../../_lib/server-persistence";
 import { resolveWbStore, scopedStoreKey } from "../../../_lib/server-storefront";
@@ -7,7 +8,7 @@ type WorkerError = Error & { status?: number };
 type WbMetrics = Partial<FunnelMetrics> & { addToWishlist?: number };
 type WbProductRow = {
   product?: { nmId?: number; title?: string; vendorCode?: string; brandName?: string; subjectId?: number; subjectName?: string; productRating?: number; feedbackRating?: number; stocks?: { wb?: number; mp?: number } };
-  statistic?: { selected?: WbMetrics; comparison?: { openCountDynamic?: number; cartCountDynamic?: number; orderCountDynamic?: number; orderSumDynamic?: number } };
+  statistic?: { selected?: WbMetrics; past?: WbMetrics; comparison?: { openCountDynamic?: number; cartCountDynamic?: number; orderCountDynamic?: number; orderSumDynamic?: number } };
 };
 type WbHistoryRow = { date?: string; openCount?: number; cartCount?: number; orderCount?: number; orderSum?: number; buyoutCount?: number; buyoutSum?: number; buyoutPercent?: number; addToCartConversion?: number; cartToOrderConversion?: number; addToWishlistCount?: number };
 type WbHistoryGroup = { history?: WbHistoryRow[]; currency?: string };
@@ -15,27 +16,20 @@ type BrandSubject = { parentId?: number; parentName?: string };
 type BrandSharePoint = { applyDate?: string; brandRating?: number; pricePercent?: number; qtyPercent?: number };
 type MarketSnapshot = Awaited<ReturnType<typeof fetchSnapshot>>;
 
-const DAY_MS = 86_400_000;
-const BEIJING_OFFSET_MS = 8 * 60 * 60_000;
 const JSON_HEADERS = { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "private, no-store, max-age=0", "X-Content-Type-Options": "nosniff" };
 const memoryCache = new Map<string, { value: MarketSnapshot; expiresAt: number }>();
 const pendingLoads = new Map<string, Promise<MarketSnapshot>>();
 
 function json(body: unknown, status = 200) { return new Response(JSON.stringify(body), { status, headers: JSON_HEADERS }); }
 function number(value: unknown) { const parsed = Number(value || 0); return Number.isFinite(parsed) ? parsed : 0; }
-function beijingDateKey(value = Date.now()) { return new Date(value + BEIJING_OFFSET_MS).toISOString().slice(0, 10); }
-function dateValue(value: string) { return new Date(`${value}T12:00:00Z`).getTime(); }
-function shiftDate(value: string, days: number) { return new Date(dateValue(value) + days * DAY_MS).toISOString().slice(0, 10); }
-
 function periodFromRequest(request: Request) {
   const url = new URL(request.url);
-  const today = beijingDateKey();
-  const to = url.searchParams.get("to") || today;
-  const from = url.searchParams.get("from") || shiftDate(to, -29);
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to)) throw Object.assign(new Error("DATE_INVALID"), { status: 400 });
-  const days = Math.round((dateValue(to) - dateValue(from)) / DAY_MS) + 1;
-  if (days < 1 || days > 90 || to > today) throw Object.assign(new Error("DATE_INVALID"), { status: 400 });
-  return { from, to, days };
+  try {
+    const to = url.searchParams.get("to") ?? marketToday();
+    const from = url.searchParams.get("from") ?? (/^\d{4}-\d{2}-\d{2}$/.test(to) && Number.isFinite(Date.parse(to)) ? marketShiftDate(to, -29) : "");
+    return marketPeriod(from, to);
+  }
+  catch (error) { throw Object.assign(error instanceof Error ? error : new Error("日期无效"), { status: 400, dateInvalid: true }); }
 }
 
 async function wbRequest<T>(url: string, token: string, body?: unknown) {
@@ -48,14 +42,17 @@ function metricShape(value: WbMetrics | undefined): FunnelMetrics {
   return { openCount: number(value?.openCount), cartCount: number(value?.cartCount), orderCount: number(value?.orderCount), orderSum: number(value?.orderSum), buyoutCount: number(value?.buyoutCount), buyoutSum: number(value?.buyoutSum), cancelCount: number(value?.cancelCount), cancelSum: number(value?.cancelSum), addToWishlist: number(value?.addToWishlist) };
 }
 
-function normalizeProducts(rows: WbProductRow[]) {
+function optionalNumber(value: unknown): number | null { return value === null || value === undefined || !Number.isFinite(Number(value)) ? null : Number(value); }
+function normalizeProducts(rows: WbProductRow[], comparisonAvailable: boolean) {
   return rows.map((row) => {
     const selected = metricShape(row.statistic?.selected);
-    const comparison = row.statistic?.comparison;
+    const comparison = comparisonAvailable ? row.statistic?.comparison : undefined;
+    const past = comparisonAvailable ? row.statistic?.past : undefined;
     return {
       nmId: number(row.product?.nmId), sku: String(row.product?.vendorCode || ""), title: String(row.product?.title || "未命名商品"), brand: String(row.product?.brandName || ""), subjectId: number(row.product?.subjectId), subjectName: String(row.product?.subjectName || "未分类"), stock: number(row.product?.stocks?.wb) + number(row.product?.stocks?.mp), productRating: number(row.product?.productRating), feedbackRating: number(row.product?.feedbackRating),
       ...selected, ...conversionsFor(selected),
-      openDynamic: comparison?.openCountDynamic === undefined ? null : number(comparison.openCountDynamic), cartDynamic: comparison?.cartCountDynamic === undefined ? null : number(comparison.cartCountDynamic), orderDynamic: comparison?.orderCountDynamic === undefined ? null : number(comparison.orderCountDynamic), orderSumDynamic: comparison?.orderSumDynamic === undefined ? null : number(comparison.orderSumDynamic),
+      past: past ? { openCount: optionalNumber(past.openCount), cartCount: optionalNumber(past.cartCount), orderCount: optionalNumber(past.orderCount), orderSum: optionalNumber(past.orderSum) } : null,
+      openDynamic: optionalNumber(comparison?.openCountDynamic), cartDynamic: optionalNumber(comparison?.cartCountDynamic), orderDynamic: optionalNumber(comparison?.orderCountDynamic), orderSumDynamic: optionalNumber(comparison?.orderSumDynamic),
     } satisfies MarketProduct;
   }).filter((item) => item.nmId > 0);
 }
@@ -81,15 +78,13 @@ async function optional<T>(promise: Promise<T>, unavailable: string) {
 }
 
 async function fetchSnapshot(token: string, period: { from: string; to: string; days: number }, brand: string, parentId: number, manual: boolean) {
-  const pastTo = shiftDate(period.from, -1);
-  const pastFrom = shiftDate(pastTo, -(period.days - 1));
-  const historyTo = period.to;
-  const historyFrom = shiftDate(historyTo, -(Math.min(7, period.days) - 1));
-  const productsPromise = wbRequest<{ data?: { products?: WbProductRow[]; currency?: string } }>("https://seller-analytics-api.wildberries.ru/api/analytics/v3/sales-funnel/products", token, { selectedPeriod: { start: period.from, end: period.to }, pastPeriod: { start: pastFrom, end: pastTo }, nmIds: [], brandNames: [], subjectIds: [], tagIds: [], skipDeletedNm: true, orderBy: { field: "openCard", mode: "desc" }, limit: 1000, offset: 0 });
-  const historyPromise = optional(wbRequest<{ data?: WbHistoryGroup[] }>("https://seller-analytics-api.wildberries.ru/api/analytics/v3/sales-funnel/grouped/history", token, { selectedPeriod: { start: historyFrom, end: historyTo }, brandNames: [], subjectIds: [], tagIds: [], skipDeletedNm: true, aggregationLevel: "day" }), "WB 每日漏斗暂时不可用");
+  const comparisonPeriod = marketComparisonPeriod(period);
+  const historyPeriod = marketHistoryPeriod(period);
+  const productsPromise = wbRequest<{ data?: { products?: WbProductRow[]; currency?: string } }>("https://seller-analytics-api.wildberries.ru/api/analytics/v3/sales-funnel/products", token, { selectedPeriod: { start: period.from, end: period.to }, ...(comparisonPeriod.available ? { pastPeriod: { start: comparisonPeriod.from, end: comparisonPeriod.to } } : {}), nmIds: [], brandNames: [], subjectIds: [], tagIds: [], skipDeletedNm: true, orderBy: { field: "openCard", mode: "desc" }, limit: 1000, offset: 0 });
+  const historyPromise = historyPeriod ? optional(wbRequest<{ data?: WbHistoryGroup[] }>("https://seller-analytics-api.wildberries.ru/api/analytics/v3/sales-funnel/grouped/history", token, { selectedPeriod: { start: historyPeriod.from, end: historyPeriod.to }, brandNames: [], subjectIds: [], tagIds: [], skipDeletedNm: true, aggregationLevel: "day" }), "WB 每日漏斗暂时不可用") : Promise.resolve({ value: null, available: false, reason: "该周期不在 WB 每日走势可查询的最近 7 天内；总量及单品排行仍按所选周期查询。" });
   const brandsPromise = optional(wbRequest<{ data?: string[] }>("https://seller-analytics-api.wildberries.ru/api/v1/analytics/brand-share/brands", token), "WB 品牌份额接口暂时不可用");
   const [productResponse, historyResponse, brandsResponse] = await Promise.all([productsPromise, historyPromise, brandsPromise]);
-  const products = normalizeProducts(productResponse.data?.products ?? []);
+  const products = normalizeProducts(productResponse.data?.products ?? [], comparisonPeriod.available);
   const categories = groupMarketProducts(products);
   const summary = summarizeMarketProducts(products);
   const sellerBrands = brandsResponse.value?.data ?? [];
@@ -116,7 +111,7 @@ async function fetchSnapshot(token: string, period: { from: string; to: string; 
   return {
     source: "wildberries" as const,
     syncedAt: new Date().toISOString(),
-    period,
+    period, comparisonPeriod, historyPeriod,
     currency: String(productResponse.data?.currency || historyResponse.value?.data?.[0]?.currency || "RUB"),
     summary,
     categories,
@@ -131,7 +126,7 @@ async function fetchSnapshot(token: string, period: { from: string; to: string; 
 
 async function loadMarket(token: string, storeId: string, period: { from: string; to: string; days: number }, brand: string, parentId: number, manual: boolean) {
   const hourBucket = Math.floor(Date.now() / 3_600_000);
-  const key = scopedStoreKey(storeId, `market-v1-${period.from}-${period.to}-${brand || "all"}-${parentId || 0}`);
+  const key = scopedStoreKey(storeId, `market-v2-${period.from}-${period.to}-${brand || "all"}-${parentId || 0}`);
   const hourlySlot = `hour-${hourBucket}`;
   const memory = memoryCache.get(key);
   if (!manual && memory && memory.expiresAt > Date.now()) return memory.value;
@@ -159,7 +154,7 @@ export async function GET(request: Request) {
     return json(await loadMarket(store.token, store.id, period, brand, parentId, url.searchParams.get("refresh") === "manual"));
   } catch (error) {
     const status = number((error as WorkerError).status);
-    if (status === 400) return json({ error: "统计周期需为 1–90 天，且不能晚于今天" }, 400);
+    if ((error as WorkerError & { dateInvalid?: boolean }).dateInvalid) return json({ error: error instanceof Error ? error.message : "统计日期无效" }, 400);
     if (status === 401 || status === 403) return json({ error: "WB 密钥无效，或缺少分析权限" }, 502);
     if (status === 402) return json({ error: "当前店铺未开通 WB 销售漏斗权限" }, 402);
     if (status === 429) return json({ error: "WB 分析接口请求频繁，请稍后重试" }, 429);

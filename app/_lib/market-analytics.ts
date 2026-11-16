@@ -27,6 +27,7 @@ export type MarketProduct = FunnelMetrics & FunnelConversions & {
   stock: number;
   productRating: number;
   feedbackRating: number;
+  past?: { openCount: number | null; cartCount: number | null; orderCount: number | null; orderSum: number | null } | null;
   openDynamic: number | null;
   cartDynamic: number | null;
   orderDynamic: number | null;
@@ -112,4 +113,10 @@ export function marketRecommendations(summary: ReturnType<typeof summarizeMarket
   if (noStock.length) recommendations.push({ level: "medium", title: "有订单分类出现零库存", detail: `${noStock.map((item) => item.subjectName).slice(0, 3).join("、")} 有订单但当前无可售库存，补货前会继续损失自然流量。` });
   if (!recommendations.length) recommendations.push({ level: "good", title: "整体漏斗暂未发现明显断层", detail: "继续观察分类与单品环比，修改价格、主图或标题后至少保留 7 天对照窗口。" });
   return recommendations.slice(0, 5);
+}
+
+// Keep WB's comparison percentages; zero baselines cannot form a percentage.
+export function formatMarketChange(value: number | null, current: number, previous?: number | null) {
+  if (previous === 0) return current > 0 ? "新增" : "持平";
+  return value === null || !Number.isFinite(value) ? "无对比" : `${value >= 0 ? "+" : ""}${value.toFixed(0)}%`;
 }

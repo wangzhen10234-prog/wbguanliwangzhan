@@ -135,6 +135,9 @@ test("server-renders official store funnel and product market intelligence", asy
   assert.equal(marketResponse.status, 200);
   const marketHtml = await marketResponse.text();
   assert.match(marketHtml, /产品行情/);
+  assert.match(marketHtml, /自定义时间/);
+  assert.match(marketHtml, /环比对比期/);
+  assert.match(marketHtml, /上期为 0/);
   assert.match(marketHtml, /店铺转化漏斗/);
   assert.match(marketHtml, /分类经营对比/);
   assert.match(marketHtml, /单品行情排行/);

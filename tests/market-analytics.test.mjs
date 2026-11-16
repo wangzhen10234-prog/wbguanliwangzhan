@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { conversionsFor, groupMarketProducts, summarizeMarketProducts } from "../app/_lib/market-analytics.ts";
+import { conversionsFor, groupMarketProducts, summarizeMarketProducts, formatMarketChange } from "../app/_lib/market-analytics.ts";
 
 const base = {
   brand: "", productRating: 9, feedbackRating: 5, stock: 12,
@@ -41,4 +41,15 @@ test("uses zero-safe conversion formulas", () => {
     orderFromOpenPercent: 0,
     buyoutPercent: 0,
   });
+});
+
+
+test("uses official comparison values and never turns a zero or unknown baseline into a fake percentage", () => {
+  assert.equal(formatMarketChange(27, 2780, 2189), "+27%");
+  assert.equal(formatMarketChange(-5, 18, 19), "-5%");
+  assert.equal(formatMarketChange(0, 2, 0), "新增");
+  assert.equal(formatMarketChange(0, 0, 0), "持平");
+  assert.equal(formatMarketChange(null, 10, null), "无对比");
+  assert.equal(formatMarketChange(NaN, 10), "无对比");
+  assert.equal(formatMarketChange(0, 100, 100), "+0%");
 });
