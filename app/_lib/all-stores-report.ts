@@ -64,7 +64,7 @@ export function invalidNewOrder(order: Pick<GroupOrder, "supplierStatus" | "wbSt
   return order.supplierStatus.toLowerCase() === "new" && ["declined_by_client", "canceled_by_client"].includes(order.wbStatus.toLowerCase());
 }
 
-export function buildAllStoresReport(stores: GroupStoreData[], from: string, to: string, settings: GroupSettings) {
+export function buildAllStoresReport(stores: GroupStoreData[], from: string, to: string, settings: GroupSettings, storeId = "") {
   const days = reportDays(from, to);
   const problems: string[] = [];
   const sources = new Map<string, { key: string; storeId: string; storeName: string; sellerSku: string; internalSku: string; specification: string; sku: string; automatic: boolean }>();
@@ -97,10 +97,12 @@ export function buildAllStoresReport(stores: GroupStoreData[], from: string, to:
     sources.set(key, { key, storeId: store.storeId, storeName: store.storeName, sellerSku: sourceSku, internalSku: product?.internalSku || "", specification: product?.specification || "", sku, automatic: Boolean(custom) || automatic });
     return { key, sku, sellerSku: sourceSku, matched: Boolean(sellerSku || product || custom) };
   }
+  // Keep the full catalog context so filtering never changes SKU identities.
+  const includedStores = storeId ? stores.filter((store) => store.storeId === storeId) : stores;
   const events: ReportEvent[] = [];
   let pendingReturns = 0;
   const pendingOrders: Array<{ storeName: string; storeId: string; orderId: string; sku: string; createdAt: string }> = [];
-  for (const store of stores) {
+  for (const store of includedStores) {
     for (const warning of store.warnings) problems.push(`${store.storeName}：${warning}`);
     if (store.ordersState === "error") problems.push(`${store.storeName}：订单未读取成功`);
     else if (!store.ordersAt) problems.push(`${store.storeName}：订单缺少可核验的同步时间，请同步本页`);
@@ -170,7 +172,7 @@ export function buildAllStoresReport(stores: GroupStoreData[], from: string, to:
     return { monday, sunday, partial: from > monday || to < sunday, rows: skuList.map((sku) => ({ sku, orders: selected.filter((event) => event.sku === sku && event.kind === "order").length, returns: selected.filter((event) => event.sku === sku && event.kind === "return").length })) };
   });
   const totals = skuList.map((sku) => ({ sku, orders: events.filter((event) => event.sku === sku && event.kind === "order" && !event.excluded).length, returns: events.filter((event) => event.sku === sku && event.kind === "return").length }));
-  return { from, to, zone: settings.zone, basis: settings.basis, days, skuList, sources: [...sources.values()], events, daily, returnsDaily, weeks, totals, pendingReturns, pendingOrders, excluded: events.filter((event) => event.excluded).length, problems: [...new Set(problems)], complete: stores.length > 0 && problems.length === 0 };
+  return { from, to, zone: settings.zone, basis: settings.basis, days, skuList, sources: [...sources.values()], events, daily, returnsDaily, weeks, totals, pendingReturns, pendingOrders, excluded: events.filter((event) => event.excluded).length, problems: [...new Set(problems)], complete: includedStores.length > 0 && problems.length === 0 };
 }
 export type AllStoresReport = ReturnType<typeof buildAllStoresReport>;
 export function csvCell(value: unknown) {

@@ -203,21 +203,29 @@ export async function PUT(request: Request) {
 export async function POST(request: Request) {
   try {
     if (persistenceBackend() === "none") return json({ error: "尚未配置存储，无法保存结算快照" }, 503);
-    const body = await request.json() as { from: string; to: string; version: string; sourceTimes: Record<string, string> };
+    const body = await request.json() as { from: string; to: string; storeId?: string; version: string; sourceTimes: Record<string, string> };
     reportDays(body.from, body.to);
     const config = await settings();
     if (config.version !== body.version) return json({ error: "请先保存 SKU 设置，再保存数量快照" }, 409);
     const registry = await allEnabledWbStores(env);
+    if (body.storeId !== undefined && typeof body.storeId !== "string") return json({ error: "店铺编号无效" }, 400);
+    const storeId = body.storeId || "";
+    const selected = registry.find((store) => store.id === storeId);
+    if (storeId && !selected) return json({ error: "店铺不存在或已停用" }, 400);
     const records = await Promise.all(registry.map((store) => readSyncSnapshot(`all-stores-source:v2:${store.id}`)));
-    if (records.some((record) => !record)) return json({ error: "还有店铺尚未完成同步，不能保存完整结算快照" }, 409);
-    const sources = records.map((record, index) => ({ ...JSON.parse(record!.payload) as GroupStoreData, storeName: registry[index].name }));
-    if (sources.some((source) => !source.ordersAt || !source.returnsAt || !source.suppliesAt || [source.ordersAt, source.returnsAt, source.suppliesAt].some((at) => Date.now() - Date.parse(at) > 300_000) || body.sourceTimes[source.storeId] !== `${source.ordersAt}|${source.returnsAt}|${source.suppliesAt}`)) return json({ error: "数据已更新或超过 5 分钟，请同步核对后再保存" }, 409);
-    const report = buildAllStoresReport(sources, body.from, body.to, config);
+    if (records.some((record, index) => !record && (!storeId || registry[index].id === storeId))) return json({ error: "所选店铺尚未完成同步，不能保存完整结算快照" }, 409);
+    // Retain all available catalogs, but only require selected stores' data.
+    const sources = records.flatMap((record, index) => record ? [{ ...JSON.parse(record.payload) as GroupStoreData, storeId: registry[index].id, storeName: registry[index].name }] : []);
+    const scopedSources = storeId ? sources.filter((source) => source.storeId === storeId) : sources;
+    if (scopedSources.some((source) => !source.ordersAt || !source.returnsAt || !source.suppliesAt || [source.ordersAt, source.returnsAt, source.suppliesAt].some((at) => !Number.isFinite(Date.parse(at)) || Date.now() - Date.parse(at) > 300_000) || body.sourceTimes?.[source.storeId] !== `${source.ordersAt}|${source.returnsAt}|${source.suppliesAt}`)) return json({ error: "数据已更新或超过 5 分钟，请同步核对后再保存" }, 409);
+    const report = buildAllStoresReport(sources, body.from, body.to, config, storeId);
+    const scope = { storeId, storeName: selected?.name || "" };
+    const sourceTimes = Object.fromEntries(scopedSources.map((source) => [source.storeId, `${source.ordersAt}|${source.returnsAt}|${source.suppliesAt}`]));
     if (!report.complete || report.sources.some((source) => !source.automatic && report.events.some((event) => !event.excluded && event.sourceKey === source.key))) return json({ error: "仍有同步或 SKU 对应待核对，不能保存完整结算快照" }, 409);
     const id = crypto.randomUUID();
     const savedAt = new Date().toISOString();
-    await writeSyncSnapshot(`all-stores-statement:v2:${id}`, JSON.stringify({ id, savedAt, report, settings: config, sourceTimes: body.sourceTimes }), savedAt);
-    if (env.AUTH_KV) await env.AUTH_KV.put(`${STATEMENT_INDEX_PREFIX}${savedAt}:${id}`, JSON.stringify({ id, savedAt, from: body.from, to: body.to, orders: report.totals.reduce((sum, row) => sum + row.orders, 0), returns: report.totals.reduce((sum, row) => sum + row.returns, 0) })).catch(() => console.warn("ALL_STORES_STATEMENT_INDEX_FAILED"));
+    await writeSyncSnapshot(`all-stores-statement:v2:${id}`, JSON.stringify({ id, savedAt, ...scope, report, settings: config, sourceTimes }), savedAt);
+    if (env.AUTH_KV) await env.AUTH_KV.put(`${STATEMENT_INDEX_PREFIX}${savedAt}:${id}`, JSON.stringify({ id, savedAt, ...scope, from: body.from, to: body.to, orders: report.totals.reduce((sum, row) => sum + row.orders, 0), returns: report.totals.reduce((sum, row) => sum + row.returns, 0) })).catch(() => console.warn("ALL_STORES_STATEMENT_INDEX_FAILED"));
     return json({ id, savedAt });
   } catch { return json({ error: "结算快照保存失败，未确认成功前请重试" }, 503); }
 }

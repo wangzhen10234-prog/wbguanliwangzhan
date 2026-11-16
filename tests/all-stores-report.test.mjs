@@ -102,3 +102,56 @@ test("supply pagination follows next even when WB returns only 100 or fewer for 
   assert.throws(() => supplyOrderIds({ orderIds: [0] }));
   await assert.rejects(loadSupplyList(async () => ({ supplies: [{ id: "a", createdAt: syncedAt }], next: 12 })), /PAGINATION/);
 });
+
+test("store filter scopes every quantity, pending item and issue without changing catalog or SKU mappings", () => {
+  const a = store("a", {
+    orders: [order(1), order(2, { supplierStatus: "new" }), order(3, { supplierStatus: "new", wbStatus: "declined_by_client" })],
+    supplies: [supply("shared-batch-id", [1, 3])],
+    returns: [returned("same-return-id"), returned("pending", { completedAt: "", active: true })],
+  });
+  const b = store("b", {
+    orders: [order(1), order(2), order(4, { supplierStatus: "new" })],
+    supplies: [supply("shared-batch-id", [1, 2])],
+    returns: [returned("same-return-id"), returned("other-return")],
+    ordersState: "cached", warnings: ["b-only failure"],
+  });
+  const config = { ...settings, mappings: { [sourceSkuKey("a", "wz810L")]: "用户SKU", [sourceSkuKey("b", "wz810L")]: "用户SKU" } };
+  const before = structuredClone([a, b, config]);
+  const all = buildAllStoresReport([a, b], "2026-11-09", "2026-11-09", config);
+  const filtered = buildAllStoresReport([a, b], "2026-11-09", "2026-11-09", config, "a");
+  assert.deepEqual(filtered.events, all.events.filter((event) => event.storeId === "a"));
+  assert.deepEqual(filtered.totals, [{ sku: "用户SKU", orders: 1, returns: 1 }]);
+  assert.equal(filtered.daily[0].total, 1);
+  assert.equal(filtered.returnsDaily[0].total, 1);
+  assert.deepEqual(filtered.weeks[0].rows, [{ sku: "用户SKU", orders: 1, returns: 1 }]);
+  assert.equal(filtered.pendingOrders.length, 1);
+  assert.equal(filtered.pendingOrders[0].storeId, "a");
+  assert.equal(filtered.pendingReturns, 1);
+  assert.equal(filtered.excluded, 1);
+  assert.ok(filtered.sources.every((source) => source.storeId === "a"));
+  assert.deepEqual(filtered.problems, []);
+  assert.equal(filtered.complete, true);
+  assert.equal(all.complete, false);
+  const other = buildAllStoresReport([a, b], "2026-11-09", "2026-11-09", config, "b");
+  assert.deepEqual(other.totals, [{ sku: "用户SKU", orders: 2, returns: 2 }]);
+  assert.equal(other.pendingReturns, 0);
+  assert.equal(other.excluded, 0);
+  assert.equal(other.complete, false);
+  assert.deepEqual(buildAllStoresReport([a, b], "2026-11-09", "2026-11-09", config, ""), all);
+  assert.deepEqual([a, b, config], before);
+});
+
+test("filter preserves globally ambiguous SKU names, and missing stores never fall back to all shops", () => {
+  const a = store("a");
+  const b = store("b", { products: [{ sellerSku: "wz810L", internalSku: "810L", specification: "另一种规格", nmId: 10 }] });
+  const all = buildAllStoresReport([a, b], "2026-11-09", "2026-11-09", settings);
+  const filtered = buildAllStoresReport([a, b], "2026-11-09", "2026-11-09", settings, "a");
+  assert.deepEqual(filtered.events, all.events.filter((event) => event.storeId === "a"));
+  assert.deepEqual(filtered.skuList, ["a / wz810L"]);
+  assert.equal(filtered.sources[0].automatic, false);
+  const missing = buildAllStoresReport([a, b], "2026-11-09", "2026-11-09", settings, "deleted");
+  assert.equal(missing.complete, false);
+  assert.deepEqual(missing.events, []);
+  assert.deepEqual(missing.pendingOrders, []);
+  assert.deepEqual(missing.skuList, []);
+});
